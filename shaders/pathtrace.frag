@@ -1,12 +1,15 @@
 #version 460
 #extension GL_EXT_ray_query : require
-// Path tracer over the cells as diffuse spheres, lit by a sun of adjustable size and by the sky.
-// Each frame adds a few samples per pixel; the output is blended into a running mean (the alpha
-// written here is the weight of this frame), so the image converges while the view stands still.
+// Path tracer over the cells as diffuse spheres or over the membrane, lit by a sun of
+// adjustable size and by the sky. The membrane is a thin sheet: a share of the light goes
+// through it (F.pt.w), which is what makes it look like tissue. Each frame adds a few samples
+// per pixel; the output is blended into a running mean (the alpha written here is the weight
+// of this frame), so the image converges while the view stands still.
 #include "frame.glsl"
 #include "palette.glsl"
 #include "screen.glsl"
 #include "rt_common.glsl"
+#include "rt_surface.glsl"
 
 layout(location = 0) in vec2 vUV;
 layout(location = 0) out vec4 outColor;
@@ -16,27 +19,38 @@ vec3 skyLight(vec3 d) { return mix(F.ground.rgb, F.sky.rgb, 0.5 + 0.5 * d.y) * F
 vec3 radiance(vec3 o, vec3 d, vec2 uv) {
     vec3 through = vec3(1.0), light = vec3(0.0);
     int bounces = max(int(F.pt.x + 0.5), 1);
-    float r = F.sphere.x;
+    float offset = 0.01 * F.sphere.x;
+    float passes = F.pt.w;  // share of the light that goes through the sheet
     for (int k = 0; k <= bounces; ++k) {
         float t;
-        int cell;
-        if (!nearestCell(o, d, 0.0, 1.0e30, t, cell)) {
+        vec3 n, albedo;
+        if (!nearestSurface(o, d, t, n, albedo)) {
             // The camera sees the background behind the form; bounced rays see the sky.
             light += through * (k == 0 ? backgroundColor(uv) : skyLight(d));
             break;
         }
         if (k == bounces) break;  // the path is cut here
         vec3 p = o + d * t;
-        vec3 n = normalize(p - cellCentre(cell));
-        vec3 albedo = cellAlbedo(cellScalar(cellBirth[cell], cellFood[cell], cellExtra[cell]));
-        vec3 start = p + n * (0.01 * r);
-        // The sun, sampled directly: a direction inside its disc.
+        if (dot(n, d) > 0.0) n = -n;  // the side the ray arrives on
+        vec3 front = p + n * offset, back = p - n * offset;
+        // The sun, sampled directly: a direction inside its disc. It lights the side it shines
+        // on, and through the sheet a share of it lights the other side.
         vec3 toSun = coneDirection(F.sunWorld.xyz, F.sunWorld.w);
         float ndl = dot(n, toSun);
-        if (ndl > 0.0 && !occluded(start, toSun, 0.0, 1.0e30)) light += through * albedo * F.lightColor.rgb * (F.ground.a * ndl);
+        vec3 sun = albedo * F.lightColor.rgb * F.ground.a;
+        if (ndl > 0.0) {
+            if (!occluded(front, toSun, 0.0, 1.0e30)) light += through * sun * ((1.0 - passes) * ndl);
+        } else if (passes > 0.0) {
+            if (!occluded(back, toSun, 0.0, 1.0e30)) light += through * sun * (passes * -ndl);
+        }
         through *= albedo;
-        o = start;
-        d = cosineDirection(n);
+        if (passes > 0.0 && rnd() < passes) {
+            o = back;
+            d = cosineDirection(-n);
+        } else {
+            o = front;
+            d = cosineDirection(n);
+        }
     }
     return light;
 }

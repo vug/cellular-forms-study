@@ -583,11 +583,12 @@ void Window::buildUi() {
     const bool canTrace = renderer_->rayTracing();
     const bool membraneMode = settings_.drawMode == kDrawMembrane || settings_.drawMode == kDrawMembraneSss;
     if (ImGui::CollapsingHeader("Draw", ImGuiTreeNodeFlags_DefaultOpen)) {
-        const char* drawModes[] = {"cells", "x-ray", "membrane", "membrane, subsurface scattering", "cells, path traced"};
-        ImGui::Combo("draw as", &settings_.drawMode, drawModes, 5);
-        if (membraneMode && !sc.buffers.index) ImGui::TextDisabled("no membrane in this data (needs a checkpoint): cells are drawn");
-        if (settings_.drawMode == kDrawPathTraced) {
-            if (!canTrace) ImGui::TextDisabled("this GPU has no ray tracing: cells are drawn");
+        const char* drawModes[] = {"cells", "x-ray", "membrane", "membrane, subsurface scattering", "cells, path traced", "membrane, path traced"};
+        ImGui::Combo("draw as", &settings_.drawMode, drawModes, 6);
+        if ((membraneMode || settings_.drawMode == kDrawMembranePathTraced) && !sc.buffers.index)
+            ImGui::TextDisabled("no membrane in this data (needs a checkpoint): cells are drawn");
+        if (settings_.drawMode == kDrawPathTraced || settings_.drawMode == kDrawMembranePathTraced) {
+            if (!canTrace) ImGui::TextDisabled("this GPU has no ray tracing: drawn without it");
             else ImGui::Text("%u of %d samples per pixel", renderer_->accumulatedSamples(), settings_.ptMaxSamples);
         }
         ImGui::SliderFloat("cell radius", &settings_.sphereRadius, 0.1f, 1.5f);
@@ -649,7 +650,7 @@ void Window::buildUi() {
         for (int i = 0; i < 4; ++i)
             if (settings_.shadowMapSize == sizes[i]) sizeIndex = i;
         if (ImGui::Combo("map size", &sizeIndex, sizeNames, 4)) settings_.shadowMapSize = sizes[sizeIndex];
-        if (settings_.drawMode == kDrawXray || settings_.drawMode == kDrawPathTraced)
+        if (settings_.drawMode == kDrawXray || settings_.drawMode >= kDrawPathTraced)
             ImGui::TextDisabled("not used by this draw mode (the path tracer casts its own)");
     }
 
@@ -657,10 +658,10 @@ void Window::buildUi() {
         ImGui::Checkbox("ambient occlusion", &settings_.aoEnabled);
         ImGui::SliderFloat("occlusion strength", &settings_.aoIntensity, 0.0f, 2.0f);
         ImGui::BeginDisabled(!canTrace);
-        ImGui::Checkbox("ray traced (cells mode)", &settings_.rtAo);
+        ImGui::Checkbox("ray traced", &settings_.rtAo);
         ImGui::EndDisabled();
         if (!canTrace) ImGui::TextDisabled("this GPU has no ray tracing");
-        if (settings_.rtAo && canTrace && settings_.drawMode == kDrawCells) {
+        if (settings_.rtAo && canTrace && (settings_.drawMode == kDrawCells || membraneMode)) {
             ImGui::SliderInt("rays per pixel", &settings_.rtAoRays, 1, 32);
             ImGui::SliderFloat("ray length", &settings_.rtAoRadius, 0.5f, 60.0f);
         } else {
@@ -694,6 +695,7 @@ void Window::buildUi() {
         ImGui::SliderFloat("sky intensity", &settings_.ptSkyIntensity, 0.0f, 4.0f);
         ImGui::SliderFloat("lens radius", &settings_.ptAperture, 0.0f, 3.0f);
         ImGui::SliderFloat("focus distance", &settings_.ptFocus, 0.0f, std::max(2.0f * camera_.distance, 1.0f), settings_.ptFocus <= 0.0f ? "orbit point" : "%.1f");
+        ImGui::SliderFloat("light through the membrane", &settings_.ptTranslucency, 0.0f, 0.9f);
         ImGui::EndDisabled();
         ImGui::TextDisabled("lit by the key light and the sky and ground colours");
     }
@@ -807,7 +809,8 @@ void Window::drawFrame() {
             }
         }
         // What the simulation has to publish besides positions, age and food.
-        live_->setRenderNeeds(extraKindFor(settings_.colorMode), settings_.drawMode == kDrawMembrane || settings_.drawMode == kDrawMembraneSss);
+        live_->setRenderNeeds(extraKindFor(settings_.colorMode), settings_.drawMode == kDrawMembrane || settings_.drawMode == kDrawMembraneSss ||
+                                                                      settings_.drawMode == kDrawMembranePathTraced);
         // Switch to the newest frame the simulation has published; never waits for a step.
         liveFrame_ = live_->acquire();
         liveStatus_ = live_->status();

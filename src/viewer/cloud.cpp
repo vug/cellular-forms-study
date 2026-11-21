@@ -139,7 +139,7 @@ void CloudGpu::setExtra(const Cloud& cloud, int extraKind) {
     extraKind_ = 0;
     const std::vector<float>* values = cloud.extra(extraKind);
     if (values != nullptr && cloud.count() == count_) {
-        extra_ = ctx_.createBuffer(static_cast<VkDeviceSize>(count_) * sizeof(float), kCellBufferUsage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        extra_ = ctx_.createBuffer(static_cast<VkDeviceSize>(count_) * sizeof(float), cellBufferUsage(ctx_) | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         ctx_.upload(extra_, values->data(), static_cast<VkDeviceSize>(count_) * sizeof(float));
         extraKind_ = extraKind;
@@ -154,7 +154,7 @@ void CloudGpu::upload(const Cloud& cloud, int extraKind) {
         ctx_.destroy(birth_);
         ctx_.destroy(food_);
         capacity_ = std::max<std::uint32_t>(n + n / 4, 1024u);
-        const VkBufferUsageFlags usage = kCellBufferUsage | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        const VkBufferUsageFlags usage = cellBufferUsage(ctx_) | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         const VkMemoryPropertyFlags props = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
         pos_ = ctx_.createBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(cf::Vec3), usage, props);
         birth_ = ctx_.createBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(std::uint32_t), usage, props);
@@ -172,9 +172,9 @@ void CloudGpu::upload(const Cloud& cloud, int extraKind) {
     indexCount_ = 0;
     if (!cloud.indices.empty() && cloud.normal.size() == cloud.pos.size()) {
         const VkMemoryPropertyFlags props = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-        normal_ = ctx_.createBuffer(static_cast<VkDeviceSize>(n) * sizeof(cf::Vec3), kCellBufferUsage | VK_BUFFER_USAGE_TRANSFER_DST_BIT, props);
+        normal_ = ctx_.createBuffer(static_cast<VkDeviceSize>(n) * sizeof(cf::Vec3), cellBufferUsage(ctx_) | VK_BUFFER_USAGE_TRANSFER_DST_BIT, props);
         index_ = ctx_.createBuffer(cloud.indices.size() * sizeof(std::uint32_t),
-                                   VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, props);
+                                   cellBufferUsage(ctx_, true) | VK_BUFFER_USAGE_TRANSFER_DST_BIT, props);
         ctx_.upload(normal_, cloud.normal.data(), static_cast<VkDeviceSize>(n) * sizeof(cf::Vec3));
         ctx_.upload(index_, cloud.indices.data(), cloud.indices.size() * sizeof(std::uint32_t));
         indexCount_ = static_cast<std::uint32_t>(cloud.indices.size());

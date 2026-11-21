@@ -39,7 +39,7 @@ void main() {
     vec4 clip = F.proj * vec4(hit, 1.0);
     gl_FragDepth = clip.z / clip.w;
 
-    outAlbedo = vec4(cellAlbedo(vScalar), 1.0);
+    outAlbedo = vec4(cellAlbedo(vScalar), 0.0);  // a: cell wall coverage, which only the membrane knows
     outNormalDepth = vec4(normal, -hit.z);
     outId = vId;
 }

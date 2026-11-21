@@ -37,7 +37,7 @@ std::vector<std::uint8_t> renderOffscreen(Context& ctx, const PointBuffers& poin
     const FrameSetup frame = renderer.makeUniforms(camera, s, sceneCentre, sceneRadius, currentStep, 0);
 
     // The path tracer refines its image frame by frame: render until it has all its samples.
-    if (s.drawMode == kDrawPathTraced && renderer.rayTracing()) {
+    if (s.drawMode >= kDrawPathTraced && renderer.rayTracing()) {
         const int perFrame = std::clamp(s.ptSamplesPerFrame, 1, 64);
         const int frames = (std::max(s.ptMaxSamples, 1) + perFrame - 1) / perFrame;
         for (int i = 0; i + 1 < frames; ++i) {

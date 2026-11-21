@@ -59,7 +59,14 @@ inline int extraKindFor(ColorMode m) {
     return m == ColorMode::Generation ? 1 : m == ColorMode::Curvature ? 2 : m == ColorMode::Activator ? 3 : 0;
 }
 
-enum DrawMode : int { kDrawCells = 0, kDrawXray = 1, kDrawMembrane = 2, kDrawMembraneSss = 3, kDrawPathTraced = 4 };
+enum DrawMode : int {
+    kDrawCells = 0,
+    kDrawXray = 1,
+    kDrawMembrane = 2,
+    kDrawMembraneSss = 3,
+    kDrawPathTraced = 4,          // the cells as spheres, path traced
+    kDrawMembranePathTraced = 5,  // the membrane, path traced
+};
 
 struct RenderSettings {
     // --- what the cells are drawn as: spheres, x-ray (additive density, nothing hides anything),
@@ -136,6 +143,7 @@ struct RenderSettings {
     float ptSkyIntensity = 0.7f;
     float ptAperture = 0.0f;      // lens radius in world units (0 = everything sharp)
     float ptFocus = 0.0f;         // focus distance (0 = the point the camera orbits)
+    float ptTranslucency = 0.3f;  // path traced membrane: share of the light that goes through the sheet
 
     // --- output
     float exposure = 1.0f;
@@ -200,7 +208,7 @@ private:
     void destroyImages();
     void writeDescriptors();
     void ensureShadowMap(uint32_t size);
-    void updateCellTree(VkCommandBuffer cmd, const PointBuffers& points, float radius);
+    void updateCellTree(VkCommandBuffer cmd, const PointBuffers& points, float radius, bool mesh);
     void destroyCellTree();
 
     Context& ctx_;
@@ -224,17 +232,19 @@ private:
                shadowCellsPipeline_ = VK_NULL_HANDLE, shadowMeshPipeline_ = VK_NULL_HANDLE, rtaoPipeline_ = VK_NULL_HANDLE,
                pathTracePipeline_ = VK_NULL_HANDLE, boxPipeline_ = VK_NULL_HANDLE;
 
-    // What the ray-traced modes trace against: a box per cell in a bottom-level acceleration
-    // structure, under a top-level one with a single instance. Rebuilt when the cells change.
+    // What the ray-traced modes trace against: a bottom-level acceleration structure with a
+    // box per cell (cells as spheres) or with the triangles of the membrane, under a top-level
+    // one with a single instance. Rebuilt when the cells change.
     struct CellTree {
         Buffer boxes, blasStore, tlasStore, scratch, instance;
         VkAccelerationStructureKHR blas = VK_NULL_HANDLE, tlas = VK_NULL_HANDLE;
-        uint32_t capacity = 0;
+        uint32_t capacity = 0;  // primitives (cells or triangles) everything is sized for
+        bool mesh = false;      // triangles of the membrane instead of boxes
         VkDeviceAddress scratchAddress = 0;
         uint64_t version = ~uint64_t{0};
         uint32_t count = 0;
         float radius = -1.0f;
-        VkBuffer bound[4] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+        VkBuffer bound[6] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
     } tree_;
     PFN_vkCreateAccelerationStructureKHR createAs_ = nullptr;
     PFN_vkDestroyAccelerationStructureKHR destroyAs_ = nullptr;

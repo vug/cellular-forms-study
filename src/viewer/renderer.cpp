@@ -347,16 +347,20 @@ Renderer::Renderer(Context& ctx, VkFormat targetFormat) : ctx_(ctx), targetForma
     std::vector<VkDescriptorPoolSize> sizes = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 8}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32}};
     if (ctx_.hasRayTracing) {
         // Set 1 of the ray-traced passes: the acceleration structure and the per-cell buffers.
-        VkDescriptorSetLayoutBinding rt[6]{};
+        // 0 the structure, 1 positions, 2 birth steps, 3 food, 4 the extra scalar, 5 the boxes
+        // (written by the compute pass), 6 normals and 7 triangle indices (membrane).
+        VkDescriptorSetLayoutBinding rt[8]{};
         rt[0] = {0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
         rt[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         for (uint32_t i = 2; i < 5; ++i) rt[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
         rt[5] = {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        rt[6] = {6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+        rt[7] = {7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
         VkDescriptorSetLayoutCreateInfo rli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        rli.bindingCount = 6;
+        rli.bindingCount = 8;
         rli.pBindings = rt;
         vk_check(vkCreateDescriptorSetLayout(ctx_.device, &rli, nullptr, &rtSetLayout_), "vkCreateDescriptorSetLayout (ray tracing)");
-        sizes.push_back({VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5});
+        sizes.push_back({VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7});
         sizes.push_back({VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1});
     }
     VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -622,6 +626,7 @@ FrameSetup Renderer::makeUniforms(const OrbitCamera& camera, const RenderSetting
     }
     int drawMode = s.drawMode;
     if (drawMode == kDrawPathTraced && !ctx_.hasRayTracing) drawMode = kDrawCells;
+    if (drawMode == kDrawMembranePathTraced && !ctx_.hasRayTracing) drawMode = kDrawMembrane;
     const bool shadows = s.shadows && s.shadowStrength > 0.0f && (drawMode == kDrawCells || drawMode == kDrawMembrane || drawMode == kDrawMembraneSss);
     u.light[0] = lightView.x;
     u.light[1] = lightView.y;
@@ -693,30 +698,53 @@ void Renderer::destroyCellTree() {
     tree_ = CellTree{};
 }
 
-// Brings the acceleration structure up to date with the cells: a compute pass writes the box of
-// every cell, the bottom level is built over the boxes, the top level over its one instance.
-// Recorded into the frame, before any render pass. Skipped while nothing has changed.
-void Renderer::updateCellTree(VkCommandBuffer cmd, const PointBuffers& points, float radius) {
-    const VkBuffer wanted[4] = {points.pos, points.birth, points.food, points.extra ? points.extra : points.food};
-    const bool sameBuffers = std::equal(wanted, wanted + 4, tree_.bound);
-    if (tree_.blas && sameBuffers && tree_.version == points.version && tree_.count == points.count && tree_.radius == radius) return;
+// Brings the acceleration structure up to date with the cells. Cells as spheres: a compute pass
+// writes the box of every cell and the bottom level is built over the boxes. Membrane: the bottom
+// level is built over its triangles. The top level has one instance of it. Recorded into the
+// frame, before any render pass. Skipped while nothing has changed.
+void Renderer::updateCellTree(VkCommandBuffer cmd, const PointBuffers& points, float radius, bool mesh) {
+    const uint32_t primitives = mesh ? points.indexCount / 3u : points.count;
+    const VkBuffer wanted[6] = {points.pos,    points.birth, points.food, points.extra ? points.extra : points.food,
+                                mesh ? points.normal : points.food, mesh ? points.index : points.birth};
+    const bool sameBuffers = std::equal(wanted, wanted + 6, tree_.bound);
+    if (tree_.blas && tree_.mesh == mesh && sameBuffers && tree_.version == points.version && tree_.count == primitives &&
+        (mesh || tree_.radius == radius))
+        return;
 
     const VkBufferUsageFlags address = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     const VkBufferUsageFlags input = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | address;
     const VkBufferUsageFlags store = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | address;
     const VkMemoryPropertyFlags local = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    auto addressOf = [&](VkBuffer buffer) {
+        VkBufferDeviceAddressInfo info{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+        info.buffer = buffer;
+        return vkGetBufferDeviceAddress(ctx_.device, &info);
+    };
 
-    VkAccelerationStructureGeometryKHR boxes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
-    boxes.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
-    boxes.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
-    boxes.geometry.aabbs.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
-    boxes.geometry.aabbs.stride = 6 * sizeof(float);
+    const bool grow = primitives > tree_.capacity || !tree_.blas || tree_.mesh != mesh;
+    const uint32_t capacity = grow ? primitives + primitives / 4u + 1024u : tree_.capacity;
+
+    VkAccelerationStructureGeometryKHR shape{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+    shape.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    if (mesh) {
+        shape.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+        shape.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+        shape.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+        shape.geometry.triangles.vertexStride = 3 * sizeof(float);
+        shape.geometry.triangles.indexType = VK_INDEX_TYPE_UINT32;
+        // A closed sheet has more triangles than cells, so the capacity bounds the vertices too.
+        shape.geometry.triangles.maxVertex = capacity;
+    } else {
+        shape.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
+        shape.geometry.aabbs.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
+        shape.geometry.aabbs.stride = 6 * sizeof(float);
+    }
     VkAccelerationStructureBuildGeometryInfoKHR bottom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
     bottom.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
     bottom.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;  // rebuilt whenever the cells move
     bottom.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     bottom.geometryCount = 1;
-    bottom.pGeometries = &boxes;
+    bottom.pGeometries = &shape;
 
     VkAccelerationStructureGeometryKHR instances{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
     instances.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
@@ -728,16 +756,18 @@ void Renderer::updateCellTree(VkCommandBuffer cmd, const PointBuffers& points, f
     top.geometryCount = 1;
     top.pGeometries = &instances;
 
-    bool rewriteTree = false;
-    if (points.count > tree_.capacity || !tree_.blas) {
-        // Grow: everything is sized for the capacity, so it is not rebuilt for every new cell.
+    if (grow) {
+        // Everything is sized for the capacity, so it is not rebuilt for every new cell.
         vkDeviceWaitIdle(ctx_.device);
         destroyCellTree();
-        tree_.capacity = points.count + points.count / 4u + 1024u;
-        tree_.boxes = ctx_.createBuffer(static_cast<VkDeviceSize>(tree_.capacity) * 6 * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | input, local);
+        tree_.capacity = capacity;
+        tree_.mesh = mesh;
+        // The boxes of the cells (the membrane needs none, but the binding needs a buffer).
+        tree_.boxes = ctx_.createBuffer(mesh ? 6 * sizeof(float) : static_cast<VkDeviceSize>(capacity) * 6 * sizeof(float),
+                                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | input, local);
 
         VkAccelerationStructureBuildSizesInfoKHR bottomSizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-        buildSizes_(ctx_.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bottom, &tree_.capacity, &bottomSizes);
+        buildSizes_(ctx_.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bottom, &capacity, &bottomSizes);
         const uint32_t one = 1;
         VkAccelerationStructureBuildSizesInfoKHR topSizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
         buildSizes_(ctx_.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &top, &one, &topSizes);
@@ -770,28 +800,29 @@ void Renderer::updateCellTree(VkCommandBuffer cmd, const PointBuffers& points, f
         VkAccelerationStructureInstanceKHR inst{};
         inst.transform.matrix[0][0] = inst.transform.matrix[1][1] = inst.transform.matrix[2][2] = 1.0f;
         inst.mask = 0xFF;
+        inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;  // both sides of the sheet
         VkAccelerationStructureDeviceAddressInfoKHR ai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
         ai.accelerationStructure = tree_.blas;
         inst.accelerationStructureReference = asAddress_(ctx_.device, &ai);
         std::memcpy(tree_.instance.mapped, &inst, sizeof inst);
-        rewriteTree = true;
     }
 
-    if (rewriteTree || !sameBuffers) {
+    if (grow || !sameBuffers) {
         VkWriteDescriptorSetAccelerationStructureKHR asWrite{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
         asWrite.accelerationStructureCount = 1;
         asWrite.pAccelerationStructures = &tree_.tlas;
-        VkDescriptorBufferInfo infos[5];
-        for (int i = 0; i < 4; ++i) infos[i] = VkDescriptorBufferInfo{wanted[i], 0, VK_WHOLE_SIZE};
-        infos[4] = VkDescriptorBufferInfo{tree_.boxes.buffer, 0, VK_WHOLE_SIZE};
-        VkWriteDescriptorSet writes[6]{};
+        // Bindings 1..7: positions, birth, food, extra, boxes, normals, triangle indices.
+        const VkBuffer buffers[7] = {wanted[0], wanted[1], wanted[2], wanted[3], tree_.boxes.buffer, wanted[4], wanted[5]};
+        VkDescriptorBufferInfo infos[7];
+        for (int i = 0; i < 7; ++i) infos[i] = VkDescriptorBufferInfo{buffers[i], 0, VK_WHOLE_SIZE};
+        VkWriteDescriptorSet writes[8]{};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[0].pNext = &asWrite;
         writes[0].dstSet = rtSet_;
         writes[0].dstBinding = 0;
         writes[0].descriptorCount = 1;
         writes[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-        for (uint32_t i = 0; i < 5; ++i) {
+        for (uint32_t i = 0; i < 7; ++i) {
             writes[i + 1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i + 1].dstSet = rtSet_;
             writes[i + 1].dstBinding = i + 1;
@@ -799,26 +830,32 @@ void Renderer::updateCellTree(VkCommandBuffer cmd, const PointBuffers& points, f
             writes[i + 1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[i + 1].pBufferInfo = &infos[i];
         }
-        vkUpdateDescriptorSets(ctx_.device, 6, writes, 0, nullptr);
-        std::copy(wanted, wanted + 4, tree_.bound);
+        vkUpdateDescriptorSets(ctx_.device, 8, writes, 0, nullptr);
+        std::copy(wanted, wanted + 6, tree_.bound);
     }
 
-    // Boxes from the positions.
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, boxPipeline_);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, rtLayout_, 1, 1, &rtSet_, 0, nullptr);
-    struct {
-        uint32_t count;
-        float radius;
-    } push{points.count, radius};
-    vkCmdPushConstants(cmd, rtLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof push, &push);
-    vkCmdDispatch(cmd, (points.count + 255u) / 256u, 1, 1);
-    memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                  VK_ACCESS_2_SHADER_READ_BIT);
+    if (mesh) {
+        shape.geometry.triangles.vertexData.deviceAddress = addressOf(points.pos);
+        shape.geometry.triangles.indexData.deviceAddress = addressOf(points.index);
+        shape.geometry.triangles.maxVertex = points.count > 0 ? points.count - 1u : 0u;
+    } else {
+        // Boxes from the positions.
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, boxPipeline_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, rtLayout_, 1, 1, &rtSet_, 0, nullptr);
+        struct {
+            uint32_t count;
+            float radius;
+        } push{points.count, radius};
+        vkCmdPushConstants(cmd, rtLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof push, &push);
+        vkCmdDispatch(cmd, (points.count + 255u) / 256u, 1, 1);
+        memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                      VK_ACCESS_2_SHADER_READ_BIT);
+        shape.geometry.aabbs.data.deviceAddress = ctx_.address(tree_.boxes);
+    }
 
-    boxes.geometry.aabbs.data.deviceAddress = ctx_.address(tree_.boxes);
     bottom.dstAccelerationStructure = tree_.blas;
     bottom.scratchData.deviceAddress = tree_.scratchAddress;
-    const VkAccelerationStructureBuildRangeInfoKHR bottomRange{points.count, 0, 0, 0};
+    const VkAccelerationStructureBuildRangeInfoKHR bottomRange{primitives, 0, 0, 0};
     const VkAccelerationStructureBuildRangeInfoKHR* bottomRanges = &bottomRange;
     buildAs_(cmd, 1, &bottom, &bottomRanges);
     memoryBarrier(cmd, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
@@ -834,21 +871,28 @@ void Renderer::updateCellTree(VkCommandBuffer cmd, const PointBuffers& points, f
                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
 
     tree_.version = points.version;
-    tree_.count = points.count;
+    tree_.count = primitives;
     tree_.radius = radius;
 }
 
 void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBuffers& points, const FrameSetup& frame,
                       const RenderSettings& settings, const std::function<void(VkCommandBuffer)>& overlay) {
     FrameUniforms u = frame.uniforms;
-    const int drawMode = static_cast<int>(u.misc[2] + 0.5f);
+    int drawMode = static_cast<int>(u.misc[2] + 0.5f);
     const bool havePoints = points.count > 0 && points.pos && points.birth && points.food;
-    const bool membrane = (drawMode == kDrawMembrane || drawMode == kDrawMembraneSss) && havePoints && points.normal && points.index &&
-                          points.indexCount > 0;
-    const bool pathTraced = drawMode == kDrawPathTraced && ctx_.hasRayTracing && havePoints;
-    const bool tracedOcclusion = drawMode == kDrawCells && settings.rtAo && settings.aoEnabled && ctx_.hasRayTracing && havePoints;
+    // Data without a membrane (a snapshot file): the membrane modes draw the cells instead.
+    const bool haveMembrane = havePoints && points.normal && points.index && points.indexCount > 0;
+    if (drawMode == kDrawMembranePathTraced && !haveMembrane) drawMode = kDrawPathTraced;
+    if ((drawMode == kDrawMembrane || drawMode == kDrawMembraneSss) && !haveMembrane) drawMode = kDrawCells;
+    u.misc[2] = static_cast<float>(drawMode);
+    const bool membrane = drawMode == kDrawMembrane || drawMode == kDrawMembraneSss;
+    const bool pathTraced = (drawMode == kDrawPathTraced || drawMode == kDrawMembranePathTraced) && ctx_.hasRayTracing && havePoints;
+    const bool tracedOcclusion = (drawMode == kDrawCells || membrane) && settings.rtAo && settings.aoEnabled && ctx_.hasRayTracing && havePoints;
+    // What the rays meet: the triangles of the membrane, or the cells as spheres.
+    const bool traceMesh = drawMode == kDrawMembranePathTraced || (membrane && tracedOcclusion);
+    u.pt[3] = traceMesh ? std::clamp(settings.ptTranslucency, 0.0f, 1.0f) : 0.0f;
 
-    if (pathTraced || tracedOcclusion) updateCellTree(cmd, points, settings.sphereRadius);
+    if (pathTraced || tracedOcclusion) updateCellTree(cmd, points, settings.sphereRadius, traceMesh);
 
     // The path tracer refines a running mean for as long as nothing that shows in the image changes.
     uint32_t newSamples = 0;
@@ -1037,8 +1081,8 @@ const std::vector<Entry>& entries() {
     static const std::vector<Entry> table = {
         {"drawMode",
          [](RenderSettings& s, const std::string& v) {
-             const char* names[] = {"cells", "xray", "membrane", "sss", "path"};
-             for (int i = 0; i < 5; ++i)
+             const char* names[] = {"cells", "xray", "membrane", "sss", "path", "pathmesh"};
+             for (int i = 0; i < 6; ++i)
                  if (v == names[i]) {
                      s.drawMode = i;
                      return true;
@@ -1110,6 +1154,7 @@ const std::vector<Entry>& entries() {
         number("ptSkyIntensity", &RenderSettings::ptSkyIntensity),
         number("ptAperture", &RenderSettings::ptAperture),
         number("ptFocus", &RenderSettings::ptFocus),
+        number("ptTranslucency", &RenderSettings::ptTranslucency),
         number("exposure", &RenderSettings::exposure),
         whole("toneMap", &RenderSettings::toneMap),
         triple("background", &RenderSettings::background),

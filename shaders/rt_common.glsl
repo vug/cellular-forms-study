@@ -1,5 +1,6 @@
-// Ray tracing against the cells as spheres (needs frame.glsl and GL_EXT_ray_query). The
-// acceleration structure holds one box per cell; the exact ray-sphere test is done here.
+// Ray tracing against the cells (needs frame.glsl and GL_EXT_ray_query). The acceleration
+// structure holds either one box per cell, for cells drawn as spheres (the exact ray-sphere
+// test is done here), or the triangles of the membrane.
 layout(set = 1, binding = 0) uniform accelerationStructureEXT cellTree;
 layout(set = 1, binding = 1, std430) readonly buffer CellPos { float cellPos[]; };      // 3 per cell
 layout(set = 1, binding = 2, std430) readonly buffer CellBirth { uint cellBirth[]; };
@@ -19,7 +20,8 @@ float sphereEntry(vec3 o, vec3 d, vec3 c, float r) {
     return -b - sqrt(disc);
 }
 
-// True when any cell is hit between tmin and tmax.
+// True when anything is hit between tmin and tmax. Triangles are accepted by the traversal
+// itself; boxes are candidates that the sphere test confirms.
 bool occluded(vec3 o, vec3 d, float tmin, float tmax) {
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, cellTree, gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, o, tmin, d, tmax);
@@ -30,22 +32,6 @@ bool occluded(vec3 o, vec3 d, float tmin, float tmax) {
         }
     }
     return rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT;
-}
-
-// The nearest cell hit between tmin and tmax.
-bool nearestCell(vec3 o, vec3 d, float tmin, float tmax, out float t, out int cell) {
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, cellTree, gl_RayFlagsNoneEXT, 0xFF, o, tmin, d, tmax);
-    while (rayQueryProceedEXT(rq)) {
-        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
-            float e = sphereEntry(o, d, cellCentre(rayQueryGetIntersectionPrimitiveIndexEXT(rq, false)), F.sphere.x);
-            if (e > tmin && e < tmax) rayQueryGenerateIntersectionEXT(rq, e);
-        }
-    }
-    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) return false;
-    t = rayQueryGetIntersectionTEXT(rq, true);
-    cell = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
-    return true;
 }
 
 // Random numbers: one stream per pixel and frame (PCG).

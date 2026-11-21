@@ -94,7 +94,7 @@ void main() {
     vec4 nd = textureLod(texNormalDepth, vUV, 0.0);
     int drawMode = int(F.misc.z + 0.5);
     vec3 color;
-    if (drawMode == 4) {
+    if (drawMode >= 4) {
         // Path traced: the running mean already holds the form and the background.
         color = textureLod(texAccum, vUV, 0.0).rgb * F.baseColor.a;
     } else if (drawMode == 1) {
@@ -108,7 +108,8 @@ void main() {
         color = backgroundColor(vUV);
     } else {
         vec3 n = normalize(nd.xyz);
-        vec3 albedo = textureLod(texAlbedo, vUV, 0.0).rgb;
+        vec4 albedoWall = textureLod(texAlbedo, vUV, 0.0);
+        vec3 albedo = albedoWall.rgb;
         float ao = textureLod(texAO, vUV, 0.0).r;
         uint id = textureLod(texId, vUV, 0.0).r;
         int debugView = int(F.misc.y + 0.5);
@@ -135,7 +136,10 @@ void main() {
                             (1.0 - ambient) * F.lightColor.rgb * (diffuse * mix(1.0, ao, 0.4) + through)) + spec * ao;
         }
         color = lit;
-        color = mix(color, F.wall.rgb, wallAt(id));
+        // Cell walls: the membrane pass knows its distance to the nearest wall exactly; for
+        // cells drawn as spheres the walls are where the cell under the pixel changes.
+        bool membrane = drawMode == 2 || drawMode == 3;
+        color = mix(color, F.wall.rgb, membrane ? albedoWall.a * F.wall.a : wallAt(id));
         color = mix(color, F.outline.rgb, outlineAt(nd.w));
         color *= F.baseColor.a;
 

@@ -61,7 +61,7 @@ LiveSim::LiveSim(Context& ctx, const LiveConfig& config) : ctx_(ctx), config_(co
         if (std::memcmp(cudaUuid, id.deviceUUID, 16) != 0)
             throw std::runtime_error("CUDA device 0 and the Vulkan device are different GPUs; buffer sharing needs the same one");
 
-        const VkBufferUsageFlags usage = kCellBufferUsage | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        const VkBufferUsageFlags usage = cellBufferUsage(ctx_) | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         try {
             for (Slot& slot : slots_) {
                 shareBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(cf::Vec3), usage, slot.pos, slot.cudaPos);
@@ -140,9 +140,9 @@ void LiveSim::ensureMeshBuffers() {
         if (capacity_ > 600000000u) throw std::runtime_error("too many cells for the membrane of a live run");
         indexCapacity_ = capacity_ * 6u;  // a closed sheet of n cells has 2n - 4 triangles
         for (Slot& slot : slots_) {
-            shareBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(cf::Vec3), kCellBufferUsage | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, slot.normal,
+            shareBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(cf::Vec3), cellBufferUsage(ctx_) | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, slot.normal,
                         slot.cudaNormal);
-            shareBuffer(static_cast<VkDeviceSize>(indexCapacity_) * sizeof(std::uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, slot.index, slot.cudaIndex);
+            shareBuffer(static_cast<VkDeviceSize>(indexCapacity_) * sizeof(std::uint32_t), cellBufferUsage(ctx_, true), slot.index, slot.cudaIndex);
         }
         meshReady_ = true;
     } catch (const std::exception& e) {

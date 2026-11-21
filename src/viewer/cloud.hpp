@@ -89,9 +89,15 @@ private:
 // A number no other set of cell buffers has had (PointBuffers::version).
 std::uint64_t nextBufferVersion();
 
-// Usage of every per-cell buffer the renderer draws from: a vertex buffer, and a storage buffer
-// for the ray-traced modes, which look cells up by index.
-inline constexpr VkBufferUsageFlags kCellBufferUsage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+// Usage of every per-cell buffer the renderer draws from (or, with `index`, of the triangle
+// indices of the membrane): a vertex or index buffer, a storage buffer for the ray-traced modes,
+// which look cells up by index, and on GPUs with ray tracing an input to the acceleration
+// structure of the membrane.
+inline VkBufferUsageFlags cellBufferUsage(const Context& ctx, bool index = false) {
+    VkBufferUsageFlags usage = (index ? VK_BUFFER_USAGE_INDEX_BUFFER_BIT : VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    if (ctx.hasRayTracing) usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    return usage;
+}
 
 // Sets the scalar range of `settings` for its colour mode from the cloud (when autoRange is on).
 void applyAutoRange(RenderSettings& settings, const Cloud& cloud);

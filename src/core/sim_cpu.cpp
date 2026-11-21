@@ -1,10 +1,12 @@
 #include "sim_cpu.hpp"
 
 #include <cmath>
+#include <cstdint>
 #include <stdexcept>
 #include <thread>
 
 #include "division.hpp"
+#include "food.hpp"
 #include "hash.hpp"
 #include "kernels.hpp"
 #include "parallel.hpp"
@@ -72,16 +74,6 @@ StepReport CpuSim::step() {
     normalNew_.resize(n);
     foodNew_.resize(n);
 
-    // ---- 1. Food: uniform random increment per cell (hash of seed, step, cell id).
-    {
-        const float* food = s_.food.data();
-        float* out = foodNew_.data();
-        const float fmin = p.foodMin, span = p.foodMax - p.foodMin;
-        parallel_for(n, threads_, [=](std::uint32_t b, std::uint32_t e, unsigned) {
-            for (std::uint32_t v = b; v < e; ++v) out[v] = food[v] + (fmin + span * hash_u01(seed, step, v, Stream::Food));
-        });
-    }
-
     // ---- 2. Normals from the rings, with the degenerate fallback to the previous normal.
     {
         std::uint32_t fallbacks[kMaxThreads] = {};
@@ -108,6 +100,30 @@ StepReport CpuSim::step() {
             rep.message = failure_message(s_, step, bad, rep.term, error);
             return rep;
         }
+    }
+
+    // ---- 1. Food (core/food.hpp). It reads only old values, so its place in the pipeline does
+    // not change the result; it sits here because the light source needs this step's normals
+    // and the bounding box the grid has just computed.
+    {
+        const FoodParams fp = make_food_params(p, seed, step, grid_.bounds_lo(), grid_.bounds_hi());
+        const State& s = s_;
+        if (fp.flags & kFoodLight) {
+            // Shadow map: per texel, the depth of the cell nearest to the light.
+            shadow_.assign(static_cast<std::size_t>(fp.lightNu) * fp.lightNv, INT32_MIN);
+            for (std::uint32_t v = 0; v < n; ++v) {
+                const std::uint32_t t = shadow_texel(fp, s.pos[v]);
+                const std::int32_t depth = ordered_bits(shadow_depth(fp, s.pos[v]));
+                if (depth > shadow_[t]) shadow_[t] = depth;
+            }
+        }
+        const float* food = s_.food.data();
+        float* out = foodNew_.data();
+        const Vec3* nrm = normalNew_.data();
+        const std::int32_t* shadow = shadow_.data();
+        parallel_for(n, threads_, [&s, fp, step, food, out, nrm, shadow](std::uint32_t b, std::uint32_t e, unsigned) {
+            for (std::uint32_t v = b; v < e; ++v) out[v] = food_update(fp, v, step, food, s.pos.data(), nrm, s.ring(v), s.deg[v], shadow);
+        });
     }
 
     // ---- 4 + 5. Move (Jacobi: read old positions, write the new buffer) and clamp.

@@ -52,6 +52,7 @@ bool Grid::build(const Vec3* pos, std::uint32_t n, float cellSize, unsigned thre
         hi.z = p.z > hi.z ? p.z : hi.z;
     }
     origin_ = lo;
+    hi_ = hi;
     invCell_ = 1.0f / cellSize;
     // 2^21 cells per axis keeps the linear key below 2^63.
     constexpr double kMaxDim = 2097152.0;

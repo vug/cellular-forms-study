@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
@@ -25,6 +26,7 @@
 #include <thread>
 #include <utility>
 
+#include "core/food.hpp"
 #include "core/hash.hpp"
 #include "core/kernels.hpp"
 #include "core/topology.hpp"
@@ -134,11 +136,24 @@ __global__ void k_reset_counters(Counters* c) {
     c->winners = 0;
 }
 
-__global__ void k_food(const float* food, float* out, std::uint32_t n, float fmin, float span, std::uint64_t seed,
-                       std::uint64_t step) {
+// Food stage (core/food.hpp): uniform random food scaled by the sources that are switched on.
+__global__ void k_food(FoodParams fp, std::uint64_t step, const float* food, float* out, const Vec3* pos, const Vec3* nrm,
+                       const std::uint32_t* nbr, const std::uint8_t* deg, const std::int32_t* shadow, std::uint32_t n) {
     const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
     if (v >= n) return;
-    out[v] = food[v] + (fmin + span * hash_u01(seed, step, v, Stream::Food));
+    out[v] = food_update(fp, v, step, food, pos, nrm, nbr + static_cast<std::size_t>(v) * kMaxDeg, deg[v], shadow);
+}
+
+// The light's shadow map: per texel, the depth of the cell nearest to the light. An integer
+// max on order-preserving bits, so the result does not depend on thread order.
+__global__ void k_shadow_clear(std::int32_t* shadow, std::uint32_t texels) {
+    const std::uint32_t t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t < texels) shadow[t] = INT32_MIN;
+}
+__global__ void k_shadow_build(FoodParams fp, const Vec3* pos, std::int32_t* shadow, std::uint32_t n) {
+    const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
+    if (v >= n) return;
+    atomicMax(&shadow[shadow_texel(fp, pos[v])], ordered_bits(shadow_depth(fp, pos[v])));
 }
 
 __global__ void k_normals(const Vec3* pos, const std::uint32_t* nbr, const std::uint8_t* deg, const Vec3* prev, Vec3* out,
@@ -273,6 +288,7 @@ struct CudaSim::Impl {
     std::uint32_t* idBlock = nullptr;  // 2 * capacity entries
     Vec3* sortedPos = nullptr;
     std::uint8_t* pair = nullptr;
+    std::int32_t* shadow = nullptr;  // the light's shadow map; allocated the first time the light is on
     Counters* counters = nullptr;
     Box* boxOut = nullptr;
     std::uint32_t* diagOut = nullptr;
@@ -661,10 +677,6 @@ StepReport CudaSim::step() {
 
     k_reset_counters<<<1, 1, 0, st>>>(m.counters);
 
-    // ---- 1. Food.
-    k_food<<<gb, kBlock, 0, st>>>(m.food[cur], m.food[nxt], n, p.foodMin, p.foodMax - p.foodMin, seed, step);
-    m.phase(m.times.food, t0);
-
     // ---- 2. Normals from the rings (fallback: the previous normal).
     k_normals<<<gb, kBlock, 0, st>>>(m.pos[cur], m.nbr, m.deg, m.normal[cur], m.normal[nxt], n,
                                      normal_eps2(p.linkRestLength), m.counters);
@@ -708,6 +720,19 @@ StepReport CudaSim::step() {
         return rep;
     }
     const std::uint32_t nx = static_cast<std::uint32_t>(dx), ny = static_cast<std::uint32_t>(dy), nz = static_cast<std::uint32_t>(dz);
+
+    // ---- 1. Food (core/food.hpp). After the bounds, which the light's shadow map needs.
+    {
+        const FoodParams fp = make_food_params(p, seed, step, box.lo, box.hi);
+        if (fp.flags & kFoodLight) {
+            if (!m.shadow) m.shadow = m.alloc<std::int32_t>(kShadowMaxTexels, "the shadow map");
+            const std::uint32_t texels = fp.lightNu * fp.lightNv;
+            k_shadow_clear<<<grid_blocks(texels), kBlock, 0, st>>>(m.shadow, texels);
+            k_shadow_build<<<gb, kBlock, 0, st>>>(fp, m.pos[cur], m.shadow, n);
+        }
+        k_food<<<gb, kBlock, 0, st>>>(fp, step, m.food[cur], m.food[nxt], m.pos[cur], m.normal[nxt], m.nbr, m.deg, m.shadow, n);
+        m.phase(m.times.food, t0);
+    }
 
     k_keys<<<gb, kBlock, 0, st>>>(m.pos[cur], m.key[0], m.idBlock, n, origin, inv, nx, ny, nz);
     cub::DoubleBuffer<std::uint64_t> keys(m.key[0], m.key[1]);

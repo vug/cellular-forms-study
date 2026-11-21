@@ -285,6 +285,9 @@ VkComputeSim::VkComputeSim(Context& ctx, State initial, std::uint32_t capacity) 
     }
     const CheckResult chk = check_invariants(initial);
     if (!chk.ok()) throw std::invalid_argument("initial state rejected: " + chk.message);
+    if (uses_food_extensions(initial.params))
+        throw std::invalid_argument("the Vulkan compute backend implements uniform food only (field, pulses, light, diffusion and the "
+                                    "crowding limit are CPU and CUDA features)");
 
     // Features the shaders need.
     VkPhysicalDeviceFeatures features;
@@ -456,6 +459,7 @@ void VkComputeSim::reset(const State& state) {
     if (state.n > m.capacity) throw std::runtime_error("Vulkan compute: the state has more cells than the buffers hold");
     const ParamIssues issues = validate(state.params);
     if (!issues.ok()) throw std::invalid_argument("invalid parameters: " + issues.errors.front());
+    if (uses_food_extensions(state.params)) throw std::invalid_argument("the Vulkan compute backend implements uniform food only");
     m.params = state.params;
     m.seed = state.seed;
     m.step = state.step;
@@ -489,6 +493,7 @@ VkComputeTimes VkComputeSim::times() const { return impl_->times; }
 
 ParamIssues VkComputeSim::set_params(const Params& p) {
     ParamIssues issues = validate(p);
+    if (uses_food_extensions(p)) issues.errors.push_back("the Vulkan compute backend implements uniform food only");
     if (issues.ok()) impl_->params = p;
     return issues;
 }

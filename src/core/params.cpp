@@ -24,6 +24,16 @@ constexpr FloatField kFloatFields[] = {
     {"maxDisplacement", &Params::maxDisplacement},
     {"daughterOffset", &Params::daughterOffset},
 };
+// Food sources of M5. Written only when they differ from the default, so states that do not
+// use them keep their text form and their checksum.
+constexpr FloatField kExtraFields[] = {
+    {"fieldAmount", &Params::fieldAmount},     {"fieldScale", &Params::fieldScale},       {"fieldOctaves", &Params::fieldOctaves},
+    {"fieldContrast", &Params::fieldContrast}, {"pulsePeriod", &Params::pulsePeriod},     {"pulseDuty", &Params::pulseDuty},
+    {"pulseLow", &Params::pulseLow},           {"lightAmount", &Params::lightAmount},     {"lightDirX", &Params::lightDirX},
+    {"lightDirY", &Params::lightDirY},         {"lightDirZ", &Params::lightDirZ},         {"lightAmbient", &Params::lightAmbient},
+    {"lightBias", &Params::lightBias},         {"lightPixel", &Params::lightPixel},       {"foodDiffusion", &Params::foodDiffusion},
+    {"foodDecay", &Params::foodDecay},         {"crowdLow", &Params::crowdLow},           {"crowdHigh", &Params::crowdHigh},
+};
 
 std::string_view trim(std::string_view s) {
     while (!s.empty() && (s.front() == ' ' || s.front() == '\t' || s.front() == '\r')) s.remove_prefix(1);
@@ -40,15 +50,17 @@ std::string apply_pair(Params& p, std::string_view key, std::string_view value) 
         p.maxCells = static_cast<std::uint32_t>(n);
         return "";
     }
-    for (const FloatField& f : kFloatFields) {
-        if (key == f.name) {
-            char* end = nullptr;
-            const float x = std::strtof(v.c_str(), &end);
-            if (end == v.c_str() || *end != '\0') return "bad value for " + std::string(key) + ": '" + v + "'";
-            p.*(f.member) = x;
-            return "";
-        }
-    }
+    auto assign = [&](const FloatField& f) -> std::string {
+        char* end = nullptr;
+        const float x = std::strtof(v.c_str(), &end);
+        if (end == v.c_str() || *end != '\0') return "bad value for " + std::string(key) + ": '" + v + "'";
+        p.*(f.member) = x;
+        return "";
+    };
+    for (const FloatField& f : kFloatFields)
+        if (key == f.name) return assign(f);
+    for (const FloatField& f : kExtraFields)
+        if (key == f.name) return assign(f);
     return "unknown parameter '" + std::string(key) + "'";
 }
 
@@ -65,6 +77,7 @@ ParamIssues validate(const Params& p) {
     };
     bool all = true;
     for (const FloatField& f : kFloatFields) all = finite(f.name, p.*(f.member)) && all;
+    for (const FloatField& f : kExtraFields) all = finite(f.name, p.*(f.member)) && all;
     if (!all) return r;
 
     if (!(p.linkRestLength > 0.0f)) r.errors.push_back("linkRestLength must be > 0");
@@ -86,7 +99,30 @@ ParamIssues validate(const Params& p) {
     else if (p.daughterOffset > 0.5f) r.warnings.push_back("daughterOffset > 0.5: daughters start further apart than a rest length");
     if (p.maxCells < 4u) r.errors.push_back("maxCells must be >= 4");
     if (p.repulsionStrength > 1.0f) r.warnings.push_back("repulsionStrength > 1 is far outside the tuned range");
+
+    // Food sources (M5).
+    if (p.fieldAmount < 0.0f || p.fieldAmount > 1.0f) r.errors.push_back("fieldAmount must be in [0, 1]");
+    if (!(p.fieldScale > 0.0f)) r.errors.push_back("fieldScale must be > 0");
+    if (p.fieldOctaves < 1.0f || p.fieldOctaves > 6.0f) r.errors.push_back("fieldOctaves must be in [1, 6]");
+    if (p.fieldContrast < 0.0f) r.errors.push_back("fieldContrast must be >= 0");
+    if (p.pulsePeriod < 0.0f || p.pulsePeriod > 1.0e9f) r.errors.push_back("pulsePeriod must be in [0, 1e9] steps (0 = off)");
+    if (p.pulseDuty < 0.0f || p.pulseDuty > 1.0f) r.errors.push_back("pulseDuty must be in [0, 1]");
+    if (p.pulseLow < 0.0f || p.pulseLow > 1.0f) r.errors.push_back("pulseLow must be in [0, 1]");
+    if (p.lightAmount < 0.0f || p.lightAmount > 1.0f) r.errors.push_back("lightAmount must be in [0, 1]");
+    if (p.lightAmount > 0.0f && !(p.lightDirX * p.lightDirX + p.lightDirY * p.lightDirY + p.lightDirZ * p.lightDirZ > 1.0e-12f))
+        r.errors.push_back("the light direction must not be zero");
+    if (p.lightAmbient < 0.0f || p.lightAmbient > 1.0f) r.errors.push_back("lightAmbient must be in [0, 1]");
+    if (p.lightBias < 0.0f) r.errors.push_back("lightBias must be >= 0");
+    if (!(p.lightPixel > 0.0f)) r.errors.push_back("lightPixel must be > 0");
+    if (p.foodDiffusion < 0.0f || p.foodDiffusion >= 1.0f) r.errors.push_back("foodDiffusion must be in [0, 1)");
+    if (p.foodDecay < 0.0f || p.foodDecay >= 1.0f) r.errors.push_back("foodDecay must be in [0, 1)");
+    if (p.crowdLow < 0.0f || p.crowdHigh < 0.0f) r.errors.push_back("crowdLow and crowdHigh must be >= 0");
     return r;
+}
+
+bool uses_food_extensions(const Params& p) {
+    return p.fieldAmount > 0.0f || p.pulsePeriod > 0.0f || p.lightAmount > 0.0f || p.foodDiffusion > 0.0f || p.foodDecay > 0.0f ||
+           p.crowdHigh > p.crowdLow;
 }
 
 std::string to_text(const Params& p) {
@@ -99,6 +135,12 @@ std::string to_text(const Params& p) {
     }
     std::snprintf(buf, sizeof(buf), "maxCells=%u\n", static_cast<unsigned>(p.maxCells));
     out += buf;
+    const Params defaults;
+    for (const FloatField& f : kExtraFields) {
+        if (p.*(f.member) == defaults.*(f.member)) continue;  // unchanged: keeps old files and checksums valid
+        std::snprintf(buf, sizeof(buf), "%s=%.9g\n", f.name, static_cast<double>(p.*(f.member)));
+        out += buf;
+    }
     return out;
 }
 

@@ -17,9 +17,13 @@ public:
     bool build(const Vec3* pos, std::uint32_t n, float cellSize, unsigned threads, std::uint32_t& badCell, std::string& error);
 
     GridView view() const;
+    // Bounding box of the positions of the last build.
+    Vec3 bounds_lo() const { return origin_; }
+    Vec3 bounds_hi() const { return hi_; }
 
 private:
     Vec3 origin_{};
+    Vec3 hi_{};
     float invCell_ = 1.0f;
     std::uint32_t nx_ = 1, ny_ = 1, nz_ = 1;
     std::uint32_t count_ = 0;

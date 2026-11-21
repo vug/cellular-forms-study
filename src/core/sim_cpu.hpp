@@ -37,6 +37,7 @@ private:
     std::vector<std::uint64_t> prio_, selectScratch_;
     std::vector<std::uint8_t> pairI_, pairJ_;
     std::vector<std::uint32_t> winners_;
+    std::vector<std::int32_t> shadow_;  // the light's shadow map (core/food.hpp), when the light is on
 };
 
 // Sets every cell's food to a hashed uniform value in [0, foodThreshold), so divisions are

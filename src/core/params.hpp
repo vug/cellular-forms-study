@@ -34,7 +34,45 @@ struct Params {
     float daughterOffset = 0.1f;
     // Capacity: reaching it is an orderly stop.
     std::uint32_t maxCells = 2000000u;
+
+    // --- food sources beyond uniform random (M5; docs/design.md "Food and growth sources") [ours]
+    // Every one is off by default, and with all of them off the step is exactly the uniform-food
+    // model. They scale the per-step food increment (see core/food.hpp). These parameters are
+    // written to files and checksums only when they differ from their defaults.
+    //
+    // Spatial field: increment * (1 + fieldAmount * (2 f - 1)), f in [0, 1] a value noise
+    // sampled at the cell's position / fieldScale.
+    float fieldAmount = 0.0f;    // 0 = off; 1 = from no growth to double growth
+    float fieldScale = 20.0f;    // wavelength of the field, in world units
+    float fieldOctaves = 1.0f;   // 1 to 6 (rounded)
+    float fieldContrast = 1.0f;  // > 1 sharpens the field into patches
+    // Temporal pulses: in the "off" part of every period the increment is scaled by pulseLow.
+    float pulsePeriod = 0.0f;    // steps; 0 = off
+    float pulseDuty = 0.5f;      // fraction of the period that is "on"
+    float pulseLow = 0.0f;       // scale during the "off" part
+    // Light: increment * (1 - lightAmount * (1 - received)). `received` is lightAmbient for a
+    // cell in shadow or facing away, and lightAmbient + (1 - lightAmbient) * (N . L) for a lit
+    // cell. Shadows come from a depth map seen from the light (one texel per lightPixel).
+    float lightAmount = 0.0f;    // 0 = off
+    float lightDirX = 0.0f;      // direction towards the light (normalised internally)
+    float lightDirY = 1.0f;
+    float lightDirZ = 0.0f;
+    float lightAmbient = 0.05f;
+    float lightBias = 0.75f;     // depth tolerance of the shadow test, in rest lengths
+    float lightPixel = 1.0f;     // shadow-map texel, in rest lengths
+    // Diffusion along links: each step a cell's food moves this fraction of the way to the mean
+    // of its neighbours' food; foodDecay is the fraction lost per step.
+    float foodDiffusion = 0.0f;  // 0 = off
+    float foodDecay = 0.0f;
+    // Crowding limit: a cell whose links are compressed gets less food. The scale is 0 when its
+    // mean link length is <= crowdLow rest lengths and 1 when >= crowdHigh. Off unless
+    // crowdHigh > crowdLow. (Growth then slows by itself where the sheet cannot spread.)
+    float crowdLow = 0.0f;
+    float crowdHigh = 0.0f;
 };
+
+// True when any food source beyond uniform random is switched on.
+bool uses_food_extensions(const Params& p);
 
 struct ParamIssues {
     std::vector<std::string> errors;    // the run must not start

@@ -177,3 +177,17 @@ I commit only those paths plus this log. Notes for the local session:
 
 - Nothing here has been compiled with MSVC yet.
 - No geometry yet: the step, the grid, state files and the CLI are next.
+
+## 2026-11-20 23:58 · Local session: M1 code builds and passes under MSVC
+
+- `scripts\build.ps1 -Target cf_core,cf_tests,cf_oracle` (CMake 4.4.3, Ninja, MSVC 19.51, `/W4
+  /permissive- /fp:precise`, Release) at commit `4a6b284`: builds with no warnings.
+- `build\release\bin\cf_tests.exe`: **22 tests run, 0 failed**, 9.3 s. `rerun_gives_the_same_checksum`
+  reports checksum `db68ac505fda1d8a` at 58,103 cells, identical for 1, 2 and 5 threads (compare
+  with the GCC value: the two compilers do not have to agree, but it is worth knowing).
+- No source changes were needed for MSVC.
+- Build system: top-level `CMakeLists.txt` globs `src/core/*.cpp`, `tests/*.cpp`,
+  `apps/cf_run/*.cpp`, `apps/cf_render/*.cpp`, so new files in those folders are picked up
+  without CMake edits. Submodules so far: GLFW 3.5.1, Dear ImGui 1.93.0 (docking), stb.
+- Next for the local session: the Vulkan snapshot viewer (M2). It needs the state/snapshot file
+  format from `src/core`; until that lands it is developed against `make_icosphere`.

@@ -5,7 +5,7 @@
 #   scripts\web_verify_data.ps1 -Gallery 599,505    also the data of ?task=gallery (gallery.json)
 #   scripts\web_verify_data.ps1 -Gallery 599 -GalleryOnly     only that (and not the data of ?task=verify)
 #   scripts\web_verify_data.ps1 -Relay -GalleryOnly           a run whose parameters change on the way (relay.json)
-#   then: python scripts\web_serve.py ; open http://localhost:8123/web/?task=verify
+#   then: python scripts\web_serve.py ; open http://localhost:8123/web/check.html?task=verify
 #
 # ?task=verify takes one step from a state and compares the result with the CPU reference's.
 #   - Pairs of states one step apart: the base model at several sizes; every mechanism beyond it

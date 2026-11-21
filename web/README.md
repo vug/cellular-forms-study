@@ -6,7 +6,8 @@ Everything runs in the visitor's browser, on their GPU. The server only hands ou
 
 ## Putting it on a web server
 
-Copy this whole `web/` folder to the server, to any path, and open `<that path>/app/`.
+Copy this whole `web/` folder to the server, to any path, and open that path (its `index.html`
+sends the visitor on to `app/`, where the page is).
 
 - There is no build step and nothing to install: HTML, JavaScript modules, the gallery's pictures
   and the start shapes, 1.8 MB in all. Every address in the page is relative.
@@ -34,7 +35,8 @@ still in progress. Without WebGPU the page says what is missing. It was tried on
 | `app/params.js` | The parameters the controls offer: names, ranges, defaults |
 | `sim.js`, `shaders.js` | The simulation (WebGPU compute), the whole model of `src/core` |
 | `start.js`, `cfs.js` | Start states from a shape, a seed and parameters; reading state files |
-| `index.html`, `main.js`, `tasks.js`, `worker.js` | The check page: compares the simulation step by step with the CPU reference (`?task=verify`); not needed on the server |
+| `index.html` | The front door: sends the visitor on to `app/` |
+| `check.html`, `main.js`, `tasks.js`, `worker.js` | The developers' check page: compares the simulation step by step with the CPU reference (`check.html?task=verify`). It needs reference data from the repository and is not needed on the server |
 
 ## A link is a setup
 
@@ -58,7 +60,13 @@ its picture and writes `app/gallery/`. Copy the folder to the server again after
 
 ## Trying it on this PC
 
-    python scripts/web_serve.py
+Any static file server will do. From this folder:
 
-then open http://localhost:8123/web/app/ . To check the simulation against the CPU reference:
-`scripts\web_verify_data.ps1`, then http://localhost:8123/web/index.html?task=verify .
+    python -m http.server
+
+then open http://localhost:8000/ . Or, from the repository's root, `python scripts/web_serve.py`
+and http://localhost:8123/web/ .
+
+To check the simulation against the CPU reference (this needs the repository, its build and its
+own server, because the reference data lies outside this folder): `scripts\web_verify_data.ps1`,
+`python scripts/web_serve.py`, then http://localhost:8123/web/check.html?task=verify .

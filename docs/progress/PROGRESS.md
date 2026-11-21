@@ -2342,7 +2342,8 @@ agent switch to the simulation's final interface.
    picture. "Copy link" puts the whole setup into the address.
 3. **`python scripts/atlas web-gallery` and `web-starts`**: the page's gallery (rated forms
    first, then the typical forms of every kind, then the extremes) and its start shapes.
-4. **Checks in the page** (`web/index.html?task=`): `verify` (one step against CPU
+4. **Checks in the page** (`web/check.html?task=`; it was `web/index.html` until 18:00, when
+   the folder's front door became the app): `verify` (one step against CPU
    checkpoints, extended to every mechanism), `gallery` (many steps against CUDA checkpoints),
    `rerun`, `floats` (the emulated arithmetic, two million cases), a speed task.
    `scripts/web_verify_data.ps1` writes the reference data.

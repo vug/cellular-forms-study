@@ -32,6 +32,18 @@ struct ShapeStats {
 };
 ShapeStats shape_stats(const State& s);
 
+// How folded the form is: radius of gyration divided by the radius of a sphere with the same
+// number of cells at the current mean link length (about 1 for a ball, smaller when folded).
+double fold_ratio(const State& s, const LinkStats& link, const ShapeStats& shape);
+
+// Self-contact proxy (not a true self-intersection test): pairs of cells that are closer than
+// `distance` rest lengths although they are more than two links apart in the sheet.
+struct ContactStats {
+    std::uint64_t closePairs = 0;
+    float minDistance = 0.0f;  // smallest such distance in rest lengths; 0 when there is no pair within range
+};
+ContactStats contact_stats(const State& s, float distance = 0.5f);
+
 std::string hex64(std::uint64_t v);
 
 }  // namespace cf

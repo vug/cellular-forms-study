@@ -167,12 +167,14 @@ StepReport CpuSim::step() {
         std::uint64_t* prio = prio_.data();
         std::uint8_t* pi = pairI_.data();
         std::uint8_t* pj = pairJ_.data();
-        parallel_for(n, threads_, [&, food, threshold, prio, pi, pj](std::uint32_t b, std::uint32_t e, unsigned t) {
+        const Vec3* newPos = posNew_.data();
+        parallel_for(n, threads_, [&, food, threshold, prio, pi, pj, newPos](std::uint32_t b, std::uint32_t e, unsigned t) {
             std::uint32_t localReady = 0, localPostponed = 0;
             for (std::uint32_t v = b; v < e; ++v) {
                 if (!(food[v] > threshold)) continue;
                 ++localReady;
-                const CleavagePair c = choose_cleavage_pair(s, v, hash_u64(seed, step, v, Stream::Pair));
+                // Geometry for the tie-break comes from the positions just computed.
+                const CleavagePair c = choose_cleavage_pair(s, v, hash_u64(seed, step, v, Stream::Pair), newPos);
                 if (!c.valid) {
                     ++localPostponed;  // degree cap: wait for a later step
                     continue;

@@ -339,3 +339,80 @@ CF_TEST(relaxation_without_food_settles) {
     CF_CHECK(lastMove < 1e-4);
     CF_CHECK(mean > 0.8 && mean < 1.1);
 }
+
+// The cleavage pair: lowest-degree end cells first; among equal ones the shortest cleavage
+// links, so the daughter goes where the neighbourhood is stretched.
+CF_TEST(cleavage_tie_break_prefers_the_shortest_cleavage_links) {
+    Params p;
+    State s = make_icosphere(2, p);
+    std::uint32_t v = 0;
+    while (s.deg[v] != 6) ++v;
+    bool allSix = true;
+    for (std::uint32_t k = 0; k < 6; ++k) allSix = allSix && s.deg[s.ring(v)[k]] == 6;
+    while (!allSix) {  // find a cell whose six neighbours all have degree 6: every pair ties on degree
+        ++v;
+        allSix = s.deg[v] == 6;
+        for (std::uint32_t k = 0; k < s.deg[v] && allSix; ++k) allSix = s.deg[s.ring(v)[k]] == 6;
+    }
+    // Pull neighbours 1 and 4 (an opposite pair) close to v; push the others away.
+    for (std::uint32_t k = 0; k < 6; ++k) {
+        const std::uint32_t u = s.ring(v)[k];
+        const float scale = (k == 1 || k == 4) ? 0.5f : 1.5f;
+        s.pos[u] = s.pos[v] + (s.pos[u] - s.pos[v]) * scale;
+    }
+    for (std::uint64_t h = 0; h < 50; ++h) {
+        const CleavagePair c = choose_cleavage_pair(s, v, h * 7919u, s.pos.data());
+        CF_CHECK(c.valid);
+        CF_CHECK((c.i == 1 && c.j == 4) || (c.i == 4 && c.j == 1));
+    }
+    // Without positions the hash alone decides, and it does use the other pairs too.
+    bool sawOther = false;
+    for (std::uint64_t h = 0; h < 50; ++h) {
+        const CleavagePair c = choose_cleavage_pair(s, v, h * 7919u);
+        sawOther = sawOther || !((c.i == 1 && c.j == 4) || (c.i == 4 && c.j == 1));
+    }
+    CF_CHECK(sawOther);
+    // Degree still comes first: make neighbour 1 a high-degree cell and it is no longer chosen.
+    s.deg[s.ring(v)[1]] = 9;
+    for (std::uint64_t h = 0; h < 50; ++h) {
+        const CleavagePair c = choose_cleavage_pair(s, v, h * 7919u, s.pos.data());
+        CF_CHECK(c.valid && c.i != 1 && c.j != 1);
+    }
+}
+
+// Mesh quality under growth: links stay near the rest length (docs/model.md section 9).
+CF_TEST(growth_keeps_link_lengths_near_rest_length) {
+    Params p;
+    p.foodMax = 0.004f;
+    CpuSim sim(start(2, p, 1), 2);
+    while (sim.cell_count() < 8000u) {
+        const StepReport r = sim.step();
+        CF_CHECK_MSG(r.ok(), r.message);
+    }
+    require_ok(sim.state(), "grown state");
+    const State& s = sim.state();
+    double sum = 0.0, sum2 = 0.0;
+    std::uint64_t links = 0, longLinks = 0;
+    std::uint32_t maxDeg = 0;
+    for (std::uint32_t v = 0; v < s.n; ++v) {
+        maxDeg = s.deg[v] > maxDeg ? s.deg[v] : maxDeg;
+        for (std::uint32_t k = 0; k < s.deg[v]; ++k) {
+            const std::uint32_t u = s.ring(v)[k];
+            if (u < v) continue;
+            const double len = length(s.pos[v] - s.pos[u]);
+            sum += len;
+            sum2 += len * len;
+            ++links;
+            if (len > 1.6) ++longLinks;
+        }
+    }
+    const double mean = sum / static_cast<double>(links);
+    const double sd = std::sqrt(sum2 / static_cast<double>(links) - mean * mean);
+    const double longFraction = static_cast<double>(longLinks) / static_cast<double>(links);
+    cftest::note(std::to_string(s.n) + " cells: link mean " + std::to_string(mean) + ", std " + std::to_string(sd) + ", longer than 1.6: " +
+                 std::to_string(longFraction * 100.0) + "%, max degree " + std::to_string(maxDeg));
+    CF_CHECK(mean > 0.8 && mean < 1.1);
+    CF_CHECK(sd < 0.2);
+    CF_CHECK(longFraction < 0.005);
+    CF_CHECK(maxDeg <= 10u);
+}

@@ -331,7 +331,7 @@ void split_rings(State& s, std::uint32_t v, std::uint32_t i, std::uint32_t j, st
     insert_at(b, static_cast<std::uint32_t>(ring_index(s, b, v)));
 }
 
-CleavagePair choose_cleavage_pair(const State& s, std::uint32_t v, std::uint64_t tieHash) {
+CleavagePair choose_cleavage_pair(const State& s, std::uint32_t v, std::uint64_t tieHash, const Vec3* pos) {
     const std::uint32_t d = s.deg[v];
     const std::uint32_t* r = s.ring(v);
     const std::uint32_t offs[2] = {d / 2, (d + 1) / 2};
@@ -359,7 +359,22 @@ CleavagePair choose_cleavage_pair(const State& s, std::uint32_t v, std::uint64_t
     }
     CleavagePair p;
     if (nTies == 0) return p;
-    const std::uint32_t pick = static_cast<std::uint32_t>(tieHash % nTies);
+    // Start from the hashed choice; with positions, walk the tied pairs from there and keep the
+    // one with the shortest cleavage links (strictly shorter only, so exact ties stay hashed).
+    std::uint32_t pick = static_cast<std::uint32_t>(tieHash % nTies);
+    if (pos != nullptr && nTies > 1) {
+        const Vec3 P = pos[v];
+        float bestLen = length(pos[r[tiesI[pick]]] - P) + length(pos[r[tiesJ[pick]]] - P);
+        const std::uint32_t start = pick;
+        for (std::uint32_t k = 1; k < nTies; ++k) {
+            const std::uint32_t q = (start + k) % nTies;
+            const float len = length(pos[r[tiesI[q]]] - P) + length(pos[r[tiesJ[q]]] - P);
+            if (len < bestLen) {
+                bestLen = len;
+                pick = q;
+            }
+        }
+    }
     p.valid = true;
     p.i = tiesI[pick];
     p.j = tiesJ[pick];

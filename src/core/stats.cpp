@@ -3,6 +3,8 @@
 #include <cmath>
 #include <cstdio>
 
+#include "grid.hpp"
+
 namespace cf {
 
 LinkStats link_stats(const State& s, std::uint32_t bins) {
@@ -77,6 +79,52 @@ ShapeStats shape_stats(const State& s) {
     r.boundsMax = hi;
     r.centroid = Vec3{static_cast<float>(cx), static_cast<float>(cy), static_cast<float>(cz)};
     r.radiusOfGyration = std::sqrt(sum2 * inv);
+    return r;
+}
+
+double fold_ratio(const State& s, const LinkStats& link, const ShapeStats& shape) {
+    // A triangulated sheet has about sqrt(3)/2 * L^2 of area per cell.
+    const double length = link.mean * s.params.linkRestLength;
+    const double area = static_cast<double>(s.n) * 0.8660254037844386 * length * length;
+    const double sphereRadius = std::sqrt(area / (4.0 * 3.14159265358979323846));
+    return sphereRadius > 0.0 ? shape.radiusOfGyration / sphereRadius : 0.0;
+}
+
+ContactStats contact_stats(const State& s, float distance) {
+    ContactStats r;
+    const float range = distance * s.params.linkRestLength;
+    Grid grid;
+    std::uint32_t bad = kInvalid;
+    std::string error;
+    if (s.n == 0 || !grid.build(s.pos.data(), s.n, range, 1, bad, error)) return r;
+    const GridView g = grid.view();
+    const float range2 = range * range;
+    float best2 = range2;
+    for (std::uint32_t v = 0; v < s.n; ++v) {
+        const Vec3 P = s.pos[v];
+        const std::uint32_t cx = grid_coord(P.x, g.origin.x, g.invCell, g.nx);
+        const std::uint32_t cy = grid_coord(P.y, g.origin.y, g.invCell, g.ny);
+        const std::uint32_t cz = grid_coord(P.z, g.origin.z, g.invCell, g.nz);
+        for (std::uint32_t z = cz > 0 ? cz - 1 : 0; z <= (cz + 1 < g.nz ? cz + 1 : g.nz - 1); ++z) {
+            for (std::uint32_t y = cy > 0 ? cy - 1 : 0; y <= (cy + 1 < g.ny ? cy + 1 : g.ny - 1); ++y) {
+                const std::uint64_t lo = grid_key(cx > 0 ? cx - 1 : 0, y, z, g.nx, g.ny);
+                const std::uint64_t hi = grid_key(cx + 1 < g.nx ? cx + 1 : g.nx - 1, y, z, g.nx, g.ny);
+                for (std::uint32_t q = grid_lower_bound(g.sortedKey, g.count, lo); q < g.count && g.sortedKey[q] <= hi; ++q) {
+                    const std::uint32_t u = g.sortedId[q];
+                    if (u <= v) continue;  // each pair once
+                    const float d2 = length2(P - g.sortedPos[q]);
+                    if (!(d2 < range2)) continue;
+                    // More than two links apart: not linked and no common neighbour.
+                    bool near = ring_index(s, v, u) >= 0;
+                    for (std::uint32_t k = 0; k < s.deg[v] && !near; ++k) near = ring_index(s, s.ring(v)[k], u) >= 0;
+                    if (near) continue;
+                    ++r.closePairs;
+                    best2 = d2 < best2 ? d2 : best2;
+                }
+            }
+        }
+    }
+    r.minDistance = r.closePairs ? std::sqrt(best2) / s.params.linkRestLength : 0.0f;
     return r;
 }
 

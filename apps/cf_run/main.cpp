@@ -160,7 +160,10 @@ std::string json_stats(const cf::State& s, const cf::CheckResult& check, const s
     o << "],\"deg_hist\":[";
     for (std::size_t k = 0; k < deg.histogram.size(); ++k) o << (k ? "," : "") << deg.histogram[k];
     o << "],\"deg_max\":" << deg.max << ",\"bounds\":[" << shape.boundsMin.x << "," << shape.boundsMin.y << "," << shape.boundsMin.z << ","
-      << shape.boundsMax.x << "," << shape.boundsMax.y << "," << shape.boundsMax.z << "],\"radius_of_gyration\":" << shape.radiusOfGyration << "}";
+      << shape.boundsMax.x << "," << shape.boundsMax.y << "," << shape.boundsMax.z << "],\"radius_of_gyration\":" << shape.radiusOfGyration
+      << ",\"fold_ratio\":" << cf::fold_ratio(s, link, shape);
+    const cf::ContactStats contact = cf::contact_stats(s);
+    o << ",\"close_pairs\":" << contact.closePairs << ",\"close_min_distance\":" << contact.minDistance << "}";
     return o.str();
 }
 
@@ -367,6 +370,13 @@ int main(int argc, char** argv) {
         std::printf("divisions=%llu\nclamped=%llu\npostponed_degree=%llu\nnormal_fallbacks=%llu\n", static_cast<unsigned long long>(totalDiv),
                     static_cast<unsigned long long>(totalClamped), static_cast<unsigned long long>(totalPostponed), static_cast<unsigned long long>(totalFallbacks));
         std::printf("link_mean=%.5f\nlink_min=%.5f\nlink_max=%.5f\ndeg_max=%u\n", link.mean, static_cast<double>(link.min), static_cast<double>(link.max), deg.max);
+        {
+            const cf::ShapeStats shape = cf::shape_stats(s);
+            const cf::ContactStats contact = cf::contact_stats(s);
+            std::printf("link_std=%.5f\nradius_of_gyration=%.3f\nfold_ratio=%.4f\nclose_pairs=%llu\nclose_min_distance=%.4f\n", cf::link_stats(s, 1).stddev,
+                        shape.radiusOfGyration, cf::fold_ratio(s, link, shape), static_cast<unsigned long long>(contact.closePairs),
+                        static_cast<double>(contact.minDistance));
+        }
         std::printf("invariant_checks=%llu\ninvariants=%s\n", static_cast<unsigned long long>(checks), finalOk ? "ok" : "BROKEN");
         std::printf("snapshots_written=%llu\ncheckpoints_written=%llu\n", static_cast<unsigned long long>(snapshots), static_cast<unsigned long long>(checkpoints));
         std::printf("checksum=%s\n", cf::hex64(cf::checksum(s)).c_str());

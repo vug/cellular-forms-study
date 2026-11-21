@@ -70,10 +70,15 @@ struct CleavagePair {
     std::uint8_t i = 0, j = 0;
 };
 
-// Chooses the cleavage pair for v by ring index: among near-opposite pairs
-// (j = i + floor(d/2) or i + ceil(d/2)) that respect the degree cap, the one whose end cells
-// have the fewest links; ties are broken with `tieHash`. Returns valid=false when no pair
-// respects the cap (the division is postponed).
-CleavagePair choose_cleavage_pair(const State& s, std::uint32_t v, std::uint64_t tieHash);
+// Chooses the cleavage pair for v by ring index, never by a plane test:
+//   1. candidates are the near-opposite pairs (j = i + floor(d/2) or i + ceil(d/2)) that respect
+//      the degree cap;
+//   2. among them, the pair whose end cells a and b have the fewest links
+//      (cost = 100 * max(deg a, deg b) + deg a + deg b), as in docs/model.md section 6;
+//   3. ties: with `pos` given, the pair with the shortest cleavage links |a - v| + |b - v|, so
+//      the daughter is inserted along the direction in which v's neighbourhood is most
+//      stretched; remaining ties (and all ties when pos == nullptr) by `tieHash`.
+// Returns valid=false when no pair respects the cap (the division is postponed).
+CleavagePair choose_cleavage_pair(const State& s, std::uint32_t v, std::uint64_t tieHash, const Vec3* pos = nullptr);
 
 }  // namespace cf

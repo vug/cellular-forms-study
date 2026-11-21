@@ -7,6 +7,7 @@
 // GPU. The hand-off is ordered on the CPU: CUDA finishes writing a slot (stream synchronise)
 // before the slot is published, and the renderer only switches slots when no frame is in flight.
 #pragma once
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -79,6 +80,11 @@ public:
     void setStepsPerSecondLimit(double limit);  // 0 = as fast as possible
     LiveStatus status() const;
 
+    // --- render thread. What the simulation publishes besides positions, birth steps and food:
+    // one more per-cell scalar (0 none, 1 generation, 2 curvature, 3 morphogen activator) and
+    // the membrane (normals and triangles). A change is published at once, also while paused.
+    void setRenderNeeds(int extraKind, bool mesh);
+
     // --- render thread. Call with no frame in flight: switches to the newest published frame,
     // if there is one, and returns what to draw.
     LiveFrame acquire();
@@ -89,19 +95,32 @@ public:
 private:
     struct Slot {
         // CUDA backend: Vulkan buffers shared with CUDA.
-        Buffer pos, birth, food;
-        std::unique_ptr<cf::CudaExternalBuffer> cudaPos, cudaBirth, cudaFood;
+        Buffer pos, birth, food, extra;
+        std::unique_ptr<cf::CudaExternalBuffer> cudaPos, cudaBirth, cudaFood, cudaExtra;
+        // The membrane, allocated the first time it is asked for (36 more bytes per cell and slot).
+        Buffer normal, index;
+        std::unique_ptr<cf::CudaExternalBuffer> cudaNormal, cudaIndex;
         // CPU backend: host copy, uploaded by the render thread when the slot becomes the front.
         std::vector<cf::Vec3> hostPos;
         std::vector<std::uint32_t> hostBirth;
         std::vector<float> hostFood;
+        std::vector<float> hostExtra;
+        std::vector<cf::Vec3> hostNormal;
+        std::vector<std::uint32_t> hostIndex;
         std::uint32_t count = 0;
+        int extraKind = 0;             // what `extra` holds in this frame (0: nothing)
+        bool hasMesh = false;          // normals and triangles were published with this frame
+        std::uint32_t indexCount = 0;
+        std::uint64_t version = 0;     // PointBuffers::version of this frame
         std::uint64_t step = 0;
         cf::Vec3 lo{}, hi{};
         std::uint64_t serial = 0;
     };
 
     void threadMain();
+    void shareBuffer(VkDeviceSize bytes, VkBufferUsageFlags usage, Buffer& buffer, std::unique_ptr<cf::CudaExternalBuffer>& mapped);
+    void ensureMeshBuffers();
+    void releaseSlots();
     void buildSimulation(std::uint64_t seed, int level, const cf::Params& params);
     void publish();
 
@@ -116,6 +135,12 @@ private:
     int front_ = 0, ready_ = 1, back_ = 2;
     bool readyFresh_ = false;
     std::unique_ptr<CloudGpu> frontGpu_;  // CPU backend: device copy of the front slot
+    std::atomic<int> wantExtra_{0};
+    std::atomic<bool> wantMesh_{false};
+    std::atomic<bool> meshReady_{false};  // the shared membrane buffers exist
+    bool meshFailed_ = false;             // they could not be allocated: do not try again
+    std::uint32_t indexCapacity_ = 0;
+    std::mutex slotsMutex_;               // the membrane buffers appear while the simulation publishes
     bool frontValid_ = false;
 
     // Commands and status, guarded by mutex_.

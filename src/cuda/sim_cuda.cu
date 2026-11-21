@@ -9,6 +9,7 @@
 
 #include <cub/device/device_radix_sort.cuh>
 #include <cub/device/device_reduce.cuh>
+#include <cub/device/device_scan.cuh>
 #include <cub/device/device_select.cuh>
 #include <thrust/iterator/counting_iterator.h>
 
@@ -790,6 +791,55 @@ __global__ void k_after_permute(const std::uint32_t* uid, std::uint32_t* slotOf,
     if (q >= n) return;
     slotOf[uid[q]] = q;
     sortedSlot[q] = q;
+}
+
+// ---- For the viewer (CudaSim::copy_render_data): a per-cell scalar to colour by, and the
+// triangles of the membrane. Everything is in slot order, like the positions the viewer gets.
+
+__global__ void k_render_scalar(int kind, const std::uint32_t* gen, const Vec3* pos, const Vec3* nrm, const std::uint32_t* nbr,
+                                const std::uint8_t* deg, const float* morphB, float l0, float* out, std::uint32_t n) {
+    const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
+    if (v >= n) return;
+    float x = 0.0f;
+    if (kind == static_cast<int>(RenderScalar::Generation)) x = static_cast<float>(gen[v]);
+    else if (kind == static_cast<int>(RenderScalar::Curvature)) x = cell_curvature(pos, nbr + static_cast<std::size_t>(v) * kMaxDeg, deg[v], pos[v], nrm[v], l0);
+    else if (kind == static_cast<int>(RenderScalar::Activator)) x = morphB != nullptr ? morph_signal(morphB[v]) : 0.0f;
+    out[v] = x;
+}
+
+// The triangles of the membrane: every triangle (v, a, b) of consecutive ring entries is listed
+// by the cell with the lowest slot (core/export.cpp mesh_faces does the same by id). First the
+// number each cell lists, then, after a running sum, the triangles themselves. Cells past `n`
+// (a view cut short by the buffer of the caller) are left out.
+__device__ inline bool lists_triangle(std::uint32_t v, std::uint32_t a, std::uint32_t b, std::uint32_t n) { return v < a && v < b && a < n && b < n; }
+
+__global__ void k_tri_count(const std::uint32_t* nbr, const std::uint8_t* deg, std::uint32_t* count, std::uint32_t n) {
+    const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
+    if (v >= n) return;
+    const std::uint32_t* r = nbr + static_cast<std::size_t>(v) * kMaxDeg;
+    const std::uint32_t d = deg[v];
+    std::uint32_t c = 0;
+    for (std::uint32_t k = 0; k < d; ++k) c += lists_triangle(v, r[k], r[(k + 1u) % d], n) ? 1u : 0u;
+    count[v] = c;
+}
+
+__global__ void k_tri_write(const std::uint32_t* nbr, const std::uint8_t* deg, const std::uint32_t* offset, std::uint32_t* out, std::uint32_t n,
+                            std::uint32_t maxTriangles) {
+    const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
+    if (v >= n) return;
+    const std::uint32_t* r = nbr + static_cast<std::size_t>(v) * kMaxDeg;
+    const std::uint32_t d = deg[v];
+    std::uint32_t t = offset[v];
+    for (std::uint32_t k = 0; k < d; ++k) {
+        const std::uint32_t a = r[k], b = r[(k + 1u) % d];
+        if (!lists_triangle(v, a, b, n)) continue;
+        if (t < maxTriangles) {
+            out[static_cast<std::size_t>(t) * 3] = v;
+            out[static_cast<std::size_t>(t) * 3 + 1] = a;
+            out[static_cast<std::size_t>(t) * 3 + 2] = b;
+        }
+        ++t;
+    }
 }
 
 // One per-cell float array from slot order (uid != nullptr) or id order (uid == nullptr).
@@ -1894,6 +1944,36 @@ BatchEnd CudaSim::Impl::run_batch(std::uint32_t steps, std::uint32_t stopCells, 
     return result;
 }
 
+CudaSim::RenderDataHost CudaSim::render_data_host(RenderScalar kind) {
+    Impl& m = *impl_;
+    const std::size_t n = m.n;
+    RenderDataHost out;
+    float* extra = nullptr;
+    Vec3* normal = nullptr;
+    std::uint32_t* index = nullptr;
+    const std::size_t maxIndices = n * 6;
+    CF_CUDA(cudaMalloc(&extra, n * sizeof(float)));
+    CF_CUDA(cudaMalloc(&normal, n * sizeof(Vec3)));
+    CF_CUDA(cudaMalloc(&index, maxIndices * sizeof(std::uint32_t)));
+    RenderTargets t;
+    t.extra = extra;
+    t.extraKind = kind;
+    t.normal = normal;
+    t.index = index;
+    t.maxIndices = static_cast<std::uint32_t>(maxIndices);
+    const RenderCounts counts = copy_render_data(t, m.n);
+    out.extra.resize(n);
+    out.normal.resize(n);
+    out.index.resize(counts.indices);
+    CF_CUDA(cudaMemcpy(out.extra.data(), extra, n * sizeof(float), cudaMemcpyDeviceToHost));
+    CF_CUDA(cudaMemcpy(out.normal.data(), normal, n * sizeof(Vec3), cudaMemcpyDeviceToHost));
+    if (counts.indices > 0) CF_CUDA(cudaMemcpy(out.index.data(), index, counts.indices * sizeof(std::uint32_t), cudaMemcpyDeviceToHost));
+    CF_CUDA(cudaFree(extra));
+    CF_CUDA(cudaFree(normal));
+    CF_CUDA(cudaFree(index));
+    return out;
+}
+
 void CudaSim::snapshot_async(std::function<void(State&&)> done) {
     Impl& m = *impl_;
     // One copy in flight at a time: wait until the previous one has left the pinned buffers.
@@ -1965,15 +2045,41 @@ void CudaSim::wait_snapshots() {
     }
 }
 
-std::uint32_t CudaSim::copy_render_data(void* devPos, void* devBirth, void* devFood, std::uint32_t maxCells) {
+RenderCounts CudaSim::copy_render_data(const RenderTargets& t, std::uint32_t maxCells) {
     Impl& m = *impl_;
+    RenderCounts out;
     const std::uint32_t n = std::min(m.n, maxCells);
     const std::size_t c = n;
-    CF_CUDA(cudaMemcpyAsync(devPos, m.pos[m.cur], c * sizeof(Vec3), cudaMemcpyDeviceToDevice, m.stream));
-    CF_CUDA(cudaMemcpyAsync(devBirth, m.birth, c * sizeof(std::uint32_t), cudaMemcpyDeviceToDevice, m.stream));
-    CF_CUDA(cudaMemcpyAsync(devFood, m.food[m.cur], c * sizeof(float), cudaMemcpyDeviceToDevice, m.stream));
-    CF_CUDA(cudaStreamSynchronize(m.stream));
-    return n;
+    const cudaStream_t st = m.stream;
+    const unsigned gb = grid_blocks(n);
+    if (t.pos) CF_CUDA(cudaMemcpyAsync(t.pos, m.pos[m.cur], c * sizeof(Vec3), cudaMemcpyDeviceToDevice, st));
+    if (t.birth) CF_CUDA(cudaMemcpyAsync(t.birth, m.birth, c * sizeof(std::uint32_t), cudaMemcpyDeviceToDevice, st));
+    if (t.food) CF_CUDA(cudaMemcpyAsync(t.food, m.food[m.cur], c * sizeof(float), cudaMemcpyDeviceToDevice, st));
+    if (t.normal) CF_CUDA(cudaMemcpyAsync(t.normal, m.normal[m.cur], c * sizeof(Vec3), cudaMemcpyDeviceToDevice, st));
+    if (t.extra && t.extraKind != RenderScalar::None)
+        k_render_scalar<<<gb, kBlock, 0, st>>>(static_cast<int>(t.extraKind), m.gen, m.pos[m.cur], m.normal[m.cur], m.nbr, m.deg,
+                                               m.morphPresent ? m.morphB[m.cur] : nullptr, m.params.linkRestLength, static_cast<float*>(t.extra), n);
+    std::uint32_t* counts = m.idBlock;  // the id buffers of the grid are free between steps
+    std::uint32_t* offsets = m.idBlock + m.capacity;
+    const bool triangles = t.index != nullptr && t.maxIndices >= 3u && n >= 3u;
+    if (triangles) {
+        k_tri_count<<<gb, kBlock, 0, st>>>(m.nbr, m.deg, counts, n);
+        std::size_t bytes = 0;
+        CF_CUDA(cub::DeviceScan::ExclusiveSum(nullptr, bytes, counts, offsets, n, st));
+        m.ensure_temp(bytes);
+        CF_CUDA(cub::DeviceScan::ExclusiveSum(m.cubTemp, bytes, counts, offsets, n, st));
+        k_tri_write<<<gb, kBlock, 0, st>>>(m.nbr, m.deg, offsets, static_cast<std::uint32_t*>(t.index), n, t.maxIndices / 3u);
+    }
+    CF_CUDA(cudaStreamSynchronize(st));
+    out.cells = n;
+    if (triangles) {
+        std::uint32_t lastCount = 0, lastOffset = 0;
+        CF_CUDA(cudaMemcpy(&lastCount, counts + (n - 1u), sizeof lastCount, cudaMemcpyDeviceToHost));
+        CF_CUDA(cudaMemcpy(&lastOffset, offsets + (n - 1u), sizeof lastOffset, cudaMemcpyDeviceToHost));
+        const std::uint32_t total = lastOffset + lastCount;
+        out.indices = 3u * std::min(total, t.maxIndices / 3u);
+    }
+    return out;
 }
 
 }  // namespace cf

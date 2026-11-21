@@ -40,10 +40,14 @@ void usage() {
         "  --ssaa <1..4>          supersampling for captures (default 2)\n"
         "\n"
         "Look:\n"
-        "  --mode <cells|xray|mesh|sss>  spheres (default), additive x-ray, the membrane mesh, or the membrane\n"
-        "                         with subsurface scattering (the last two need checkpoint files)\n"
+        "  --mode <cells|xray|mesh|sss|path>  spheres (default), additive x-ray, the membrane mesh, the membrane\n"
+        "                         with subsurface scattering (these two need a state with its rings: a\n"
+        "                         checkpoint file or a live run), or path traced spheres (needs ray tracing)\n"
         "  --xray-density <x>     brightness of the x-ray mode (default 0.06)\n"
-        "  --color <age|food|birth|uniform>\n"
+        "  --color <age|food|birth|uniform|generation|curvature|activator>\n"
+        "                         curvature needs a state with its rings, activator one with morphogens\n"
+        "  --set name=value       any render setting (repeatable): light, shadows, occlusion, cell walls,\n"
+        "                         outlines, path tracer, tone mapping, ...;  --list-settings prints the names\n"
         "  --yaw <deg> --pitch <deg> --zoom <factor>\n"
         "  --radius <r>           cell radius in world units (default 0.55)\n"
         "  --no-ao                turn ambient occlusion off\n"
@@ -108,17 +112,20 @@ int main(int argc, char** argv) {
             } else if (a == "--ssaa") {
                 o.ssaa = std::atoi(next());
             } else if (a == "--color") {
-                const std::string v = next();
-                if (v == "age") o.settings.colorMode = cfv::ColorMode::Age;
-                else if (v == "food") o.settings.colorMode = cfv::ColorMode::Food;
-                else if (v == "birth") o.settings.colorMode = cfv::ColorMode::Birth;
-                else if (v == "uniform") o.settings.colorMode = cfv::ColorMode::Uniform;
-                else if (v == "morph") {
-                    // The morphogen activator, shown through the food colouring (checkpoint files only).
-                    o.settings.colorMode = cfv::ColorMode::Food;
-                    cfv::showMorphogenAsFood(true);
-                }
-                else throw std::runtime_error("unknown colour mode " + v);
+                std::string v = next();
+                if (v == "morph") v = "activator";
+                const std::string err = cfv::setRenderSetting(o.settings, "color", v);
+                if (!err.empty()) throw std::runtime_error("unknown colour mode " + v);
+            } else if (a == "--set") {
+                // Any render setting by name: --set shadows=on --set sunElevation=35 ...
+                const std::string kv = next();
+                const std::size_t eq = kv.find('=');
+                if (eq == std::string::npos) throw std::runtime_error("--set expects name=value");
+                const std::string err = cfv::setRenderSetting(o.settings, kv.substr(0, eq), kv.substr(eq + 1));
+                if (!err.empty()) throw std::runtime_error("--set: " + err);
+            } else if (a == "--list-settings") {
+                for (const std::string& n : cfv::renderSettingNames()) std::printf("%s%s", n.c_str(), "\n");
+                return 0;
             } else if (a == "--yaw") {
                 o.yawDeg = static_cast<float>(std::atof(next()));
             } else if (a == "--pitch") {
@@ -129,11 +136,7 @@ int main(int argc, char** argv) {
                 o.settings.sphereRadius = static_cast<float>(std::atof(next()));
             } else if (a == "--mode") {
                 const std::string v = next();
-                if (v == "cells") o.settings.drawMode = 0;
-                else if (v == "xray") o.settings.drawMode = 1;
-                else if (v == "mesh" || v == "membrane") o.settings.drawMode = 2;
-                else if (v == "sss") o.settings.drawMode = 3;
-                else throw std::runtime_error("--mode expects cells, xray or mesh");
+                if (!cfv::setRenderSetting(o.settings, "drawMode", v).empty()) throw std::runtime_error("--mode expects cells, xray, mesh, sss or path");
             } else if (a == "--xray-density") {
                 o.settings.xrayDensity = static_cast<float>(std::atof(next()));
             } else if (a == "--no-ao") {

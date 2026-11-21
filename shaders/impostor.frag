@@ -8,9 +8,11 @@ layout(location = 1) flat in vec3 vCenter;
 layout(location = 2) flat in float vRadius;
 layout(location = 3) flat in float vPixelRadius;
 layout(location = 4) flat in float vScalar;
+layout(location = 5) flat in uint vId;
 
 layout(location = 0) out vec4 outAlbedo;       // rgb colour
 layout(location = 1) out vec4 outNormalDepth;  // view-space normal (xyz), linear view depth (w > 0)
+layout(location = 2) out uint outId;           // cell index + 1
 
 // The sphere surface is never behind the quad (the quad passes through the centre), so the
 // depth we write is <= the rasterised depth and early depth testing stays valid.
@@ -39,4 +41,5 @@ void main() {
 
     outAlbedo = vec4(cellAlbedo(vScalar), 1.0);
     outNormalDepth = vec4(normal, -hit.z);
+    outId = vId;
 }

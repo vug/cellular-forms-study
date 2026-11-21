@@ -43,12 +43,15 @@ int runHeadless(const ViewOptions& o) {
     for (int k = 0; k < n; ++k) {
         const int index = indices[static_cast<size_t>(k)];
         const Cloud& cloud = source.get(index);
-        gpu.upload(cloud);
+        const int extraKind = extraKindFor(o.settings.colorMode);
+        gpu.upload(cloud, extraKind);
+        if (extraKind != 0 && gpu.buffers().extraKind != extraKind)
+            std::fprintf(stderr, "note: this file has no values for the chosen colour mode (curvature needs a checkpoint, the activator a state with morphogens)%s", "\n");
         RenderSettings settings = o.settings;
         applyAutoRange(settings, cloud);
         const OrbitCamera cam = cameraFor(cloud, o);
         const std::vector<std::uint8_t> pixels =
-            renderOffscreen(ctx, gpu.buffers(), cam, settings, cloud.radius, static_cast<float>(cloud.step), o.width,
+            renderOffscreen(ctx, gpu.buffers(), cam, settings, cloud.centre, cloud.radius, static_cast<float>(cloud.step), o.width,
                             o.height, o.ssaa);
         std::printf("frame %d: %u cells, step %llu%s", index, cloud.count(), static_cast<unsigned long long>(cloud.step), "\n");
 

@@ -93,6 +93,20 @@ CF_FN LinkTerms link_terms(const Vec3* pos, const std::uint32_t* ring, std::uint
 #define CF_GRID_REFINE 1
 #endif
 
+// Discrete mean curvature at a cell, in 1 / rest length: for each link, the curvature of the
+// circle through the cell and its neighbour that is tangent to the surface at the cell; the
+// mean over the ring. Positive where the sheet bulges outwards. For display (the viewer colours
+// cells by it); the descriptors compute the same quantity in double precision.
+CF_FN float cell_curvature(const Vec3* pos, const std::uint32_t* ring, std::uint32_t d, Vec3 P, Vec3 N, float l0) {
+    float k = 0.0f;
+    for (std::uint32_t q = 0; q < d; ++q) {
+        const Vec3 e = P - pos[ring[q]];
+        const float len2 = dot(e, e);
+        if (len2 > 0.0f) k += 2.0f * dot(N, e) / len2;
+    }
+    return d > 0u ? k / static_cast<float>(d) * l0 : 0.0f;
+}
+
 // Uniform grid with cell size = roi (docs/model.md section 8). Cells are sorted by `key`
 // (stable, so cells with equal keys stay in id order).
 struct GridView {

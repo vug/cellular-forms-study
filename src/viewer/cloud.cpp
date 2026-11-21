@@ -1,8 +1,12 @@
 #include "cloud.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <stdexcept>
 
+#include "core/export.hpp"
+#include "core/kernels.hpp"
+#include "core/morph.hpp"
 #include "state_file.hpp"
 
 namespace cfv {
@@ -24,6 +28,7 @@ void Cloud::finalize() {
     radius = std::max(std::sqrt(r2), linkRestLength);
 
     minBirth = birth.empty() ? 0u : *std::min_element(birth.begin(), birth.end());
+    maxGeneration = generation.empty() ? 1.0f : std::max(*std::max_element(generation.begin(), generation.end()), 1.0f);
 
     // 90th percentile of the age, from at most ~100k evenly spaced cells.
     std::vector<float> ages;
@@ -46,8 +51,33 @@ Cloud cloudFromState(const cf::State& s, std::string label) {
     c.foodThreshold = s.params.foodThreshold;
     c.linkRestLength = s.params.linkRestLength;
     c.label = std::move(label);
+    addTopology(c, s);
     c.finalize();
     return c;
+}
+
+void addTopology(Cloud& c, const cf::State& s) {
+    c.normal.assign(s.normal.begin(), s.normal.begin() + s.n);
+    const auto faces = cf::mesh_faces(s);
+    c.indices.clear();
+    c.indices.reserve(faces.size() * 3);
+    for (const auto& f : faces) c.indices.insert(c.indices.end(), f.begin(), f.end());
+    c.generation.resize(s.n);
+    c.curvature.resize(s.n);
+    for (std::uint32_t v = 0; v < s.n; ++v) {
+        c.generation[v] = static_cast<float>(s.gen[v]);
+        c.curvature[v] = cf::cell_curvature(s.pos.data(), s.ring(v), s.deg[v], s.pos[v], s.normal[v], s.params.linkRestLength);
+    }
+    c.activator.clear();
+    if (s.morphB.size() >= s.n) {
+        c.activator.resize(s.n);
+        for (std::uint32_t v = 0; v < s.n; ++v) c.activator[v] = cf::morph_signal(s.morphB[v]);
+    }
+}
+
+std::uint64_t nextBufferVersion() {
+    static std::atomic<std::uint64_t> counter{1};
+    return counter.fetch_add(1);
 }
 
 Cloud loadCloud(const std::filesystem::path& file) {
@@ -101,16 +131,30 @@ CloudGpu::~CloudGpu() {
     ctx_.destroy(food_);
     ctx_.destroy(normal_);
     ctx_.destroy(index_);
+    ctx_.destroy(extra_);
 }
 
-void CloudGpu::upload(const Cloud& cloud) {
+void CloudGpu::setExtra(const Cloud& cloud, int extraKind) {
+    ctx_.destroy(extra_);
+    extraKind_ = 0;
+    const std::vector<float>* values = cloud.extra(extraKind);
+    if (values != nullptr && cloud.count() == count_) {
+        extra_ = ctx_.createBuffer(static_cast<VkDeviceSize>(count_) * sizeof(float), kCellBufferUsage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        ctx_.upload(extra_, values->data(), static_cast<VkDeviceSize>(count_) * sizeof(float));
+        extraKind_ = extraKind;
+    }
+    version_ = nextBufferVersion();
+}
+
+void CloudGpu::upload(const Cloud& cloud, int extraKind) {
     const std::uint32_t n = cloud.count();
     if (n > capacity_) {
         ctx_.destroy(pos_);
         ctx_.destroy(birth_);
         ctx_.destroy(food_);
         capacity_ = std::max<std::uint32_t>(n + n / 4, 1024u);
-        const VkBufferUsageFlags usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        const VkBufferUsageFlags usage = kCellBufferUsage | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         const VkMemoryPropertyFlags props = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
         pos_ = ctx_.createBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(cf::Vec3), usage, props);
         birth_ = ctx_.createBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(std::uint32_t), usage, props);
@@ -120,6 +164,7 @@ void CloudGpu::upload(const Cloud& cloud) {
     ctx_.upload(birth_, cloud.birth.data(), static_cast<VkDeviceSize>(n) * sizeof(std::uint32_t));
     ctx_.upload(food_, cloud.food.data(), static_cast<VkDeviceSize>(n) * sizeof(float));
     count_ = n;
+    setExtra(cloud, extraKind);
 
     // Membrane data, when the cloud has it (replaced on every upload: sizes differ per file).
     ctx_.destroy(normal_);
@@ -127,8 +172,7 @@ void CloudGpu::upload(const Cloud& cloud) {
     indexCount_ = 0;
     if (!cloud.indices.empty() && cloud.normal.size() == cloud.pos.size()) {
         const VkMemoryPropertyFlags props = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-        normal_ = ctx_.createBuffer(static_cast<VkDeviceSize>(n) * sizeof(cf::Vec3),
-                                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, props);
+        normal_ = ctx_.createBuffer(static_cast<VkDeviceSize>(n) * sizeof(cf::Vec3), kCellBufferUsage | VK_BUFFER_USAGE_TRANSFER_DST_BIT, props);
         index_ = ctx_.createBuffer(cloud.indices.size() * sizeof(std::uint32_t),
                                    VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, props);
         ctx_.upload(normal_, cloud.normal.data(), static_cast<VkDeviceSize>(n) * sizeof(cf::Vec3));
@@ -151,6 +195,20 @@ void applyAutoRange(RenderSettings& settings, const Cloud& cloud) {
         case ColorMode::Birth:
             settings.scalarMin = static_cast<float>(cloud.minBirth);
             settings.scalarMax = std::max(static_cast<float>(cloud.step), settings.scalarMin + 1.0f);
+            break;
+        case ColorMode::Generation:
+            settings.scalarMin = 0.0f;
+            settings.scalarMax = cloud.maxGeneration;
+            break;
+        case ColorMode::Curvature:
+            // Per rest length; a sphere of the starting size is about 0.4. Symmetric, for the
+            // diverging palette.
+            settings.scalarMin = -0.6f;
+            settings.scalarMax = 0.6f;
+            break;
+        case ColorMode::Activator:
+            settings.scalarMin = 0.0f;
+            settings.scalarMax = 1.0f;
             break;
         case ColorMode::Uniform:
             break;

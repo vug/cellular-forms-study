@@ -8,9 +8,11 @@ layout(location = 1) flat in vec3 vCenter;
 layout(location = 2) flat in float vRadius;
 layout(location = 3) flat in float vPixelRadius;
 layout(location = 4) flat in float vScalar;
+layout(location = 5) flat in uint vId;
 
 layout(location = 0) out vec4 outAlbedo;
 layout(location = 1) out vec4 outNormalDepth;  // r = density (the alpha/depth channel stays 0)
+layout(location = 2) out uint outId;           // not kept: there is no single cell per pixel here
 
 void main() {
     float density;
@@ -24,5 +26,6 @@ void main() {
         density = max(1.0 - dot(d, d), 0.0);
     }
     outAlbedo = vec4(0.0);
+    outId = vId;
     outNormalDepth = vec4(density, vScalar * density, 0.0, 0.0);
 }

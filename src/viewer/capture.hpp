@@ -12,8 +12,9 @@ namespace cfv {
 
 // Renders the cells at (width * ssaa) x (height * ssaa) and box-filters down to width x height.
 // Returns width * height * 4 bytes (RGBA, top row first). No frame may be in flight on ctx.
+// In the path traced mode it renders as many frames as the tracer needs for its samples.
 std::vector<std::uint8_t> renderOffscreen(Context& ctx, const PointBuffers& points, const OrbitCamera& camera,
-                                          const RenderSettings& settings, float sceneRadius, float currentStep,
+                                          const RenderSettings& settings, Vec3 sceneCentre, float sceneRadius, float currentStep,
                                           int width, int height, int ssaa);
 
 // Writes an RGBA8 image as PNG. Returns false when the file could not be written.

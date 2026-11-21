@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "core/sim.hpp"
 
@@ -78,6 +79,26 @@ struct CudaPhaseTimes {
     std::uint64_t steps = 0;
 };
 
+// What the viewer can draw from, straight from device memory (CudaSim::copy_render_data). Every
+// pointer is device memory owned by the caller (Vulkan buffers imported into CUDA); null means
+// "not wanted". All arrays are in the same order, so the triangle indices refer to the copied
+// positions.
+enum class RenderScalar : int { None = 0, Generation = 1, Curvature = 2, Activator = 3 };
+struct RenderTargets {
+    void* pos = nullptr;     // float3 per cell
+    void* birth = nullptr;   // uint32 per cell
+    void* food = nullptr;    // float per cell
+    void* extra = nullptr;   // float per cell: the scalar named by extraKind
+    RenderScalar extraKind = RenderScalar::None;
+    void* normal = nullptr;  // float3 per cell
+    void* index = nullptr;   // uint32, three per triangle of the membrane
+    std::uint32_t maxIndices = 0;
+};
+struct RenderCounts {
+    std::uint32_t cells = 0;
+    std::uint32_t indices = 0;  // 0 when no triangles were asked for
+};
+
 class CudaSim final : public Simulation {
 public:
     // Throws std::invalid_argument when the parameters fail validate() or the state fails the
@@ -121,9 +142,18 @@ public:
     void enable_phase_timing(bool on);
     CudaPhaseTimes phase_times() const;
 
-    // Copies the current positions, birth steps and food of all cells into device memory owned
-    // by someone else (the viewer's Vulkan buffers imported into CUDA). Returns the cell count.
-    std::uint32_t copy_render_data(void* devPos, void* devBirth, void* devFood, std::uint32_t maxCells);
+    // Copies what the viewer draws into device memory owned by someone else: positions, birth
+    // steps and food, and on request one more per-cell scalar (generation, curvature or the
+    // morphogen activator), the normals, and the triangles of the membrane. Returns the counts.
+    RenderCounts copy_render_data(const RenderTargets& targets, std::uint32_t maxCells);
+    // The same data fetched to the host (for tests): the scalar, the normals and the triangle
+    // indices, in the order copy_render_data writes them.
+    struct RenderDataHost {
+        std::vector<float> extra;
+        std::vector<Vec3> normal;
+        std::vector<std::uint32_t> index;
+    };
+    RenderDataHost render_data_host(RenderScalar kind);
 
 private:
     struct Impl;

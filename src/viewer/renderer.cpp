@@ -1,6 +1,9 @@
 #include "renderer.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -36,20 +39,48 @@ const uint32_t kMeshVert[] = {
 const uint32_t kMeshFrag[] = {
 #include "mesh.frag.inc"
 };
+const uint32_t kMeshBaryFrag[] = {
+#include "mesh_bary.frag.inc"
+};
+const uint32_t kShadowCellsVert[] = {
+#include "shadow_cells.vert.inc"
+};
+const uint32_t kShadowCellsFrag[] = {
+#include "shadow_cells.frag.inc"
+};
+const uint32_t kShadowMeshVert[] = {
+#include "shadow_mesh.vert.inc"
+};
+const uint32_t kShadowMeshFrag[] = {
+#include "shadow_mesh.frag.inc"
+};
+const uint32_t kRtaoFrag[] = {
+#include "rtao.frag.inc"
+};
+const uint32_t kPathTraceFrag[] = {
+#include "pathtrace.frag.inc"
+};
+const uint32_t kBoxComp[] = {
+#include "aabb.comp.inc"
+};
 
 constexpr VkFormat kAlbedoFormat = VK_FORMAT_R8G8B8A8_UNORM;
 constexpr VkFormat kNormalDepthFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+constexpr VkFormat kIdFormat = VK_FORMAT_R32_UINT;
 constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
 constexpr VkFormat kAoFormat = VK_FORMAT_R8_UNORM;
+constexpr VkFormat kAccumFormat = VK_FORMAT_R32G32B32A32_SFLOAT;
+
+enum class VertexInput { None, Cells, Mesh, CellsPos, MeshPos };
+enum class Blend { Opaque, Additive, Accumulate };
 
 struct PipelineDesc {
     const uint32_t* vert;
     size_t vertWords;
     const uint32_t* frag;
     size_t fragWords;
-    bool instancedCells = false;  // impostor vertex layout, triangle strip, depth test
-    bool mesh = false;            // per-vertex cell attributes + normals, triangle list, depth test
-    bool additive = false;        // additive blending, no depth test (x-ray)
+    VertexInput input = VertexInput::None;
+    Blend blend = Blend::Opaque;
     std::vector<VkFormat> colorFormats;
     VkFormat depthFormat = VK_FORMAT_UNDEFINED;
 };
@@ -67,30 +98,36 @@ VkPipeline makePipeline(Context& ctx, VkPipelineLayout layout, const PipelineDes
     stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     stages[1].module = fs;
 
-    // Cells: one instance per cell. Membrane: one vertex per cell, plus its normal.
-    const VkVertexInputRate rate = d.mesh ? VK_VERTEX_INPUT_RATE_VERTEX : VK_VERTEX_INPUT_RATE_INSTANCE;
-    const VkVertexInputBindingDescription bindings[4] = {
-        {0, 3 * sizeof(float), rate},
-        {1, sizeof(uint32_t), rate},
-        {2, sizeof(float), rate},
-        {3, 3 * sizeof(float), rate},
+    // One buffer per attribute; binding = location: 0 position, 1 birth step, 2 food, 3 normal
+    // (membrane only), 4 the extra scalar. Cells: one instance per cell. Membrane: one vertex
+    // per cell.
+    const bool cells = d.input == VertexInput::Cells || d.input == VertexInput::CellsPos;
+    const VkVertexInputRate rate = cells ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
+    const VkVertexInputBindingDescription allBindings[5] = {
+        {0, 3 * sizeof(float), rate}, {1, sizeof(uint32_t), rate}, {2, sizeof(float), rate}, {3, 3 * sizeof(float), rate}, {4, sizeof(float), rate},
     };
-    const VkVertexInputAttributeDescription attributes[4] = {
-        {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
-        {1, 1, VK_FORMAT_R32_UINT, 0},
-        {2, 2, VK_FORMAT_R32_SFLOAT, 0},
-        {3, 3, VK_FORMAT_R32G32B32_SFLOAT, 0},
+    const VkVertexInputAttributeDescription allAttributes[5] = {
+        {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0}, {1, 1, VK_FORMAT_R32_UINT, 0},  {2, 2, VK_FORMAT_R32_SFLOAT, 0},
+        {3, 3, VK_FORMAT_R32G32B32_SFLOAT, 0}, {4, 4, VK_FORMAT_R32_SFLOAT, 0},
     };
-    VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    if (d.instancedCells || d.mesh) {
-        vertexInput.vertexBindingDescriptionCount = d.mesh ? 4u : 3u;
-        vertexInput.pVertexBindingDescriptions = bindings;
-        vertexInput.vertexAttributeDescriptionCount = d.mesh ? 4u : 3u;
-        vertexInput.pVertexAttributeDescriptions = attributes;
+    std::vector<int> used;
+    if (d.input == VertexInput::Cells) used = {0, 1, 2, 4};
+    else if (d.input == VertexInput::Mesh) used = {0, 1, 2, 3, 4};
+    else if (d.input == VertexInput::CellsPos || d.input == VertexInput::MeshPos) used = {0};
+    std::vector<VkVertexInputBindingDescription> bindings;
+    std::vector<VkVertexInputAttributeDescription> attributes;
+    for (int i : used) {
+        bindings.push_back(allBindings[i]);
+        attributes.push_back(allAttributes[i]);
     }
+    VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    vertexInput.vertexBindingDescriptionCount = static_cast<uint32_t>(bindings.size());
+    vertexInput.pVertexBindingDescriptions = bindings.data();
+    vertexInput.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributes.size());
+    vertexInput.pVertexAttributeDescriptions = attributes.data();
 
     VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-    assembly.topology = d.instancedCells ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    assembly.topology = cells ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
     VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
     viewport.viewportCount = 1;
@@ -106,20 +143,33 @@ VkPipeline makePipeline(Context& ctx, VkPipelineLayout layout, const PipelineDes
     msaa.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
     VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-    if (d.depthFormat != VK_FORMAT_UNDEFINED && !d.additive) {
+    if (d.depthFormat != VK_FORMAT_UNDEFINED && d.blend != Blend::Additive) {
         depth.depthTestEnable = VK_TRUE;
         depth.depthWriteEnable = VK_TRUE;
         depth.depthCompareOp = VK_COMPARE_OP_LESS;
     }
 
     std::vector<VkPipelineColorBlendAttachmentState> blendAttachments(d.colorFormats.size());
-    for (auto& a : blendAttachments) {
-        a.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
-                           VK_COLOR_COMPONENT_A_BIT;
-        if (d.additive) {
+    for (size_t i = 0; i < blendAttachments.size(); ++i) {
+        VkPipelineColorBlendAttachmentState& a = blendAttachments[i];
+        const bool integer = d.colorFormats[i] == kIdFormat;  // integer targets cannot blend
+        a.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        if (d.blend == Blend::Additive) {
+            if (integer) {
+                a.colorWriteMask = 0;  // the x-ray pass has no single cell per pixel
+            } else {
+                a.blendEnable = VK_TRUE;
+                a.srcColorBlendFactor = a.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+                a.srcAlphaBlendFactor = a.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+                a.colorBlendOp = a.alphaBlendOp = VK_BLEND_OP_ADD;
+            }
+        } else if (d.blend == Blend::Accumulate) {
+            // new mean = this frame * alpha + old mean * (1 - alpha)
             a.blendEnable = VK_TRUE;
-            a.srcColorBlendFactor = a.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
-            a.srcAlphaBlendFactor = a.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            a.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            a.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            a.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            a.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
             a.colorBlendOp = a.alphaBlendOp = VK_BLEND_OP_ADD;
         }
     }
@@ -159,14 +209,15 @@ VkPipeline makePipeline(Context& ctx, VkPipelineLayout layout, const PipelineDes
     return pipeline;
 }
 
-void beginPass(VkCommandBuffer cmd, VkExtent2D extent, const std::vector<VkImageView>& colors, bool clearColor,
-               VkImageView depthView) {
+// Starts a pass. Colour attachments are cleared, left undefined, or kept (`load`).
+void beginPass(VkCommandBuffer cmd, VkExtent2D extent, const std::vector<VkImageView>& colors, VkAttachmentLoadOp load, VkImageView depthView,
+               bool keepDepth = false) {
     std::vector<VkRenderingAttachmentInfo> attachments(colors.size());
     for (size_t i = 0; i < colors.size(); ++i) {
         attachments[i] = VkRenderingAttachmentInfo{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         attachments[i].imageView = colors[i];
         attachments[i].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        attachments[i].loadOp = clearColor ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachments[i].loadOp = load;
         attachments[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         attachments[i].clearValue.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
     }
@@ -174,7 +225,7 @@ void beginPass(VkCommandBuffer cmd, VkExtent2D extent, const std::vector<VkImage
     depth.imageView = depthView;
     depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
     depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth.storeOp = keepDepth ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
     depth.clearValue.depthStencil = {1.0f, 0};
 
     VkRenderingInfo info{VK_STRUCTURE_TYPE_RENDERING_INFO};
@@ -204,11 +255,78 @@ void toSampled(VkCommandBuffer cmd, const Image& img) {
                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 }
 
+void memoryBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dstStage,
+                   VkAccessFlags2 dstAccess) {
+    VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    b.srcStageMask = srcStage;
+    b.srcAccessMask = srcAccess;
+    b.dstStageMask = dstStage;
+    b.dstAccessMask = dstAccess;
+    VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dep.memoryBarrierCount = 1;
+    dep.pMemoryBarriers = &b;
+    vkCmdPipelineBarrier2(cmd, &dep);
+}
+
+// --- small matrix helpers (column-major, see math.hpp)
+
+Mat4 multiply(const Mat4& a, const Mat4& b) {
+    Mat4 r;
+    for (int c = 0; c < 4; ++c)
+        for (int row = 0; row < 4; ++row) {
+            float s = 0.0f;
+            for (int k = 0; k < 4; ++k) s += a.m[k * 4 + row] * b.m[c * 4 + k];
+            r.m[c * 4 + row] = s;
+        }
+    return r;
+}
+
+// Inverse of a rotation plus translation.
+Mat4 rigidInverse(const Mat4& v) {
+    Mat4 r;
+    for (int c = 0; c < 3; ++c)
+        for (int row = 0; row < 3; ++row) r.m[c * 4 + row] = v.m[row * 4 + c];
+    for (int row = 0; row < 3; ++row) r.m[12 + row] = -(v.m[row * 4 + 0] * v.m[12] + v.m[row * 4 + 1] * v.m[13] + v.m[row * 4 + 2] * v.m[14]);
+    r.m[3] = r.m[7] = r.m[11] = 0.0f;
+    r.m[15] = 1.0f;
+    return r;
+}
+
+Vec3 rotate(const Mat4& m, Vec3 d) {
+    return Vec3{m.m[0] * d.x + m.m[4] * d.y + m.m[8] * d.z, m.m[1] * d.x + m.m[5] * d.y + m.m[9] * d.z, m.m[2] * d.x + m.m[6] * d.y + m.m[10] * d.z};
+}
+
+// Orthographic view volume of half-width `half` (view space, looking down -Z) to Vulkan clip space.
+Mat4 orthographic(float half, float zNear, float zFar) {
+    Mat4 r;
+    for (float& x : r.m) x = 0.0f;
+    r.m[0] = 1.0f / half;
+    r.m[5] = -1.0f / half;
+    r.m[10] = -1.0f / (zFar - zNear);
+    r.m[14] = -zNear / (zFar - zNear);
+    r.m[15] = 1.0f;
+    return r;
+}
+
+uint64_t fnv(const void* data, size_t bytes, uint64_t h = 1469598103934665603ull) {
+    const auto* p = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < bytes; ++i) h = (h ^ p[i]) * 1099511628211ull;
+    return h;
+}
+
+void set3(float* dst, const float* src, float w) {
+    dst[0] = src[0];
+    dst[1] = src[1];
+    dst[2] = src[2];
+    dst[3] = w;
+}
+
 }  // namespace
 
 Renderer::Renderer(Context& ctx, VkFormat targetFormat) : ctx_(ctx), targetFormat_(targetFormat) {
-    uniformBuffer_ = ctx_.createBuffer(sizeof(FrameUniforms), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
+    const VkMemoryPropertyFlags hostVisible = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    uniformBuffer_ = ctx_.createBuffer(sizeof(FrameUniforms), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, hostVisible, true);
+    shadowUniformBuffer_ = ctx_.createBuffer(sizeof(FrameUniforms), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, hostVisible, true);
 
     VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     si.magFilter = VK_FILTER_NEAREST;
@@ -217,73 +335,134 @@ Renderer::Renderer(Context& ctx, VkFormat targetFormat) : ctx_(ctx), targetForma
     si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     vk_check(vkCreateSampler(ctx_.device, &si, nullptr, &sampler_), "vkCreateSampler");
 
-    VkDescriptorSetLayoutBinding bindings[4]{};
+    // Set 0: the frame uniforms and up to six images a pass samples (see composite.frag).
+    VkDescriptorSetLayoutBinding bindings[7]{};
     bindings[0] = {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-    for (uint32_t i = 1; i < 4; ++i)
-        bindings[i] = {i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    for (uint32_t i = 1; i < 7; ++i) bindings[i] = {i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 4;
+    li.bindingCount = 7;
     li.pBindings = bindings;
     vk_check(vkCreateDescriptorSetLayout(ctx_.device, &li, nullptr, &setLayout_), "vkCreateDescriptorSetLayout");
 
-    const VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4},
-                                           {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 12}};
+    std::vector<VkDescriptorPoolSize> sizes = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 8}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32}};
+    if (ctx_.hasRayTracing) {
+        // Set 1 of the ray-traced passes: the acceleration structure and the per-cell buffers.
+        VkDescriptorSetLayoutBinding rt[6]{};
+        rt[0] = {0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+        rt[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        for (uint32_t i = 2; i < 5; ++i) rt[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+        rt[5] = {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo rli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        rli.bindingCount = 6;
+        rli.pBindings = rt;
+        vk_check(vkCreateDescriptorSetLayout(ctx_.device, &rli, nullptr, &rtSetLayout_), "vkCreateDescriptorSetLayout (ray tracing)");
+        sizes.push_back({VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5});
+        sizes.push_back({VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1});
+    }
     VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pi.maxSets = 4;
-    pi.poolSizeCount = 2;
-    pi.pPoolSizes = sizes;
+    pi.maxSets = 6;
+    pi.poolSizeCount = static_cast<uint32_t>(sizes.size());
+    pi.pPoolSizes = sizes.data();
     vk_check(vkCreateDescriptorPool(ctx_.device, &pi, nullptr, &descriptorPool_), "vkCreateDescriptorPool");
 
-    const VkDescriptorSetLayout layouts[4] = {setLayout_, setLayout_, setLayout_, setLayout_};
+    const VkDescriptorSetLayout layouts[5] = {setLayout_, setLayout_, setLayout_, setLayout_, setLayout_};
     VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     ai.descriptorPool = descriptorPool_;
-    ai.descriptorSetCount = 4;
+    ai.descriptorSetCount = 5;
     ai.pSetLayouts = layouts;
-    VkDescriptorSet sets[4];
+    VkDescriptorSet sets[5];
     vk_check(vkAllocateDescriptorSets(ctx_.device, &ai, sets), "vkAllocateDescriptorSets");
     setGeometry_ = sets[0];
-    setSsao_ = sets[1];
-    setBlur_ = sets[2];
-    setComposite_ = sets[3];
+    setShadow_ = sets[1];
+    setSsao_ = sets[2];
+    setBlur_ = sets[3];
+    setComposite_ = sets[4];
 
     VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pli.setLayoutCount = 1;
     pli.pSetLayouts = &setLayout_;
     vk_check(vkCreatePipelineLayout(ctx_.device, &pli, nullptr, &pipelineLayout_), "vkCreatePipelineLayout");
 
+    if (ctx_.hasRayTracing) {
+        VkDescriptorSetAllocateInfo rai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        rai.descriptorPool = descriptorPool_;
+        rai.descriptorSetCount = 1;
+        rai.pSetLayouts = &rtSetLayout_;
+        vk_check(vkAllocateDescriptorSets(ctx_.device, &rai, &rtSet_), "vkAllocateDescriptorSets (ray tracing)");
+        const VkDescriptorSetLayout both[2] = {setLayout_, rtSetLayout_};
+        const VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT, 0, 8};
+        VkPipelineLayoutCreateInfo rpl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        rpl.setLayoutCount = 2;
+        rpl.pSetLayouts = both;
+        rpl.pushConstantRangeCount = 1;
+        rpl.pPushConstantRanges = &push;
+        vk_check(vkCreatePipelineLayout(ctx_.device, &rpl, nullptr, &rtLayout_), "vkCreatePipelineLayout (ray tracing)");
+#define CF_LOAD(member, name) member = reinterpret_cast<PFN_##name>(vkGetDeviceProcAddr(ctx_.device, #name))
+        CF_LOAD(createAs_, vkCreateAccelerationStructureKHR);
+        CF_LOAD(destroyAs_, vkDestroyAccelerationStructureKHR);
+        CF_LOAD(buildSizes_, vkGetAccelerationStructureBuildSizesKHR);
+        CF_LOAD(buildAs_, vkCmdBuildAccelerationStructuresKHR);
+        CF_LOAD(asAddress_, vkGetAccelerationStructureDeviceAddressKHR);
+#undef CF_LOAD
+        if (!createAs_ || !destroyAs_ || !buildSizes_ || !buildAs_ || !asAddress_) throw VulkanError("the ray tracing entry points are missing");
+    }
+
+    ensureShadowMap(1024);
     createPipelines();
 }
 
 Renderer::~Renderer() {
     vkDeviceWaitIdle(ctx_.device);
     destroyImages();
-    for (VkPipeline p : {impostorPipeline_, ssaoPipeline_, blurPipeline_, compositePipeline_, xrayPipeline_, meshPipeline_})
+    ctx_.destroy(shadowMap_);
+    destroyCellTree();
+    for (VkPipeline p : {impostorPipeline_, ssaoPipeline_, blurPipeline_, compositePipeline_, xrayPipeline_, meshPipeline_, shadowCellsPipeline_,
+                         shadowMeshPipeline_, rtaoPipeline_, pathTracePipeline_, boxPipeline_})
         if (p) vkDestroyPipeline(ctx_.device, p, nullptr);
     if (pipelineLayout_) vkDestroyPipelineLayout(ctx_.device, pipelineLayout_, nullptr);
+    if (rtLayout_) vkDestroyPipelineLayout(ctx_.device, rtLayout_, nullptr);
     if (descriptorPool_) vkDestroyDescriptorPool(ctx_.device, descriptorPool_, nullptr);
     if (setLayout_) vkDestroyDescriptorSetLayout(ctx_.device, setLayout_, nullptr);
+    if (rtSetLayout_) vkDestroyDescriptorSetLayout(ctx_.device, rtSetLayout_, nullptr);
     if (sampler_) vkDestroySampler(ctx_.device, sampler_, nullptr);
     ctx_.destroy(uniformBuffer_);
+    ctx_.destroy(shadowUniformBuffer_);
 }
 
 void Renderer::createPipelines() {
+    const std::vector<VkFormat> gbuffer = {kAlbedoFormat, kNormalDepthFormat, kIdFormat};
+
     PipelineDesc impostor{kImpostorVert, std::size(kImpostorVert), kImpostorFrag, std::size(kImpostorFrag)};
-    impostor.instancedCells = true;
-    impostor.colorFormats = {kAlbedoFormat, kNormalDepthFormat};
+    impostor.input = VertexInput::Cells;
+    impostor.colorFormats = gbuffer;
     impostor.depthFormat = kDepthFormat;
     impostorPipeline_ = makePipeline(ctx_, pipelineLayout_, impostor);
 
     PipelineDesc xray = impostor;  // same quads, additive, no depth
     xray.frag = kXrayFrag;
     xray.fragWords = std::size(kXrayFrag);
-    xray.additive = true;
+    xray.blend = Blend::Additive;
     xrayPipeline_ = makePipeline(ctx_, pipelineLayout_, xray);
 
     PipelineDesc mesh{kMeshVert, std::size(kMeshVert), kMeshFrag, std::size(kMeshFrag)};
-    mesh.mesh = true;
-    mesh.colorFormats = {kAlbedoFormat, kNormalDepthFormat};
+    if (ctx_.hasBarycentric) {
+        mesh.frag = kMeshBaryFrag;
+        mesh.fragWords = std::size(kMeshBaryFrag);
+    }
+    mesh.input = VertexInput::Mesh;
+    mesh.colorFormats = gbuffer;
     mesh.depthFormat = kDepthFormat;
     meshPipeline_ = makePipeline(ctx_, pipelineLayout_, mesh);
+
+    PipelineDesc shadowCells{kShadowCellsVert, std::size(kShadowCellsVert), kShadowCellsFrag, std::size(kShadowCellsFrag)};
+    shadowCells.input = VertexInput::CellsPos;
+    shadowCells.depthFormat = kDepthFormat;
+    shadowCellsPipeline_ = makePipeline(ctx_, pipelineLayout_, shadowCells);
+
+    PipelineDesc shadowMesh{kShadowMeshVert, std::size(kShadowMeshVert), kShadowMeshFrag, std::size(kShadowMeshFrag)};
+    shadowMesh.input = VertexInput::MeshPos;
+    shadowMesh.depthFormat = kDepthFormat;
+    shadowMeshPipeline_ = makePipeline(ctx_, pipelineLayout_, shadowMesh);
 
     PipelineDesc ssao{kFullscreenVert, std::size(kFullscreenVert), kSsaoFrag, std::size(kSsaoFrag)};
     ssao.colorFormats = {kAoFormat};
@@ -296,10 +475,32 @@ void Renderer::createPipelines() {
     PipelineDesc composite{kFullscreenVert, std::size(kFullscreenVert), kCompositeFrag, std::size(kCompositeFrag)};
     composite.colorFormats = {targetFormat_};
     compositePipeline_ = makePipeline(ctx_, pipelineLayout_, composite);
+
+    if (ctx_.hasRayTracing) {
+        PipelineDesc rtao{kFullscreenVert, std::size(kFullscreenVert), kRtaoFrag, std::size(kRtaoFrag)};
+        rtao.colorFormats = {kAoFormat};
+        rtaoPipeline_ = makePipeline(ctx_, rtLayout_, rtao);
+
+        PipelineDesc pt{kFullscreenVert, std::size(kFullscreenVert), kPathTraceFrag, std::size(kPathTraceFrag)};
+        pt.colorFormats = {kAccumFormat};
+        pt.blend = Blend::Accumulate;
+        pathTracePipeline_ = makePipeline(ctx_, rtLayout_, pt);
+
+        const VkShaderModule cs = ctx_.createShaderModule(kBoxComp, std::size(kBoxComp));
+        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        ci.stage.module = cs;
+        ci.stage.pName = "main";
+        ci.layout = rtLayout_;
+        const VkResult r = vkCreateComputePipelines(ctx_.device, VK_NULL_HANDLE, 1, &ci, nullptr, &boxPipeline_);
+        vkDestroyShaderModule(ctx_.device, cs, nullptr);
+        vk_check(r, "vkCreateComputePipelines");
+    }
 }
 
 void Renderer::destroyImages() {
-    for (Image* img : {&albedo_, &normalDepth_, &depth_, &aoRaw_, &aoBlur_}) ctx_.destroy(*img);
+    for (Image* img : {&albedo_, &normalDepth_, &id_, &depth_, &aoRaw_, &aoBlur_, &accum_}) ctx_.destroy(*img);
 }
 
 void Renderer::resize(VkExtent2D extent) {
@@ -310,27 +511,47 @@ void Renderer::resize(VkExtent2D extent) {
     const VkImageUsageFlags colorUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     albedo_ = ctx_.createImage(extent, kAlbedoFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
     normalDepth_ = ctx_.createImage(extent, kNormalDepthFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
+    id_ = ctx_.createImage(extent, kIdFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
     depth_ = ctx_.createImage(extent, kDepthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
     aoRaw_ = ctx_.createImage(extent, kAoFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
     aoBlur_ = ctx_.createImage(extent, kAoFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
+    accum_ = ctx_.createImage(extent, kAccumFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
+    accumReady_ = false;
+    accumSamples_ = 0;
+    accumKey_ = 0;
     writeDescriptors();
+}
+
+void Renderer::ensureShadowMap(uint32_t size) {
+    size = std::clamp<uint32_t>(size, 256u, 8192u);
+    if (size == shadowSize_ && shadowMap_.image) return;
+    vkDeviceWaitIdle(ctx_.device);
+    ctx_.destroy(shadowMap_);
+    shadowMap_ = ctx_.createImage(VkExtent2D{size, size}, kDepthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                  VK_IMAGE_ASPECT_DEPTH_BIT);
+    shadowSize_ = size;
+    if (albedo_.image) writeDescriptors();
 }
 
 void Renderer::writeDescriptors() {
     const VkDescriptorBufferInfo ubo{uniformBuffer_.buffer, 0, sizeof(FrameUniforms)};
+    const VkDescriptorBufferInfo shadowUbo{shadowUniformBuffer_.buffer, 0, sizeof(FrameUniforms)};
     const VkDescriptorImageInfo normalDepth{sampler_, normalDepth_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     const VkDescriptorImageInfo aoRaw{sampler_, aoRaw_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     const VkDescriptorImageInfo aoBlur{sampler_, aoBlur_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     const VkDescriptorImageInfo albedo{sampler_, albedo_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    const VkDescriptorImageInfo shadow{sampler_, shadowMap_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    const VkDescriptorImageInfo id{sampler_, id_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    const VkDescriptorImageInfo accum{sampler_, accum_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 
     std::vector<VkWriteDescriptorSet> writes;
-    auto addUbo = [&](VkDescriptorSet set) {
+    auto addUbo = [&](VkDescriptorSet set, const VkDescriptorBufferInfo* info) {
         VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w.dstSet = set;
         w.dstBinding = 0;
         w.descriptorCount = 1;
         w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        w.pBufferInfo = &ubo;
+        w.pBufferInfo = info;
         writes.push_back(w);
     };
     auto addImage = [&](VkDescriptorSet set, uint32_t binding, const VkDescriptorImageInfo* info) {
@@ -342,23 +563,28 @@ void Renderer::writeDescriptors() {
         w.pImageInfo = info;
         writes.push_back(w);
     };
-    // Only the bindings a pass's shaders use are written; the others are never accessed.
-    addUbo(setGeometry_);
-    addUbo(setSsao_);
+    // Only the bindings the shaders of a pass use are written; the others are never accessed.
+    addUbo(setGeometry_, &ubo);
+    addUbo(setShadow_, &shadowUbo);
+    addUbo(setSsao_, &ubo);
     addImage(setSsao_, 1, &normalDepth);
-    addUbo(setBlur_);
+    addUbo(setBlur_, &ubo);
     addImage(setBlur_, 1, &normalDepth);
     addImage(setBlur_, 2, &aoRaw);
-    addUbo(setComposite_);
+    addUbo(setComposite_, &ubo);
     addImage(setComposite_, 1, &normalDepth);
     addImage(setComposite_, 2, &aoBlur);
     addImage(setComposite_, 3, &albedo);
+    addImage(setComposite_, 4, &shadow);
+    addImage(setComposite_, 5, &id);
+    addImage(setComposite_, 6, &accum);
     vkUpdateDescriptorSets(ctx_.device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }
 
-FrameUniforms Renderer::makeUniforms(const OrbitCamera& camera, const RenderSettings& s, float sceneRadius,
-                                     float currentStep, uint64_t frameIndex) const {
-    FrameUniforms u{};
+FrameSetup Renderer::makeUniforms(const OrbitCamera& camera, const RenderSettings& s, Vec3 sceneCentre, float sceneRadius, float currentStep,
+                                  uint64_t frameIndex) const {
+    FrameSetup frame{};
+    FrameUniforms& u = frame.uniforms;
     const float w = static_cast<float>(extent_.width), h = static_cast<float>(extent_.height);
     const float reach = sceneRadius * 2.5f + s.sphereRadius;
     const float zFar = camera.distance + reach;
@@ -367,8 +593,10 @@ FrameUniforms Renderer::makeUniforms(const OrbitCamera& camera, const RenderSett
 
     const Mat4 view = camera.view();
     const Mat4 proj = perspective(camera.fovy, w / h, zNear, zFar);
+    const Mat4 invView = rigidInverse(view);
     std::memcpy(u.view, view.m, sizeof u.view);
     std::memcpy(u.proj, proj.m, sizeof u.proj);
+    std::memcpy(u.invView, invView.m, sizeof u.invView);
     u.viewport[0] = w;
     u.viewport[1] = h;
     u.viewport[2] = 1.0f / w;
@@ -381,89 +609,529 @@ FrameUniforms Renderer::makeUniforms(const OrbitCamera& camera, const RenderSett
     u.colorParams[1] = s.scalarMin;
     u.colorParams[2] = s.scalarMax;
     u.colorParams[3] = currentStep;
-    const Vec3 l = normalize(Vec3{s.lightDir[0], s.lightDir[1], s.lightDir[2]});
-    u.light[0] = l.x;
-    u.light[1] = l.y;
-    u.light[2] = l.z;
+
+    // The key light: given relative to the camera, or as a sun fixed in the world.
+    Vec3 lightView, lightWorld;
+    if (s.lightFollowsCamera) {
+        lightView = normalize(Vec3{s.lightDir[0], s.lightDir[1], s.lightDir[2]});
+        lightWorld = normalize(rotate(invView, lightView));
+    } else {
+        const float az = s.sunAzimuth * 3.14159265f / 180.0f, el = s.sunElevation * 3.14159265f / 180.0f;
+        lightWorld = Vec3{std::cos(el) * std::sin(az), std::sin(el), std::cos(el) * std::cos(az)};
+        lightView = normalize(rotate(view, lightWorld));
+    }
+    int drawMode = s.drawMode;
+    if (drawMode == kDrawPathTraced && !ctx_.hasRayTracing) drawMode = kDrawCells;
+    const bool shadows = s.shadows && s.shadowStrength > 0.0f && (drawMode == kDrawCells || drawMode == kDrawMembrane || drawMode == kDrawMembraneSss);
+    u.light[0] = lightView.x;
+    u.light[1] = lightView.y;
+    u.light[2] = lightView.z;
     u.light[3] = s.ambient;
+    u.lightColor[0] = s.lightColor[0] * s.lightIntensity;
+    u.lightColor[1] = s.lightColor[1] * s.lightIntensity;
+    u.lightColor[2] = s.lightColor[2] * s.lightIntensity;
+    u.lightColor[3] = shadows ? std::clamp(s.shadowStrength, 0.0f, 1.0f) : 0.0f;
+    u.sunWorld[0] = lightWorld.x;
+    u.sunWorld[1] = lightWorld.y;
+    u.sunWorld[2] = lightWorld.z;
+    u.sunWorld[3] = std::clamp(s.ptSunSize, 0.0f, 45.0f) * 3.14159265f / 180.0f;
+    set3(u.sky, s.skyColor, s.ptSkyIntensity);
+    set3(u.ground, s.groundColor, s.ptSunIntensity);
+
+    // The view of the key light for the shadow map: an orthographic box around the scene.
+    {
+        const float half = sceneRadius * 1.05f + s.sphereRadius;
+        const Vec3 up = std::fabs(lightWorld.y) > 0.95f ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
+        const Mat4 lv = lookAt(sceneCentre + lightWorld * (2.0f * half), sceneCentre, up);
+        const Mat4 lp = orthographic(half, 0.5f * half, 3.5f * half);
+        const Mat4 lvp = multiply(lp, lv);
+        std::memcpy(frame.lightView, lv.m, sizeof frame.lightView);
+        std::memcpy(frame.lightProj, lp.m, sizeof frame.lightProj);
+        std::memcpy(u.lightViewProj, lvp.m, sizeof u.lightViewProj);
+        const float mapSize = static_cast<float>(std::clamp(s.shadowMapSize, 256, 8192));
+        frame.shadowTexel = 2.0f * half / mapSize;
+        u.shadow[0] = s.shadowBias * s.sphereRadius + 0.5f * frame.shadowTexel;
+        u.shadow[1] = s.shadowSoftness;
+        u.shadow[2] = 1.0f / mapSize;
+        u.shadow[3] = 1.0f / mapSize;  // depth bias: about one texel, as a share of the depth range of the box
+    }
+
     u.ao[0] = s.aoRadiusSmall;
     u.ao[1] = s.aoRadiusLarge;
     u.ao[2] = s.aoIntensity;
     u.ao[3] = s.aoEnabled ? 1.0f : 0.0f;
-    u.baseColor[0] = s.baseColor[0];
-    u.baseColor[1] = s.baseColor[1];
-    u.baseColor[2] = s.baseColor[2];
-    u.baseColor[3] = s.exposure;
-    u.background[0] = s.background[0];
-    u.background[1] = s.background[1];
-    u.background[2] = s.background[2];
-    u.background[3] = s.vignette;
+    u.rt[0] = 0.0f;  // set by record() when the occlusion is ray traced
+    u.rt[1] = s.rtAoRadius;
+    u.pt[0] = static_cast<float>(std::clamp(s.ptBounces, 1, 16));
+    u.pt[1] = std::max(s.ptAperture, 0.0f);
+    u.pt[2] = s.ptFocus > 0.0f ? s.ptFocus : camera.distance;
+    set3(u.baseColor, s.baseColor, s.exposure);
+    set3(u.background, s.background, s.vignette);
+    u.material[0] = s.specular;
+    u.material[1] = s.shininess;
+    u.material[2] = static_cast<float>(s.palette);
+    u.material[3] = s.paletteReverse ? 1.0f : 0.0f;
+    set3(u.wall, s.wallColor, s.walls ? std::clamp(s.wallStrength, 0.0f, 1.0f) : 0.0f);
+    set3(u.outline, s.outlineColor, s.outlines ? std::clamp(s.outlineStrength, 0.0f, 1.0f) : 0.0f);
+    u.style[0] = std::max(s.wallWidth, 0.25f);
+    u.style[1] = std::max(s.outlineWidth, 0.25f);
+    u.style[2] = std::max(s.outlineThreshold, 1.0e-4f);
+    u.style[3] = static_cast<float>(std::max(s.toonBands, 0));
     u.misc[0] = static_cast<float>(frameIndex % 1024);
     u.misc[1] = static_cast<float>(s.debugView);
-    u.misc[2] = static_cast<float>(s.drawMode);
-    u.misc[3] = s.drawMode == 3 ? s.sssRadius : s.xrayDensity;
-    return u;
+    u.misc[2] = static_cast<float>(drawMode);
+    u.misc[3] = drawMode == kDrawMembraneSss ? s.sssRadius : s.xrayDensity;
+    u.misc2[0] = static_cast<float>(s.toneMap);
+    u.misc2[1] = std::clamp(s.backgroundGradient, 0.0f, 1.0f);
+    return frame;
 }
 
-void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBuffers& points,
-                      const FrameUniforms& uniforms, const std::function<void(VkCommandBuffer)>& overlay) {
-    std::memcpy(uniformBuffer_.mapped, &uniforms, sizeof uniforms);
+void Renderer::destroyCellTree() {
+    if (tree_.blas) destroyAs_(ctx_.device, tree_.blas, nullptr);
+    if (tree_.tlas) destroyAs_(ctx_.device, tree_.tlas, nullptr);
+    for (Buffer* b : {&tree_.boxes, &tree_.blasStore, &tree_.tlasStore, &tree_.scratch, &tree_.instance}) ctx_.destroy(*b);
+    tree_ = CellTree{};
+}
 
-    // --- G-buffer: one impostor quad per cell
-    toAttachment(cmd, albedo_);
-    toAttachment(cmd, normalDepth_);
-    transition(cmd, depth_.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
-               VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-               VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT, 0,
-               VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-               VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
-    beginPass(cmd, extent_, {albedo_.view, normalDepth_.view}, true, depth_.view);
-    if (points.count > 0 && points.pos && points.birth && points.food) {
-        const int mode = static_cast<int>(uniforms.misc[2] + 0.5f);
-        const bool membrane = (mode == 2 || mode == 3) && points.normal && points.index && points.indexCount > 0;
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &setGeometry_, 0, nullptr);
-        const VkBuffer buffers[4] = {points.pos, points.birth, points.food, points.normal};
-        const VkDeviceSize offsets[4] = {0, 0, 0, 0};
+// Brings the acceleration structure up to date with the cells: a compute pass writes the box of
+// every cell, the bottom level is built over the boxes, the top level over its one instance.
+// Recorded into the frame, before any render pass. Skipped while nothing has changed.
+void Renderer::updateCellTree(VkCommandBuffer cmd, const PointBuffers& points, float radius) {
+    const VkBuffer wanted[4] = {points.pos, points.birth, points.food, points.extra ? points.extra : points.food};
+    const bool sameBuffers = std::equal(wanted, wanted + 4, tree_.bound);
+    if (tree_.blas && sameBuffers && tree_.version == points.version && tree_.count == points.count && tree_.radius == radius) return;
+
+    const VkBufferUsageFlags address = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    const VkBufferUsageFlags input = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | address;
+    const VkBufferUsageFlags store = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | address;
+    const VkMemoryPropertyFlags local = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+    VkAccelerationStructureGeometryKHR boxes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+    boxes.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
+    boxes.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    boxes.geometry.aabbs.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
+    boxes.geometry.aabbs.stride = 6 * sizeof(float);
+    VkAccelerationStructureBuildGeometryInfoKHR bottom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    bottom.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    bottom.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;  // rebuilt whenever the cells move
+    bottom.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    bottom.geometryCount = 1;
+    bottom.pGeometries = &boxes;
+
+    VkAccelerationStructureGeometryKHR instances{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+    instances.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    instances.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    VkAccelerationStructureBuildGeometryInfoKHR top{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    top.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    top.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+    top.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    top.geometryCount = 1;
+    top.pGeometries = &instances;
+
+    bool rewriteTree = false;
+    if (points.count > tree_.capacity || !tree_.blas) {
+        // Grow: everything is sized for the capacity, so it is not rebuilt for every new cell.
+        vkDeviceWaitIdle(ctx_.device);
+        destroyCellTree();
+        tree_.capacity = points.count + points.count / 4u + 1024u;
+        tree_.boxes = ctx_.createBuffer(static_cast<VkDeviceSize>(tree_.capacity) * 6 * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | input, local);
+
+        VkAccelerationStructureBuildSizesInfoKHR bottomSizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+        buildSizes_(ctx_.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bottom, &tree_.capacity, &bottomSizes);
+        const uint32_t one = 1;
+        VkAccelerationStructureBuildSizesInfoKHR topSizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+        buildSizes_(ctx_.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &top, &one, &topSizes);
+
+        tree_.blasStore = ctx_.createBuffer(bottomSizes.accelerationStructureSize, store, local);
+        tree_.tlasStore = ctx_.createBuffer(topSizes.accelerationStructureSize, store, local);
+        VkAccelerationStructureCreateInfoKHR ci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
+        ci.buffer = tree_.blasStore.buffer;
+        ci.size = bottomSizes.accelerationStructureSize;
+        ci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+        vk_check(createAs_(ctx_.device, &ci, nullptr, &tree_.blas), "vkCreateAccelerationStructureKHR (cells)");
+        ci.buffer = tree_.tlasStore.buffer;
+        ci.size = topSizes.accelerationStructureSize;
+        ci.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+        vk_check(createAs_(ctx_.device, &ci, nullptr, &tree_.tlas), "vkCreateAccelerationStructureKHR (top)");
+
+        // One scratch buffer for both builds (they run one after the other), aligned as the device asks.
+        VkPhysicalDeviceAccelerationStructurePropertiesKHR asProps{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR};
+        VkPhysicalDeviceProperties2 props{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        props.pNext = &asProps;
+        vkGetPhysicalDeviceProperties2(ctx_.gpu, &props);
+        const VkDeviceSize align = std::max<VkDeviceSize>(asProps.minAccelerationStructureScratchOffsetAlignment, 1);
+        const VkDeviceSize scratchBytes = std::max(bottomSizes.buildScratchSize, topSizes.buildScratchSize) + align;
+        tree_.scratch = ctx_.createBuffer(scratchBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | address, local);
+        tree_.scratchAddress = (ctx_.address(tree_.scratch) + align - 1) / align * align;
+
+        // The one instance of the top level: the cells, where they are.
+        tree_.instance = ctx_.createBuffer(sizeof(VkAccelerationStructureInstanceKHR), input,
+                                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
+        VkAccelerationStructureInstanceKHR inst{};
+        inst.transform.matrix[0][0] = inst.transform.matrix[1][1] = inst.transform.matrix[2][2] = 1.0f;
+        inst.mask = 0xFF;
+        VkAccelerationStructureDeviceAddressInfoKHR ai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
+        ai.accelerationStructure = tree_.blas;
+        inst.accelerationStructureReference = asAddress_(ctx_.device, &ai);
+        std::memcpy(tree_.instance.mapped, &inst, sizeof inst);
+        rewriteTree = true;
+    }
+
+    if (rewriteTree || !sameBuffers) {
+        VkWriteDescriptorSetAccelerationStructureKHR asWrite{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
+        asWrite.accelerationStructureCount = 1;
+        asWrite.pAccelerationStructures = &tree_.tlas;
+        VkDescriptorBufferInfo infos[5];
+        for (int i = 0; i < 4; ++i) infos[i] = VkDescriptorBufferInfo{wanted[i], 0, VK_WHOLE_SIZE};
+        infos[4] = VkDescriptorBufferInfo{tree_.boxes.buffer, 0, VK_WHOLE_SIZE};
+        VkWriteDescriptorSet writes[6]{};
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].pNext = &asWrite;
+        writes[0].dstSet = rtSet_;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        for (uint32_t i = 0; i < 5; ++i) {
+            writes[i + 1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[i + 1].dstSet = rtSet_;
+            writes[i + 1].dstBinding = i + 1;
+            writes[i + 1].descriptorCount = 1;
+            writes[i + 1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[i + 1].pBufferInfo = &infos[i];
+        }
+        vkUpdateDescriptorSets(ctx_.device, 6, writes, 0, nullptr);
+        std::copy(wanted, wanted + 4, tree_.bound);
+    }
+
+    // Boxes from the positions.
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, boxPipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, rtLayout_, 1, 1, &rtSet_, 0, nullptr);
+    struct {
+        uint32_t count;
+        float radius;
+    } push{points.count, radius};
+    vkCmdPushConstants(cmd, rtLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof push, &push);
+    vkCmdDispatch(cmd, (points.count + 255u) / 256u, 1, 1);
+    memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                  VK_ACCESS_2_SHADER_READ_BIT);
+
+    boxes.geometry.aabbs.data.deviceAddress = ctx_.address(tree_.boxes);
+    bottom.dstAccelerationStructure = tree_.blas;
+    bottom.scratchData.deviceAddress = tree_.scratchAddress;
+    const VkAccelerationStructureBuildRangeInfoKHR bottomRange{points.count, 0, 0, 0};
+    const VkAccelerationStructureBuildRangeInfoKHR* bottomRanges = &bottomRange;
+    buildAs_(cmd, 1, &bottom, &bottomRanges);
+    memoryBarrier(cmd, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+                  VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+
+    instances.geometry.instances.data.deviceAddress = ctx_.address(tree_.instance);
+    top.dstAccelerationStructure = tree_.tlas;
+    top.scratchData.deviceAddress = tree_.scratchAddress;
+    const VkAccelerationStructureBuildRangeInfoKHR topRange{1, 0, 0, 0};
+    const VkAccelerationStructureBuildRangeInfoKHR* topRanges = &topRange;
+    buildAs_(cmd, 1, &top, &topRanges);
+    memoryBarrier(cmd, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+
+    tree_.version = points.version;
+    tree_.count = points.count;
+    tree_.radius = radius;
+}
+
+void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBuffers& points, const FrameSetup& frame,
+                      const RenderSettings& settings, const std::function<void(VkCommandBuffer)>& overlay) {
+    FrameUniforms u = frame.uniforms;
+    const int drawMode = static_cast<int>(u.misc[2] + 0.5f);
+    const bool havePoints = points.count > 0 && points.pos && points.birth && points.food;
+    const bool membrane = (drawMode == kDrawMembrane || drawMode == kDrawMembraneSss) && havePoints && points.normal && points.index &&
+                          points.indexCount > 0;
+    const bool pathTraced = drawMode == kDrawPathTraced && ctx_.hasRayTracing && havePoints;
+    const bool tracedOcclusion = drawMode == kDrawCells && settings.rtAo && settings.aoEnabled && ctx_.hasRayTracing && havePoints;
+
+    if (pathTraced || tracedOcclusion) updateCellTree(cmd, points, settings.sphereRadius);
+
+    // The path tracer refines a running mean for as long as nothing that shows in the image changes.
+    uint32_t newSamples = 0;
+    if (pathTraced) {
+        FrameUniforms keyed = u;
+        keyed.misc[0] = 0.0f;  // the frame counter does not change the image
+        uint64_t key = fnv(&keyed, sizeof keyed);
+        key = fnv(&points.version, sizeof points.version, key);
+        key = fnv(&points.count, sizeof points.count, key);
+        if (key != accumKey_) {
+            accumKey_ = key;
+            accumSamples_ = 0;
+        }
+        const uint32_t limit = static_cast<uint32_t>(std::max(settings.ptMaxSamples, 1));
+        if (accumSamples_ < limit) newSamples = std::min(static_cast<uint32_t>(std::clamp(settings.ptSamplesPerFrame, 1, 64)), limit - accumSamples_);
+        u.rt[2] = static_cast<float>(accumSamples_);
+        u.rt[3] = static_cast<float>(newSamples);
+    } else {
+        accumSamples_ = 0;
+        accumKey_ = 0;
+    }
+    u.rt[0] = tracedOcclusion ? static_cast<float>(std::clamp(settings.rtAoRays, 1, 64)) : 0.0f;
+    std::memcpy(uniformBuffer_.mapped, &u, sizeof u);
+
+    const VkBuffer vertexBuffers[5] = {points.pos, points.birth, points.food, points.normal ? points.normal : points.pos,
+                                       points.extra ? points.extra : points.food};
+    const VkDeviceSize offsets[5] = {0, 0, 0, 0, 0};
+    const VkPipelineStageFlags2 depthStages = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+
+    // --- shadow map: the cells seen from the key light
+    const bool shadows = u.lightColor[3] > 0.0f && havePoints && drawMode != kDrawXray && !pathTraced;
+    if (shadows) {
+        ensureShadowMap(static_cast<uint32_t>(std::clamp(settings.shadowMapSize, 256, 8192)));
+        FrameUniforms lightFrame = u;
+        std::memcpy(lightFrame.view, frame.lightView, sizeof lightFrame.view);
+        std::memcpy(lightFrame.proj, frame.lightProj, sizeof lightFrame.proj);
+        lightFrame.sphere[1] = 0.75f * frame.shadowTexel;  // no cell smaller than about a texel
+        std::memcpy(shadowUniformBuffer_.mapped, &lightFrame, sizeof lightFrame);
+        transition(cmd, shadowMap_.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, depthStages, 0,
+                   depthStages, VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
+        beginPass(cmd, VkExtent2D{shadowSize_, shadowSize_}, {}, VK_ATTACHMENT_LOAD_OP_DONT_CARE, shadowMap_.view, true);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &setShadow_, 0, nullptr);
+        vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
         if (membrane) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline_);
-            vkCmdBindVertexBuffers(cmd, 0, 4, buffers, offsets);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowMeshPipeline_);
             vkCmdBindIndexBuffer(cmd, points.index, 0, VK_INDEX_TYPE_UINT32);
             vkCmdDrawIndexed(cmd, points.indexCount, 1, 0, 0, 0);
         } else {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mode == 1 ? xrayPipeline_ : impostorPipeline_);
-            vkCmdBindVertexBuffers(cmd, 0, 3, buffers, offsets);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowCellsPipeline_);
+            vkCmdDraw(cmd, 4, points.count, 0, 0);
+        }
+        vkCmdEndRendering(cmd);
+        transition(cmd, shadowMap_.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                   depthStages, VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                   VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    } else {
+        // Not drawn this frame, but the composite shader names it: it has to be in a readable layout.
+        transition(cmd, shadowMap_.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    }
+
+    // --- G-buffer: one impostor quad per cell, or the membrane
+    toAttachment(cmd, albedo_);
+    toAttachment(cmd, normalDepth_);
+    toAttachment(cmd, id_);
+    transition(cmd, depth_.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, depthStages, 0,
+               depthStages, VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
+    beginPass(cmd, extent_, {albedo_.view, normalDepth_.view, id_.view}, VK_ATTACHMENT_LOAD_OP_CLEAR, depth_.view);
+    if (havePoints && !pathTraced) {
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &setGeometry_, 0, nullptr);
+        vkCmdBindVertexBuffers(cmd, 0, 5, vertexBuffers, offsets);
+        if (membrane) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline_);
+            vkCmdBindIndexBuffer(cmd, points.index, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(cmd, points.indexCount, 1, 0, 0, 0);
+        } else {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, drawMode == kDrawXray ? xrayPipeline_ : impostorPipeline_);
             vkCmdDraw(cmd, 4, points.count, 0, 0);
         }
     }
     vkCmdEndRendering(cmd);
 
-    // --- ambient occlusion
+    // --- ambient occlusion: screen space, or rays against the cells
     toSampled(cmd, albedo_);
     toSampled(cmd, normalDepth_);
+    toSampled(cmd, id_);
     toAttachment(cmd, aoRaw_);
-    beginPass(cmd, extent_, {aoRaw_.view}, false, VK_NULL_HANDLE);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ssaoPipeline_);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &setSsao_, 0, nullptr);
+    beginPass(cmd, extent_, {aoRaw_.view}, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_NULL_HANDLE);
+    if (tracedOcclusion) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rtaoPipeline_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rtLayout_, 0, 1, &setSsao_, 0, nullptr);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rtLayout_, 1, 1, &rtSet_, 0, nullptr);
+    } else {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ssaoPipeline_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &setSsao_, 0, nullptr);
+    }
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRendering(cmd);
 
     // --- blur
     toSampled(cmd, aoRaw_);
     toAttachment(cmd, aoBlur_);
-    beginPass(cmd, extent_, {aoBlur_.view}, false, VK_NULL_HANDLE);
+    beginPass(cmd, extent_, {aoBlur_.view}, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_NULL_HANDLE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &setBlur_, 0, nullptr);
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRendering(cmd);
+    toSampled(cmd, aoBlur_);
+
+    // --- path tracer: a few more samples into the running mean (the image keeps its contents)
+    if (!accumReady_) {
+        transition(cmd, accum_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        accumReady_ = true;
+    }
+    if (newSamples > 0) {
+        transition(cmd, accum_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT);
+        beginPass(cmd, extent_, {accum_.view}, VK_ATTACHMENT_LOAD_OP_LOAD, VK_NULL_HANDLE);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pathTracePipeline_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rtLayout_, 0, 1, &setGeometry_, 0, nullptr);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rtLayout_, 1, 1, &rtSet_, 0, nullptr);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        vkCmdEndRendering(cmd);
+        toSampled(cmd, accum_);
+        accumSamples_ += newSamples;
+    }
 
     // --- composite into the target, then the overlay (UI) on top
-    toSampled(cmd, aoBlur_);
-    beginPass(cmd, extent_, {targetView}, false, VK_NULL_HANDLE);
+    beginPass(cmd, extent_, {targetView}, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_NULL_HANDLE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, compositePipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &setComposite_, 0, nullptr);
     vkCmdDraw(cmd, 3, 1, 0, 0);
     if (overlay) overlay(cmd);
     vkCmdEndRendering(cmd);
+}
+
+// ------------------------------------------------------------------ settings by name
+
+namespace {
+
+bool parseFloats(const std::string& text, float* out, int count) {
+    const char* p = text.c_str();
+    for (int i = 0; i < count; ++i) {
+        char* end = nullptr;
+        out[i] = std::strtof(p, &end);
+        if (end == p) return false;
+        p = end;
+        while (*p == ',' || *p == ' ') ++p;
+    }
+    return *p == '\0';
+}
+
+bool parseBool(const std::string& v, bool& out) {
+    if (v == "1" || v == "true" || v == "on" || v == "yes") out = true;
+    else if (v == "0" || v == "false" || v == "off" || v == "no") out = false;
+    else return false;
+    return true;
+}
+
+struct Entry {
+    const char* name;
+    std::function<bool(RenderSettings&, const std::string&)> set;
+};
+
+Entry number(const char* name, float RenderSettings::* field) {
+    return {name, [field](RenderSettings& s, const std::string& v) { return parseFloats(v, &(s.*field), 1); }};
+}
+Entry whole(const char* name, int RenderSettings::* field) {
+    return {name, [field](RenderSettings& s, const std::string& v) {
+                float x = 0.0f;
+                if (!parseFloats(v, &x, 1)) return false;
+                s.*field = static_cast<int>(x);
+                return true;
+            }};
+}
+Entry flag(const char* name, bool RenderSettings::* field) {
+    return {name, [field](RenderSettings& s, const std::string& v) { return parseBool(v, s.*field); }};
+}
+Entry triple(const char* name, float (RenderSettings::* field)[3]) {
+    return {name, [field](RenderSettings& s, const std::string& v) { return parseFloats(v, s.*field, 3); }};
+}
+
+const std::vector<Entry>& entries() {
+    static const std::vector<Entry> table = {
+        {"drawMode",
+         [](RenderSettings& s, const std::string& v) {
+             const char* names[] = {"cells", "xray", "membrane", "sss", "path"};
+             for (int i = 0; i < 5; ++i)
+                 if (v == names[i]) {
+                     s.drawMode = i;
+                     return true;
+                 }
+             if (v == "mesh") {
+                 s.drawMode = kDrawMembrane;
+                 return true;
+             }
+             return false;
+         }},
+        number("radius", &RenderSettings::sphereRadius),
+        number("minPixelRadius", &RenderSettings::minPixelRadius),
+        {"color",
+         [](RenderSettings& s, const std::string& v) {
+             const char* names[] = {"uniform", "age", "food", "birth", "generation", "curvature", "activator"};
+             for (int i = 0; i < 7; ++i)
+                 if (v == names[i]) {
+                     s.colorMode = static_cast<ColorMode>(i);
+                     return true;
+                 }
+             return false;
+         }},
+        flag("autoRange", &RenderSettings::autoRange),
+        number("min", &RenderSettings::scalarMin),
+        number("max", &RenderSettings::scalarMax),
+        whole("palette", &RenderSettings::palette),
+        flag("paletteReverse", &RenderSettings::paletteReverse),
+        triple("baseColor", &RenderSettings::baseColor),
+        flag("lightFollowsCamera", &RenderSettings::lightFollowsCamera),
+        triple("lightDir", &RenderSettings::lightDir),
+        number("sunAzimuth", &RenderSettings::sunAzimuth),
+        number("sunElevation", &RenderSettings::sunElevation),
+        number("lightIntensity", &RenderSettings::lightIntensity),
+        triple("lightColor", &RenderSettings::lightColor),
+        number("ambient", &RenderSettings::ambient),
+        triple("skyColor", &RenderSettings::skyColor),
+        triple("groundColor", &RenderSettings::groundColor),
+        flag("shadows", &RenderSettings::shadows),
+        whole("shadowMapSize", &RenderSettings::shadowMapSize),
+        number("shadowStrength", &RenderSettings::shadowStrength),
+        number("shadowSoftness", &RenderSettings::shadowSoftness),
+        number("shadowBias", &RenderSettings::shadowBias),
+        flag("ao", &RenderSettings::aoEnabled),
+        number("aoSmall", &RenderSettings::aoRadiusSmall),
+        number("aoLarge", &RenderSettings::aoRadiusLarge),
+        number("aoIntensity", &RenderSettings::aoIntensity),
+        flag("rtAo", &RenderSettings::rtAo),
+        whole("rtAoRays", &RenderSettings::rtAoRays),
+        number("rtAoRadius", &RenderSettings::rtAoRadius),
+        number("specular", &RenderSettings::specular),
+        number("shininess", &RenderSettings::shininess),
+        number("sssRadius", &RenderSettings::sssRadius),
+        number("xrayDensity", &RenderSettings::xrayDensity),
+        flag("walls", &RenderSettings::walls),
+        number("wallWidth", &RenderSettings::wallWidth),
+        number("wallStrength", &RenderSettings::wallStrength),
+        triple("wallColor", &RenderSettings::wallColor),
+        whole("toonBands", &RenderSettings::toonBands),
+        flag("outlines", &RenderSettings::outlines),
+        number("outlineWidth", &RenderSettings::outlineWidth),
+        number("outlineThreshold", &RenderSettings::outlineThreshold),
+        number("outlineStrength", &RenderSettings::outlineStrength),
+        triple("outlineColor", &RenderSettings::outlineColor),
+        whole("ptBounces", &RenderSettings::ptBounces),
+        whole("ptSamplesPerFrame", &RenderSettings::ptSamplesPerFrame),
+        whole("ptMaxSamples", &RenderSettings::ptMaxSamples),
+        number("ptSunSize", &RenderSettings::ptSunSize),
+        number("ptSunIntensity", &RenderSettings::ptSunIntensity),
+        number("ptSkyIntensity", &RenderSettings::ptSkyIntensity),
+        number("ptAperture", &RenderSettings::ptAperture),
+        number("ptFocus", &RenderSettings::ptFocus),
+        number("exposure", &RenderSettings::exposure),
+        whole("toneMap", &RenderSettings::toneMap),
+        triple("background", &RenderSettings::background),
+        number("backgroundGradient", &RenderSettings::backgroundGradient),
+        number("vignette", &RenderSettings::vignette),
+        whole("debugView", &RenderSettings::debugView),
+    };
+    return table;
+}
+
+}  // namespace
+
+std::string setRenderSetting(RenderSettings& settings, const std::string& name, const std::string& value) {
+    for (const Entry& e : entries())
+        if (name == e.name) return e.set(settings, value) ? std::string() : "bad value '" + value + "' for " + name;
+    return "unknown render setting '" + name + "'";
+}
+
+std::vector<std::string> renderSettingNames() {
+    std::vector<std::string> names;
+    for (const Entry& e : entries()) names.emplace_back(e.name);
+    return names;
 }
 
 }  // namespace cfv

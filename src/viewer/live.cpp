@@ -6,6 +6,9 @@
 #include <stdexcept>
 #include <utility>
 
+#include "core/export.hpp"
+#include "core/kernels.hpp"
+#include "core/morph.hpp"
 #include "core/sim_cpu.hpp"
 #include "core/topology.hpp"
 
@@ -58,34 +61,16 @@ LiveSim::LiveSim(Context& ctx, const LiveConfig& config) : ctx_(ctx), config_(co
         if (std::memcmp(cudaUuid, id.deviceUUID, 16) != 0)
             throw std::runtime_error("CUDA device 0 and the Vulkan device are different GPUs; buffer sharing needs the same one");
 
-        const VkBufferUsageFlags usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-        auto shared = [&](VkDeviceSize bytes, Buffer& buffer, std::unique_ptr<cf::CudaExternalBuffer>& mapped) {
-            buffer = ctx_.createBuffer(bytes, usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false, true);
-            void* handle = ctx_.exportMemoryHandle(buffer);
-            try {
-                mapped = std::make_unique<cf::CudaExternalBuffer>(handle, static_cast<std::size_t>(buffer.allocationSize),
-                                                                  static_cast<std::size_t>(bytes));
-            } catch (...) {
-                CloseHandle(static_cast<HANDLE>(handle));
-                throw;
-            }
-            CloseHandle(static_cast<HANDLE>(handle));  // CUDA holds its own reference now
-        };
+        const VkBufferUsageFlags usage = kCellBufferUsage | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         try {
-            for (Slot& s : slots_) {
-                shared(static_cast<VkDeviceSize>(capacity_) * sizeof(cf::Vec3), s.pos, s.cudaPos);
-                shared(static_cast<VkDeviceSize>(capacity_) * sizeof(std::uint32_t), s.birth, s.cudaBirth);
-                shared(static_cast<VkDeviceSize>(capacity_) * sizeof(float), s.food, s.cudaFood);
+            for (Slot& slot : slots_) {
+                shareBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(cf::Vec3), usage, slot.pos, slot.cudaPos);
+                shareBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(std::uint32_t), usage, slot.birth, slot.cudaBirth);
+                shareBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(float), usage, slot.food, slot.cudaFood);
+                shareBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(float), usage, slot.extra, slot.cudaExtra);
             }
         } catch (...) {
-            for (Slot& s : slots_) {
-                s.cudaPos.reset();
-                s.cudaBirth.reset();
-                s.cudaFood.reset();
-                ctx_.destroy(s.pos);
-                ctx_.destroy(s.birth);
-                ctx_.destroy(s.food);
-            }
+            releaseSlots();
             throw;
         }
 #else
@@ -110,15 +95,79 @@ LiveSim::~LiveSim() {
     if (thread_.joinable()) thread_.join();
     sim_.reset();  // before the shared buffers go away
     vkDeviceWaitIdle(ctx_.device);
-    for (Slot& s : slots_) {
-        s.cudaPos.reset();
-        s.cudaBirth.reset();
-        s.cudaFood.reset();
-        ctx_.destroy(s.pos);
-        ctx_.destroy(s.birth);
-        ctx_.destroy(s.food);
-    }
+    releaseSlots();
     frontGpu_.reset();
+}
+
+void LiveSim::releaseSlots() {
+    for (Slot& slot : slots_) {
+        slot.cudaPos.reset();
+        slot.cudaBirth.reset();
+        slot.cudaFood.reset();
+        slot.cudaExtra.reset();
+        slot.cudaNormal.reset();
+        slot.cudaIndex.reset();
+        for (Buffer* b : {&slot.pos, &slot.birth, &slot.food, &slot.extra, &slot.normal, &slot.index}) ctx_.destroy(*b);
+    }
+}
+
+// A Vulkan buffer whose memory CUDA writes into.
+void LiveSim::shareBuffer(VkDeviceSize bytes, VkBufferUsageFlags usage, Buffer& buffer, std::unique_ptr<cf::CudaExternalBuffer>& mapped) {
+#ifdef CF_HAVE_CUDA
+    buffer = ctx_.createBuffer(bytes, usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false, true);
+    void* handle = ctx_.exportMemoryHandle(buffer);
+    try {
+        mapped = std::make_unique<cf::CudaExternalBuffer>(handle, static_cast<std::size_t>(buffer.allocationSize), static_cast<std::size_t>(bytes));
+    } catch (...) {
+        CloseHandle(static_cast<HANDLE>(handle));
+        throw;
+    }
+    CloseHandle(static_cast<HANDLE>(handle));  // CUDA holds its own reference now
+#else
+    (void)bytes;
+    (void)usage;
+    (void)buffer;
+    (void)mapped;
+#endif
+}
+
+// The shared buffers of the membrane (normals and triangle indices), the first time a membrane
+// draw mode is chosen. Render thread; the simulation thread publishes under the same mutex.
+void LiveSim::ensureMeshBuffers() {
+    std::lock_guard<std::mutex> lock(slotsMutex_);
+    if (meshReady_ || meshFailed_) return;
+    try {
+        if (capacity_ > 600000000u) throw std::runtime_error("too many cells for the membrane of a live run");
+        indexCapacity_ = capacity_ * 6u;  // a closed sheet of n cells has 2n - 4 triangles
+        for (Slot& slot : slots_) {
+            shareBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(cf::Vec3), kCellBufferUsage | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, slot.normal,
+                        slot.cudaNormal);
+            shareBuffer(static_cast<VkDeviceSize>(indexCapacity_) * sizeof(std::uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, slot.index, slot.cudaIndex);
+        }
+        meshReady_ = true;
+    } catch (const std::exception& e) {
+        for (Slot& slot : slots_) {
+            slot.cudaNormal.reset();
+            slot.cudaIndex.reset();
+            ctx_.destroy(slot.normal);
+            ctx_.destroy(slot.index);
+        }
+        meshFailed_ = true;
+        std::lock_guard<std::mutex> statusLock(mutex_);
+        status_.message = std::string("the membrane cannot be shown live: ") + e.what();
+    }
+}
+
+void LiveSim::setRenderNeeds(int extraKind, bool mesh) {
+    bool changed = wantExtra_.exchange(extraKind) != extraKind;
+    if (mesh && config_.backend == LiveBackend::Cuda && !meshReady_) ensureMeshBuffers();
+    changed = (wantMesh_.exchange(mesh) != mesh) || changed;
+    if (changed) {
+        // Show it at once, also while the simulation is paused.
+        std::lock_guard<std::mutex> lock(mutex_);
+        forcePublish_ = true;
+        wake_.notify_all();
+    }
 }
 
 void LiveSim::buildSimulation(std::uint64_t seed, int level, const cf::Params& params) {
@@ -208,12 +257,35 @@ LiveStatus LiveSim::status() const {
 
 void LiveSim::publish() {
     Slot& slot = slots_[back_];  // only this thread touches the back slot
+    const int kind = wantExtra_.load();
+    const bool mesh = wantMesh_.load();
+    slot.extraKind = 0;
+    slot.hasMesh = false;
+    slot.indexCount = 0;
     if (config_.backend == LiveBackend::Cuda) {
 #ifdef CF_HAVE_CUDA
         auto* cuda = static_cast<cf::CudaSim*>(sim_.get());
+        std::lock_guard<std::mutex> lock(slotsMutex_);
         // Device-to-device copies into the Vulkan buffers; returns after they have finished.
-        slot.count = cuda->copy_render_data(slot.cudaPos->device_ptr(), slot.cudaBirth->device_ptr(),
-                                            slot.cudaFood->device_ptr(), capacity_);
+        cf::RenderTargets t;
+        t.pos = slot.cudaPos->device_ptr();
+        t.birth = slot.cudaBirth->device_ptr();
+        t.food = slot.cudaFood->device_ptr();
+        if (kind != 0) {
+            t.extra = slot.cudaExtra->device_ptr();
+            t.extraKind = static_cast<cf::RenderScalar>(kind);
+        }
+        const bool withMesh = mesh && meshReady_;
+        if (withMesh) {
+            t.normal = slot.cudaNormal->device_ptr();
+            t.index = slot.cudaIndex->device_ptr();
+            t.maxIndices = indexCapacity_;
+        }
+        const cf::RenderCounts counts = cuda->copy_render_data(t, capacity_);
+        slot.count = counts.cells;
+        slot.extraKind = kind;
+        slot.indexCount = counts.indices;
+        slot.hasMesh = withMesh && counts.indices > 0;
         cuda->bounds(slot.lo, slot.hi);
 #endif
     } else {
@@ -222,6 +294,27 @@ void LiveSim::publish() {
         slot.hostPos.assign(s.pos.begin(), s.pos.begin() + s.n);
         slot.hostBirth.assign(s.birth.begin(), s.birth.begin() + s.n);
         slot.hostFood.assign(s.food.begin(), s.food.begin() + s.n);
+        slot.hostExtra.clear();
+        if (kind != 0) {
+            slot.hostExtra.resize(s.n);
+            const bool morph = s.morphB.size() >= s.n;
+            for (std::uint32_t v = 0; v < s.n; ++v) {
+                float x = 0.0f;
+                if (kind == 1) x = static_cast<float>(s.gen[v]);
+                else if (kind == 2) x = cf::cell_curvature(s.pos.data(), s.ring(v), s.deg[v], s.pos[v], s.normal[v], s.params.linkRestLength);
+                else if (kind == 3 && morph) x = cf::morph_signal(s.morphB[v]);
+                slot.hostExtra[v] = x;
+            }
+            slot.extraKind = kind;
+        }
+        slot.hostNormal.clear();
+        slot.hostIndex.clear();
+        if (mesh) {
+            slot.hostNormal.assign(s.normal.begin(), s.normal.begin() + s.n);
+            for (const auto& f : cf::mesh_faces(s)) slot.hostIndex.insert(slot.hostIndex.end(), f.begin(), f.end());
+            slot.hasMesh = !slot.hostIndex.empty();
+            slot.indexCount = static_cast<std::uint32_t>(slot.hostIndex.size());
+        }
         if (s.n > 0) {
             cf::Vec3 lo = s.pos[0], hi = s.pos[0];
             for (std::uint32_t v = 0; v < s.n; ++v) {
@@ -234,6 +327,7 @@ void LiveSim::publish() {
         }
     }
     slot.step = sim_->step_count();
+    slot.version = nextBufferVersion();
 
     std::lock_guard<std::mutex> lock(mutex_);
     std::swap(back_, ready_);
@@ -256,14 +350,22 @@ LiveFrame LiveSim::acquire() {
     if (switched) {
         frontValid_ = true;
         if (config_.backend == LiveBackend::Cpu) {
+            // Lend the storage of the slot to a Cloud for the upload, then give it back.
             Cloud c;
+            std::vector<float>* extra = slot.extraKind == 1 ? &c.generation : slot.extraKind == 2 ? &c.curvature : slot.extraKind == 3 ? &c.activator : nullptr;
             c.pos.swap(slot.hostPos);
             c.birth.swap(slot.hostBirth);
             c.food.swap(slot.hostFood);
-            frontGpu_->upload(c);
-            c.pos.swap(slot.hostPos);  // give the storage back for the next publish
+            c.normal.swap(slot.hostNormal);
+            c.indices.swap(slot.hostIndex);
+            if (extra != nullptr) extra->swap(slot.hostExtra);
+            frontGpu_->upload(c, slot.extraKind);
+            c.pos.swap(slot.hostPos);
             c.birth.swap(slot.hostBirth);
             c.food.swap(slot.hostFood);
+            c.normal.swap(slot.hostNormal);
+            c.indices.swap(slot.hostIndex);
+            if (extra != nullptr) extra->swap(slot.hostExtra);
         }
     }
     LiveFrame f;
@@ -272,8 +374,21 @@ LiveFrame LiveSim::acquire() {
     f.step = slot.step;
     f.centre = (slot.lo + slot.hi) * 0.5f;
     f.radius = std::max(0.5f * cf::length(slot.hi - slot.lo), 1.0f);
-    if (config_.backend == LiveBackend::Cuda) f.buffers = PointBuffers{slot.pos.buffer, slot.birth.buffer, slot.food.buffer, slot.count};
-    else f.buffers = frontGpu_->buffers();
+    if (config_.backend == LiveBackend::Cuda) {
+        f.buffers = PointBuffers{slot.pos.buffer, slot.birth.buffer, slot.food.buffer, slot.count};
+        if (slot.extraKind != 0) {
+            f.buffers.extra = slot.extra.buffer;
+            f.buffers.extraKind = slot.extraKind;
+        }
+        if (slot.hasMesh) {
+            f.buffers.normal = slot.normal.buffer;
+            f.buffers.index = slot.index.buffer;
+            f.buffers.indexCount = slot.indexCount;
+        }
+        f.buffers.version = slot.version;
+    } else {
+        f.buffers = frontGpu_->buffers();
+    }
     return f;
 }
 

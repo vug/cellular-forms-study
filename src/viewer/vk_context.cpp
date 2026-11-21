@@ -160,6 +160,34 @@ void Context::createDevice(VkSurfaceKHR surface) {
             for (const char* n : names) extensions.push_back(n);
     }
 
+    // Optional: ray queries and fragment-shader barycentrics, when the GPU has them.
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
+    VkPhysicalDeviceRayQueryFeaturesKHR rqFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
+    VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR baryFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR};
+    {
+        const char* rt[] = {VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, VK_KHR_RAY_QUERY_EXTENSION_NAME,
+                            VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME};
+        bool rtNames = true;
+        for (const char* n : rt) rtNames = rtNames && hasExtension(available, n);
+        const bool baryName = hasExtension(available, VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
+        VkPhysicalDeviceVulkan12Features q12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+        VkPhysicalDeviceFeatures2 q{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        q.pNext = &q12;
+        if (rtNames) {
+            q12.pNext = &asFeatures;
+            asFeatures.pNext = &rqFeatures;
+            if (baryName) rqFeatures.pNext = &baryFeatures;
+        } else if (baryName) {
+            q12.pNext = &baryFeatures;
+        }
+        vkGetPhysicalDeviceFeatures2(gpu, &q);
+        hasRayTracing = rtNames && asFeatures.accelerationStructure && rqFeatures.rayQuery && q12.bufferDeviceAddress;
+        hasBarycentric = baryName && baryFeatures.fragmentShaderBarycentric;
+        if (hasRayTracing)
+            for (const char* n : rt) extensions.push_back(n);
+        if (hasBarycentric) extensions.push_back(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
+    }
+
     const float priority = 1.0f;
     std::vector<VkDeviceQueueCreateInfo> queues;
     VkDeviceQueueCreateInfo q{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
@@ -179,12 +207,33 @@ void Context::createDevice(VkSurfaceKHR surface) {
     VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
     f12.pNext = &f13;
     f12.timelineSemaphore = VK_TRUE;
+    f12.bufferDeviceAddress = hasRayTracing ? VK_TRUE : VK_FALSE;
+    {
+        // Only the features that are used are switched on.
+        void** tail = &f13.pNext;
+        if (hasRayTracing) {
+            asFeatures = VkPhysicalDeviceAccelerationStructureFeaturesKHR{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
+            asFeatures.accelerationStructure = VK_TRUE;
+            rqFeatures = VkPhysicalDeviceRayQueryFeaturesKHR{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
+            rqFeatures.rayQuery = VK_TRUE;
+            *tail = &asFeatures;
+            asFeatures.pNext = &rqFeatures;
+            tail = &rqFeatures.pNext;
+        }
+        if (hasBarycentric) {
+            baryFeatures = VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR};
+            baryFeatures.fragmentShaderBarycentric = VK_TRUE;
+            *tail = &baryFeatures;
+        }
+    }
     VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
     f2.pNext = &f12;
     // 64-bit integers (hashes) and doubles (grid dimensions) for the compute backend's shaders.
     VkPhysicalDeviceFeatures supported;
     vkGetPhysicalDeviceFeatures(gpu, &supported);
     f2.features.shaderInt64 = supported.shaderInt64;
+    // The x-ray pass blends its colour targets but not the integer target of cell ids.
+    f2.features.independentBlend = supported.independentBlend;
     f2.features.shaderFloat64 = supported.shaderFloat64;
 
     VkDeviceCreateInfo ci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
@@ -233,6 +282,12 @@ Buffer Context::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemo
     VkExportMemoryAllocateInfo exp{VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO};
     exp.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
     if (exportable) ai.pNext = &exp;
+    VkMemoryAllocateFlagsInfo flags{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
+    flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+    if (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) {
+        flags.pNext = ai.pNext;
+        ai.pNext = &flags;
+    }
     const VkResult r = vkAllocateMemory(device, &ai, nullptr, &b.memory);
     if (r != VK_SUCCESS) {
         vkDestroyBuffer(device, b.buffer, nullptr);
@@ -265,6 +320,12 @@ void Context::destroy(Buffer& b) {
     if (b.buffer) vkDestroyBuffer(device, b.buffer, nullptr);
     if (b.memory) vkFreeMemory(device, b.memory, nullptr);
     b = Buffer{};
+}
+
+VkDeviceAddress Context::address(const Buffer& b) const {
+    VkBufferDeviceAddressInfo info{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+    info.buffer = b.buffer;
+    return vkGetBufferDeviceAddress(device, &info);
 }
 
 Image Context::createImage(VkExtent2D extent, VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect) {

@@ -15,7 +15,7 @@
 namespace cfv {
 
 std::vector<std::uint8_t> renderOffscreen(Context& ctx, const PointBuffers& points, const OrbitCamera& camera,
-                                          const RenderSettings& settings, float sceneRadius, float currentStep,
+                                          const RenderSettings& settings, Vec3 sceneCentre, float sceneRadius, float currentStep,
                                           int width, int height, int ssaa) {
     ssaa = std::clamp(ssaa, 1, 4);
     const VkExtent2D extent{static_cast<uint32_t>(width * ssaa), static_cast<uint32_t>(height * ssaa)};
@@ -29,16 +29,32 @@ std::vector<std::uint8_t> renderOffscreen(Context& ctx, const PointBuffers& poin
     Buffer readback = ctx.createBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
 
-    // Supersampling shrinks every pixel, so scale the pixel-size floor with it.
+    // Supersampling shrinks every pixel, so scale what is measured in pixels with it.
     RenderSettings s = settings;
     s.minPixelRadius = settings.minPixelRadius * static_cast<float>(ssaa);
-    const FrameUniforms uniforms = renderer.makeUniforms(camera, s, sceneRadius, currentStep, 0);
+    s.wallWidth = settings.wallWidth * static_cast<float>(ssaa);
+    s.outlineWidth = settings.outlineWidth * static_cast<float>(ssaa);
+    const FrameSetup frame = renderer.makeUniforms(camera, s, sceneCentre, sceneRadius, currentStep, 0);
+
+    // The path tracer refines its image frame by frame: render until it has all its samples.
+    if (s.drawMode == kDrawPathTraced && renderer.rayTracing()) {
+        const int perFrame = std::clamp(s.ptSamplesPerFrame, 1, 64);
+        const int frames = (std::max(s.ptMaxSamples, 1) + perFrame - 1) / perFrame;
+        for (int i = 0; i + 1 < frames; ++i) {
+            ctx.immediate([&](VkCommandBuffer cmd) {
+                transition(cmd, target.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                           VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
+                           VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+                renderer.record(cmd, target.view, points, frame, s, {});
+            });
+        }
+    }
 
     ctx.immediate([&](VkCommandBuffer cmd) {
         transition(cmd, target.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-        renderer.record(cmd, target.view, points, uniforms, {});
+        renderer.record(cmd, target.view, points, frame, s, {});
         transition(cmd, target.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);

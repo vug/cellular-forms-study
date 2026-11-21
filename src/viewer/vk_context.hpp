@@ -60,6 +60,11 @@ public:
     VkCommandPool commandPool = VK_NULL_HANDLE;  // for the graphics queue family
     VkPhysicalDeviceProperties gpuProperties{};
     bool hasExternalMemory = false;
+    // Hardware ray tracing through ray queries (acceleration structures of the cells, traced from
+    // fragment shaders): ray-traced ambient occlusion and the path tracer need it.
+    bool hasRayTracing = false;
+    // Per-vertex attributes and barycentric coordinates in fragment shaders: cell walls on the membrane.
+    bool hasBarycentric = false;
     std::string gpuName;
 
     // Number of validation errors reported so far (0 when validation is off).
@@ -70,6 +75,8 @@ public:
     Buffer createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props, bool map = false,
                         bool exportable = false);
     void destroy(Buffer& b);
+    // Device address of a buffer created with VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT.
+    VkDeviceAddress address(const Buffer& b) const;
     // NT handle of an exportable buffer's memory (created with exportable = true), for another
     // API to import. The caller closes it with CloseHandle once the import is done.
     void* exportMemoryHandle(const Buffer& b);

@@ -84,12 +84,29 @@ struct Params {
     // 1 + fieldBulge * (2 f - 1), with f the same noise field as the food field
     // (fieldScale, fieldOctaves, fieldContrast). Regions of the sheet then fold differently.
     float fieldBulge = 0.0f;    // -1 to 1; 0 = off
+
+    // Morphogens (core/morph.hpp): two chemicals on the cells that diffuse along the links and
+    // react (Gray-Scott), making spots and stripes on the sheet; the activator B then sets
+    // local parameters. Daughters start with their parent's concentrations.
+    float morphogens = 0.0f;       // 0 = off, anything else = on
+    float morphDiffA = 0.64f;      // diffusion of the substrate: fraction of the way to the neighbours' mean per iteration
+    float morphDiffB = 0.32f;      // diffusion of the activator
+    float morphFeed = 0.035f;
+    float morphKill = 0.065f;
+    float morphIterations = 4.0f;  // reaction-diffusion iterations per simulation step, 1 to 16 (rounded)
+    float morphSeeds = 0.05f;      // fraction of the cells that start with the activator
+    // What the activator does. Each is a scale 1 + coupling * (2 s - 1) on a local quantity,
+    // with s = min(3 B, 1): no activator halves-to-zero, full activator doubles (coupling 1).
+    float morphFood = 0.0f;        // -1 to 1: the cell's food increment (the nutrient of design.md)
+    float morphBulge = 0.0f;       // -1 to 1: its bulge factor
+    float morphPlanar = 0.0f;      // -1 to 1: its planar factor (stiffness)
+    float morphRest = 0.0f;        // -0.5 to 0.5: its link rest length
 };
 
 // True when any food source beyond uniform random is switched on.
 bool uses_food_extensions(const Params& p);
 // True when anything beyond the base model is switched on (the food sources above, oriented
-// division, field-dependent stiffness). The Vulkan compute and WebGPU ports implement the
+// division, field-dependent stiffness, morphogens). The Vulkan compute and WebGPU ports implement the
 // base model only and refuse such states.
 bool uses_model_extensions(const Params& p);
 

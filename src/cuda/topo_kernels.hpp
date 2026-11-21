@@ -26,6 +26,8 @@ struct TopoView {
     std::uint32_t* nbr;  // kMaxDeg slots per cell
     float linkRestLength;
     float daughterOffset;
+    float* morphA = nullptr;  // morphogen concentrations (core/morph.hpp), or null when the state has none
+    float* morphB = nullptr;
 };
 
 CF_FN std::uint32_t* tv_ring(const TopoView& s, std::uint32_t v) {
@@ -234,6 +236,10 @@ CF_FN void tv_apply_division(const TopoView& s, std::uint32_t v, std::uint8_t pa
     s.food[v] = half;
     s.food[vp] = half;
     s.birth[vp] = static_cast<std::uint32_t>(step);
+    if (s.morphA != nullptr) {  // the daughter starts with the parent's morphogen concentrations
+        s.morphA[vp] = s.morphA[v];
+        s.morphB[vp] = s.morphB[v];
+    }
     s.gen[v] += 1u;
     s.gen[vp] = s.gen[v];
 }

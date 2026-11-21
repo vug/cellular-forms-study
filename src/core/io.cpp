@@ -159,6 +159,10 @@ std::vector<char> encode_checkpoint(const State& s) {
     e.chunk("GEN ", 4, s.gen.data(), n * sizeof(std::uint32_t));
     e.chunk("DEG ", 1, s.deg.data(), n);
     e.chunk("NBR ", 4, s.nbr.data(), n * kMaxDeg * sizeof(std::uint32_t));
+    if (!s.morphA.empty()) {
+        e.chunk("MPHA", 4, s.morphA.data(), n * sizeof(float));
+        e.chunk("MPHB", 4, s.morphB.data(), n * sizeof(float));
+    }
     return e.finish();
 }
 
@@ -250,6 +254,12 @@ State decode_checkpoint(const std::vector<char>& bytes) {
     std::memcpy(s.gen.data(), p.need("GEN ", n * 4).payload, static_cast<std::size_t>(n * 4));
     std::memcpy(s.deg.data(), p.need("DEG ", n).payload, static_cast<std::size_t>(n));
     std::memcpy(s.nbr.data(), p.need("NBR ", n * kMaxDeg * 4).payload, static_cast<std::size_t>(n * kMaxDeg * 4));
+    if (p.find("MPHA") != nullptr || p.find("MPHB") != nullptr) {
+        s.morphA.resize(static_cast<std::size_t>(n));
+        s.morphB.resize(static_cast<std::size_t>(n));
+        std::memcpy(s.morphA.data(), p.need("MPHA", n * 4).payload, static_cast<std::size_t>(n * 4));
+        std::memcpy(s.morphB.data(), p.need("MPHB", n * 4).payload, static_cast<std::size_t>(n * 4));
+    }
     return s;
 }
 

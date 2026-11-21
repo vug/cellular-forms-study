@@ -20,6 +20,8 @@
 //     "GEN "  u32 x n       divisions in the cell's lineage                   checkpoint
 //     "DEG "  u8  x n       used neighbour slots                              checkpoint
 //     "NBR "  u32 x slots x n   neighbour rings, counter-clockwise            checkpoint
+//     "MPHA", "MPHB"  f32 x n each: morphogen concentrations, only when       checkpoint
+//             the state has them
 //     "POSQ"  f32 min[3], f32 max[3], then u16 x 3 x n: positions quantised   snapshot
 //             to 16 bits per axis inside the bounding box
 //     "FODQ"  u8 x n        food / foodThreshold, clamped, scaled to 0..255   snapshot

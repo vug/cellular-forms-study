@@ -82,6 +82,10 @@ void apply_division(State& s, std::uint32_t v, CleavagePair pair, std::uint32_t 
     s.food[v] = half;
     s.food[vp] = half;
     s.birth[vp] = static_cast<std::uint32_t>(step);
+    if (!s.morphA.empty()) {  // the daughter starts with the parent's morphogen concentrations
+        s.morphA[vp] = s.morphA[v];
+        s.morphB[vp] = s.morphB[v];
+    }
     s.gen[v] += 1u;
     s.gen[vp] = s.gen[v];
 }

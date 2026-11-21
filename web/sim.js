@@ -136,7 +136,7 @@ export class Sim {
     if (n > this.capacity) throw new Error(`state has ${n} cells, capacity is ${this.capacity}`);
     // This port implements the uniform-food model only. The other food sources (M5) are written
     // to a checkpoint only when they are switched on, so their presence means they are in use.
-    const extra = ['fieldAmount', 'pulsePeriod', 'lightAmount', 'foodDiffusion', 'foodDecay', 'crowdHigh', 'orientAmount', 'fieldBulge']
+    const extra = ['fieldAmount', 'pulsePeriod', 'lightAmount', 'foodDiffusion', 'foodDecay', 'crowdHigh', 'orientAmount', 'fieldBulge', 'morphogens']
       .filter((k) => state.params[k] !== undefined && state.params[k] !== 0);
     if (extra.length) throw new Error(`the WebGPU port implements the base model only; this state uses ${extra.join(', ')}`);
     const q = this.device.queue;

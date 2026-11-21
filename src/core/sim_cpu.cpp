@@ -53,11 +53,15 @@ CpuSim::CpuSim(State initial, unsigned threads) : s_(std::move(initial)) {
     }
     const CheckResult c = check_invariants(s_);
     if (!c.ok()) throw std::invalid_argument("initial state rejected: " + c.message);
+    if (s_.params.morphogens != 0.0f && s_.morphA.empty()) init_morphogens(s_);
 }
 
 ParamIssues CpuSim::set_params(const Params& p) {
     ParamIssues issues = validate(p);
-    if (issues.ok()) s_.params = p;
+    if (issues.ok()) {
+        s_.params = p;
+        if (p.morphogens != 0.0f && s_.morphA.empty()) init_morphogens(s_);  // switched on: the cells get their starting values
+    }
     return issues;
 }
 
@@ -106,6 +110,10 @@ StepReport CpuSim::step() {
     // not change the result; it sits here because the light source needs this step's normals
     // and the bounding box the grid has just computed.
     const FoodParams fp = make_food_params(p, seed, step, grid_.bounds_lo(), grid_.bounds_hi());
+    // Morphogens (core/morph.hpp). Everything in this step reads the concentrations as they
+    // were at its start; the new ones are computed below and become current at the commit.
+    const MorphParams mp = make_morph_params(p);
+    const bool morph = mp.on != 0u && !s_.morphA.empty();
     {
         const State& s = s_;
         if (fp.flags & kFoodLight) {
@@ -121,8 +129,10 @@ StepReport CpuSim::step() {
         float* out = foodNew_.data();
         const Vec3* nrm = normalNew_.data();
         const std::int32_t* shadow = shadow_.data();
-        parallel_for(n, threads_, [&s, fp, step, food, out, nrm, shadow](std::uint32_t b, std::uint32_t e, unsigned) {
-            for (std::uint32_t v = b; v < e; ++v) out[v] = food_update(fp, v, v, step, food, s.pos.data(), nrm, s.ring(v), s.deg[v], shadow);
+        const float* morphB = s_.morphB.data();
+        parallel_for(n, threads_, [&s, fp, step, food, out, nrm, shadow, morphB](std::uint32_t b, std::uint32_t e, unsigned) {
+            for (std::uint32_t v = b; v < e; ++v)
+                out[v] = food_update(fp, v, v, step, food, s.pos.data(), nrm, s.ring(v), s.deg[v], shadow, morphB);
         });
     }
 
@@ -143,6 +153,7 @@ StepReport CpuSim::step() {
                 const std::uint32_t d = s.deg[v];
                 KernelParams kpc = kp;  // per-cell stiffness from the field (M8)
                 if (fp.fieldBulge != 0.0f) kpc.bulge = kp.bulge * bulge_scale(fp, P);
+                if (morph) morph_apply(mp, s.morphB[v], kpc);  // and from the morphogen activator
                 const LinkTerms lt = link_terms(s.pos.data(), ring, d, P, nrm[v], kpc);
                 const Vec3 rep3 = repulsion_offset(grid, v, P, ring, d, kp);
                 // P_new = P' + collisionOffset, both from the old positions.
@@ -165,6 +176,7 @@ StepReport CpuSim::step() {
             const Vec3 P = s.pos[bad];
             KernelParams kpc = kp;
             if (fp.fieldBulge != 0.0f) kpc.bulge = kp.bulge * bulge_scale(fp, P);
+            if (morph) morph_apply(mp, s.morphB[bad], kpc);
             const LinkTerms lt = link_terms(s.pos.data(), s.ring(bad), s.deg[bad], P, nrm[bad], kpc);
             const Vec3 rep3 = repulsion_offset(grid, bad, P, s.ring(bad), s.deg[bad], kp);
             rep.status = StepStatus::Failed;
@@ -172,6 +184,30 @@ StepReport CpuSim::step() {
             rep.term = !is_finite(lt.spring) ? "spring" : !is_finite(lt.planar) ? "planar" : !is_finite(lt.bulge) ? "bulge" : !is_finite(rep3) ? "repulsion" : "sum";
             rep.message = failure_message(s_, step, bad, rep.term, "new position is not finite");
             return rep;
+        }
+    }
+
+    // ---- Morphogens: the reaction-diffusion iterations of this step, from the current
+    // concentrations into the new buffers (through scratch buffers, never over the current ones,
+    // so a refused step leaves the state as it was).
+    if (morph) {
+        morphANew_.resize(n);
+        morphBNew_.resize(n);
+        morphAScratch_.resize(n);
+        morphBScratch_.resize(n);
+        const State& s = s_;
+        const float* srcA = s_.morphA.data();
+        const float* srcB = s_.morphB.data();
+        for (std::uint32_t it = 0; it < mp.iterations; ++it) {
+            // The last iteration writes the new buffers; the ones before alternate backwards from it.
+            const bool toNew = (mp.iterations - 1u - it) % 2u == 0u;
+            float* dstA = toNew ? morphANew_.data() : morphAScratch_.data();
+            float* dstB = toNew ? morphBNew_.data() : morphBScratch_.data();
+            parallel_for(n, threads_, [&s, mp, srcA, srcB, dstA, dstB](std::uint32_t b, std::uint32_t e, unsigned) {
+                for (std::uint32_t v = b; v < e; ++v) morph_update(mp, v, srcA, srcB, s.ring(v), s.deg[v], dstA[v], dstB[v]);
+            });
+            srcA = dstA;
+            srcB = dstB;
         }
     }
 
@@ -233,6 +269,10 @@ StepReport CpuSim::step() {
     s_.pos.swap(posNew_);
     s_.normal.swap(normalNew_);
     s_.food.swap(foodNew_);
+    if (morph) {
+        s_.morphA.swap(morphANew_);
+        s_.morphB.swap(morphBNew_);
+    }
     if (w > 0) {
         s_.resize(n + w);
         for (std::uint32_t k = 0; k < w; ++k) {

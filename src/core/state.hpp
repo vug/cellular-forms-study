@@ -23,6 +23,9 @@ struct State {
     std::vector<std::uint32_t> gen;    // n, number of divisions in the cell's lineage
     std::vector<std::uint8_t> deg;     // n, used neighbour slots
     std::vector<std::uint32_t> nbr;    // n * kMaxDeg, counter-clockwise seen from outside
+    // Morphogen concentrations (core/morph.hpp): n each once morphogens have been switched on,
+    // empty before that. Part of the checksum and of checkpoints only when present.
+    std::vector<float> morphA, morphB;
 
     void resize(std::uint32_t cells);
 
@@ -34,6 +37,11 @@ struct State {
 // positions, normals, food, birth, generation, degrees and the used neighbour slots).
 // Two states with the same checksum are, for our purposes, the same state.
 std::uint64_t checksum(const State& s);
+
+// Gives every cell its starting morphogen concentrations (core/morph.hpp), by hash of
+// (seed, current step, cell id). The simulations call this when morphogens are switched on
+// and the state has none yet.
+void init_morphogens(State& s);
 
 // Index of u in ring(v), or -1.
 int ring_index(const State& s, std::uint32_t v, std::uint32_t u);

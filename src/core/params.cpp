@@ -34,7 +34,11 @@ constexpr FloatField kExtraFields[] = {
     {"lightBias", &Params::lightBias},         {"lightPixel", &Params::lightPixel},       {"foodDiffusion", &Params::foodDiffusion},
     {"foodDecay", &Params::foodDecay},         {"crowdLow", &Params::crowdLow},           {"crowdHigh", &Params::crowdHigh},
     {"orientAmount", &Params::orientAmount},   {"orientAxisX", &Params::orientAxisX},     {"orientAxisY", &Params::orientAxisY},
-    {"orientAxisZ", &Params::orientAxisZ},     {"fieldBulge", &Params::fieldBulge},
+    {"orientAxisZ", &Params::orientAxisZ},     {"fieldBulge", &Params::fieldBulge},       {"morphogens", &Params::morphogens},
+    {"morphDiffA", &Params::morphDiffA},       {"morphDiffB", &Params::morphDiffB},       {"morphFeed", &Params::morphFeed},
+    {"morphKill", &Params::morphKill},         {"morphIterations", &Params::morphIterations}, {"morphSeeds", &Params::morphSeeds},
+    {"morphFood", &Params::morphFood},         {"morphBulge", &Params::morphBulge},       {"morphPlanar", &Params::morphPlanar},
+    {"morphRest", &Params::morphRest},
 };
 
 std::string_view trim(std::string_view s) {
@@ -125,10 +129,20 @@ ParamIssues validate(const Params& p) {
     if (p.orientAmount > 0.0f && !(p.orientAxisX * p.orientAxisX + p.orientAxisY * p.orientAxisY + p.orientAxisZ * p.orientAxisZ > 1.0e-12f))
         r.errors.push_back("the orientation axis must not be zero");
     if (p.fieldBulge < -1.0f || p.fieldBulge > 1.0f) r.errors.push_back("fieldBulge must be in [-1, 1]");
+    if (p.morphDiffA < 0.0f || p.morphDiffA > 1.0f || p.morphDiffB < 0.0f || p.morphDiffB > 1.0f)
+        r.errors.push_back("morphDiffA and morphDiffB must be in [0, 1]");
+    if (p.morphFeed < 0.0f || p.morphFeed > 1.0f || p.morphKill < 0.0f || p.morphKill > 1.0f)
+        r.errors.push_back("morphFeed and morphKill must be in [0, 1]");
+    if (p.morphSeeds < 0.0f || p.morphSeeds > 1.0f) r.errors.push_back("morphSeeds must be in [0, 1]");
+    if (p.morphFood < -1.0f || p.morphFood > 1.0f || p.morphBulge < -1.0f || p.morphBulge > 1.0f || p.morphPlanar < -1.0f || p.morphPlanar > 1.0f)
+        r.errors.push_back("morphFood, morphBulge and morphPlanar must be in [-1, 1]");
+    if (p.morphRest < -0.5f || p.morphRest > 0.5f) r.errors.push_back("morphRest must be in [-0.5, 0.5]");
     return r;
 }
 
-bool uses_model_extensions(const Params& p) { return uses_food_extensions(p) || p.orientAmount > 0.0f || p.fieldBulge != 0.0f; }
+bool uses_model_extensions(const Params& p) {
+    return uses_food_extensions(p) || p.orientAmount > 0.0f || p.fieldBulge != 0.0f || p.morphogens != 0.0f;
+}
 
 bool uses_food_extensions(const Params& p) {
     return p.fieldAmount > 0.0f || p.pulsePeriod > 0.0f || p.lightAmount > 0.0f || p.foodDiffusion > 0.0f || p.foodDecay > 0.0f ||

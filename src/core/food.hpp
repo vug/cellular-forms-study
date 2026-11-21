@@ -8,6 +8,7 @@
 
 #include "config.hpp"
 #include "hash.hpp"
+#include "morph.hpp"
 #include "params.hpp"
 #include "vec3.hpp"
 
@@ -19,6 +20,7 @@ inline constexpr std::uint32_t kFoodField = 2u;
 inline constexpr std::uint32_t kFoodLight = 4u;
 inline constexpr std::uint32_t kFoodDiffuse = 8u;
 inline constexpr std::uint32_t kFoodCrowd = 16u;
+inline constexpr std::uint32_t kFoodMorph = 32u;  // the morphogen activator scales the increment
 
 // The shadow map never has more texels than this; the texel grows to fit (make_food_params).
 inline constexpr std::uint32_t kShadowMaxTexels = 1u << 24;
@@ -51,6 +53,7 @@ struct FoodParams {
     float crowdLow;          // in rest lengths
     float crowdInvRange;     // 1 / (crowdHigh - crowdLow)
     float invL0;
+    float morphFood;         // coupling of the morphogen activator to the increment (core/morph.hpp)
     std::uint64_t seed;
 };
 
@@ -161,7 +164,7 @@ CF_FN float crowd_factor(const FoodParams& fp, const Vec3* pos, const std::uint3
 // normals. `id` is the cell's id, which picks its random number; it equals v unless a backend
 // keeps its cells in another order than their ids (the CUDA backend does, for memory locality).
 CF_FN float food_update(const FoodParams& fp, std::uint32_t v, std::uint32_t id, std::uint64_t step, const float* food, const Vec3* pos,
-                        const Vec3* nrm, const std::uint32_t* ring, std::uint32_t d, const std::int32_t* shadow) {
+                        const Vec3* nrm, const std::uint32_t* ring, std::uint32_t d, const std::int32_t* shadow, const float* morphB) {
     const float base = fp.foodMin + fp.foodSpan * hash_u01(fp.seed, step, id, Stream::Food);
     if (fp.flags == 0u) return food[v] + base;  // the uniform model, exactly
     float factor = fp.pulse;
@@ -169,6 +172,7 @@ CF_FN float food_update(const FoodParams& fp, std::uint32_t v, std::uint32_t id,
     if (fp.flags & kFoodField) factor = factor * field_factor(fp, P);
     if (fp.flags & kFoodLight) factor = factor * light_factor(fp, P, nrm[v], shadow);
     if (fp.flags & kFoodCrowd) factor = factor * crowd_factor(fp, pos, ring, d, P);
+    if (fp.flags & kFoodMorph) factor = factor * morph_factor(fp.morphFood, morphB[v]);
     float f = food[v] + base * factor;
     if (fp.flags & kFoodDiffuse) {
         float sum = 0.0f;

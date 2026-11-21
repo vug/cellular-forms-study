@@ -30,6 +30,7 @@
 #include "core/food.hpp"
 #include "core/hash.hpp"
 #include "core/kernels.hpp"
+#include "core/morph.hpp"
 #include "core/parallel.hpp"
 #include "core/topology.hpp"
 #include "topo_kernels.hpp"
@@ -200,7 +201,7 @@ __global__ void k_gather_rows(const Vec3* pos, const std::uint32_t* sortedId, Ve
 // the cell's ring: one pass fetches them once.
 __global__ void k_move(const Vec3* pos, const Vec3* prevNrm, Vec3* nrmOut, const std::uint32_t* nbr, const std::uint8_t* deg,
                        const std::uint32_t* uid, Vec3* out, std::uint32_t n, GridView grid, KernelParams kp, FoodParams fp, float eps2,
-                       Counters* c) {
+                       MorphParams mp, const float* morphB, Counters* c) {
     // The two counters are summed per block first: when most cells hit the displacement cap,
     // one atomic per cell on a single address is a bottleneck.
     __shared__ std::uint32_t blockClamped, blockFallbacks;
@@ -222,6 +223,7 @@ __global__ void k_move(const Vec3* pos, const Vec3* prevNrm, Vec3* nrmOut, const
         if (!ring_normal(pos, ring, d, P, prevNrm[v], eps2, N)) atomicAdd(&blockFallbacks, 1u);
         nrmOut[v] = N;
         if (fp.fieldBulge != 0.0f) kp.bulge = kp.bulge * bulge_scale(fp, P);  // per-cell stiffness from the field (M8)
+        if (morphB != nullptr) morph_apply(mp, morphB[v], kp);                // and from the morphogen activator
         const LinkTerms lt = link_terms(pos, ring, d, P, N, kp);
         const Vec3 rep3 = repulsion_offset(grid, v, P, ring, d, kp);
         // P_new = P' + collisionOffset, both from the old positions (same expression as the CPU).
@@ -240,12 +242,14 @@ __global__ void k_move(const Vec3* pos, const Vec3* prevNrm, Vec3* nrmOut, const
 
 // Which term of one cell is not finite: bit 0 spring, 1 planar, 2 bulge, 3 repulsion.
 __global__ void k_diagnose(const Vec3* pos, const Vec3* nrm, const std::uint32_t* nbr, const std::uint8_t* deg,
-                           const std::uint32_t* slotOf, std::uint32_t id, GridView grid, KernelParams kp, FoodParams fp, std::uint32_t* out) {
+                           const std::uint32_t* slotOf, std::uint32_t id, GridView grid, KernelParams kp, FoodParams fp, MorphParams mp,
+                           const float* morphB, std::uint32_t* out) {
     const std::uint32_t v = slotOf[id];
     const Vec3 P = pos[v];
     const std::uint32_t* ring = nbr + static_cast<std::size_t>(v) * kMaxDeg;
     const std::uint32_t d = deg[v];
     if (fp.fieldBulge != 0.0f) kp.bulge = kp.bulge * bulge_scale(fp, P);
+    if (morphB != nullptr) morph_apply(mp, morphB[v], kp);
     const LinkTerms lt = link_terms(pos, ring, d, P, nrm[v], kp);
     const Vec3 rep3 = repulsion_offset(grid, v, P, ring, d, kp);
     *out = (dev_finite(lt.spring) ? 0u : 1u) | (dev_finite(lt.planar) ? 0u : 2u) | (dev_finite(lt.bulge) ? 0u : 4u) |
@@ -257,13 +261,13 @@ __global__ void k_diagnose(const Vec3* pos, const Vec3* nrm, const std::uint32_t
 // `oldPos` and `oldFood` are the values before this step; s holds the new buffers. Random numbers
 // are drawn by cell id (uid), not by the slot the cell happens to live in.
 __global__ void k_food_candidates(TopoView s, FoodParams fp, const float* oldFood, const Vec3* oldPos, const std::int32_t* shadow,
-                                  const std::uint32_t* uid, float threshold, std::uint64_t* prio, std::uint8_t* pair, std::uint8_t* winById,
+                                  const float* morphB, const std::uint32_t* uid, float threshold, std::uint64_t* prio, std::uint8_t* pair, std::uint8_t* winById,
                                   std::uint32_t n, std::uint64_t seed, std::uint64_t step, Orientation orient, Counters* c) {
     const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
     if (v >= n) return;
     winById[v] = 0;  // every entry of the flag array is cleared by some thread; k_winners sets the winners
     const std::uint32_t id = uid[v];
-    const float f = food_update(fp, v, id, step, oldFood, oldPos, s.normal, s.nbr + static_cast<std::size_t>(v) * kMaxDeg, s.deg[v], shadow);
+    const float f = food_update(fp, v, id, step, oldFood, oldPos, s.normal, s.nbr + static_cast<std::size_t>(v) * kMaxDeg, s.deg[v], shadow, morphB);
     s.food[v] = f;
     std::uint64_t p = 0;
     std::uint8_t pr = kNoPair;
@@ -318,6 +322,36 @@ __global__ void k_split(TopoView s, const std::uint32_t* winners, const std::uin
     tv_apply_division(s, v, pair[v], n + k, step);
     uid[n + k] = n + k;
     slotOf[n + k] = n + k;
+}
+
+// ---- Morphogens (core/morph.hpp)
+
+// Starting concentrations, by cell id.
+__global__ void k_morph_init(const std::uint32_t* uid, std::uint64_t seed, std::uint64_t step, float seeds, float* A, float* B, std::uint32_t n) {
+    const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
+    if (v >= n) return;
+    float a, b;
+    morph_initial(seed, step, uid[v], seeds, a, b);
+    A[v] = a;
+    B[v] = b;
+}
+
+// One reaction-diffusion iteration.
+__global__ void k_morph(MorphParams mp, const float* A, const float* B, const std::uint32_t* nbr, const std::uint8_t* deg, float* outA,
+                        float* outB, std::uint32_t n) {
+    const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
+    if (v >= n) return;
+    float a, b;
+    morph_update(mp, v, A, B, nbr + static_cast<std::size_t>(v) * kMaxDeg, deg[v], a, b);
+    outA[v] = a;
+    outB[v] = b;
+}
+
+__global__ void k_permute_pair(const std::uint32_t* perm, std::uint32_t n, const float* a, float* aOut, const float* b, float* bOut) {
+    const std::uint32_t q = blockIdx.x * blockDim.x + threadIdx.x;
+    if (q >= n) return;
+    aOut[q] = a[perm[q]];
+    bOut[q] = b[perm[q]];
 }
 
 // ---- Renumbering: the cells move to new slots in grid order (perm[q] = the old slot of the
@@ -397,6 +431,14 @@ __global__ void k_after_permute(const std::uint32_t* uid, std::uint32_t* slotOf,
     sortedSlot[q] = q;
 }
 
+// One per-cell float array from slot order (uid != nullptr) or id order (uid == nullptr).
+void floats_to_id_order(std::vector<float>& out, std::uint32_t n, const float* in, const std::uint32_t* uid) {
+    out.resize(n);
+    if (uid == nullptr) std::memcpy(out.data(), in, static_cast<std::size_t>(n) * sizeof(float));
+    else
+        for (std::uint32_t v = 0; v < n; ++v) out[uid[v]] = in[v];
+}
+
 // Fills `out` (already sized for n cells) in id order from arrays in slot order: the cell in
 // slot v goes to index uid[v], and the slots named in its ring become ids.
 void to_id_order(State& out, std::uint32_t n, const Vec3* pos, const Vec3* normal, const float* food, const std::uint32_t* birth,
@@ -449,6 +491,12 @@ struct CudaSim::Impl {
     std::uint32_t* uid = nullptr;
     std::uint32_t* slotOf = nullptr;
     bool permuted = false;
+
+    // Morphogen concentrations (core/morph.hpp), double-buffered like the positions. Allocated
+    // the first time morphogens are on (16 more bytes per cell).
+    float* morphA[2] = {nullptr, nullptr};
+    float* morphB[2] = {nullptr, nullptr};
+    bool morphPresent = false;  // the state has concentrations (they stay once created)
     std::uint32_t renumberMinCells = 0;
     std::uint32_t renumberMaxSteps = 0;
     double renumberGrowth = 0.0;
@@ -488,6 +536,8 @@ struct CudaSim::Impl {
         std::uint8_t* deg = nullptr;
         std::uint32_t* nbr = nullptr;
         std::uint32_t* uid = nullptr;
+        float* morphA = nullptr;
+        float* morphB = nullptr;
         std::uint32_t capacity = 0;
     } pinned;
     bool pinnedFailed = false;
@@ -498,6 +548,7 @@ struct CudaSim::Impl {
     struct Job {
         bool fromPinned = false;
         bool permuted = false;  // the pinned copy is in slot order and needs pinned.uid
+        bool morph = false;     // the pinned copy has morphogen concentrations
         std::uint32_t n = 0;
         std::uint64_t step = 0, seed = 0;
         Params params;
@@ -589,6 +640,15 @@ struct CudaSim::Impl {
         t0 = now;
     }
 
+    // Device buffers for the morphogens, the first time they are needed.
+    void ensure_morph() {
+        if (morphA[0] != nullptr) return;
+        for (int b = 0; b < 2; ++b) {
+            morphA[b] = alloc<float>(capacity, "morphogen A");
+            morphB[b] = alloc<float>(capacity, "morphogen B");
+        }
+    }
+
     // True when this step should start with a renumbering: the form is large enough for memory
     // locality to matter, and enough cells were added (they are appended, out of spatial order)
     // or enough steps passed since the last one.
@@ -630,13 +690,26 @@ struct CudaSim::Impl {
             to_id_order(s, n, raw.pos.data(), raw.normal.data(), raw.food.data(), raw.birth.data(), raw.gen.data(), raw.deg.data(),
                         raw.nbr.data(), ids.data());
         }
+        if (morphPresent) {
+            std::vector<float> raw(c);
+            std::vector<std::uint32_t> ids;
+            if (permuted) {
+                ids.resize(c);
+                CF_CUDA(cudaMemcpy(ids.data(), uid, c * sizeof(std::uint32_t), cudaMemcpyDeviceToHost));
+            }
+            CF_CUDA(cudaMemcpy(raw.data(), morphA[cur], c * sizeof(float), cudaMemcpyDeviceToHost));
+            floats_to_id_order(s.morphA, n, raw.data(), permuted ? ids.data() : nullptr);
+            CF_CUDA(cudaMemcpy(raw.data(), morphB[cur], c * sizeof(float), cudaMemcpyDeviceToHost));
+            floats_to_id_order(s.morphB, n, raw.data(), permuted ? ids.data() : nullptr);
+        }
         out = std::move(s);
     }
 
     void free_pinned() {
         for (void* p : {static_cast<void*>(pinned.pos), static_cast<void*>(pinned.normal), static_cast<void*>(pinned.food),
                         static_cast<void*>(pinned.birth), static_cast<void*>(pinned.gen), static_cast<void*>(pinned.deg),
-                        static_cast<void*>(pinned.nbr), static_cast<void*>(pinned.uid)})
+                        static_cast<void*>(pinned.nbr), static_cast<void*>(pinned.uid), static_cast<void*>(pinned.morphA),
+                        static_cast<void*>(pinned.morphB)})
             if (p) cudaFreeHost(p);
         pinned = Pinned{};
     }
@@ -644,7 +717,7 @@ struct CudaSim::Impl {
     // Pinned host buffers for at least `cells` cells. False when the OS refuses the memory.
     bool ensure_pinned(std::uint32_t cells) {
         if (pinnedFailed) return false;
-        if (pinned.capacity >= cells) return true;
+        if (pinned.capacity >= cells && (!morphPresent || pinned.morphA != nullptr)) return true;
         free_pinned();
         std::uint64_t want = std::max<std::uint64_t>(std::uint64_t{cells} + cells / 32, 4096);  // a little headroom
         if (want > capacity) want = capacity;
@@ -667,6 +740,10 @@ struct CudaSim::Impl {
         pinned.deg = static_cast<std::uint8_t*>(get(c * sizeof(std::uint8_t)));
         pinned.nbr = static_cast<std::uint32_t*>(get(c * kMaxDeg * sizeof(std::uint32_t)));
         pinned.uid = static_cast<std::uint32_t*>(get(c * sizeof(std::uint32_t)));
+        if (morphPresent) {
+            pinned.morphA = static_cast<float*>(get(c * sizeof(float)));
+            pinned.morphB = static_cast<float*>(get(c * sizeof(float)));
+        }
         if (!ok) {
             free_pinned();
             pinnedFailed = true;
@@ -705,6 +782,10 @@ struct CudaSim::Impl {
                         std::memcpy(s.gen.data(), pinned.gen, c * sizeof(std::uint32_t));
                         std::memcpy(s.deg.data(), pinned.deg, c * sizeof(std::uint8_t));
                         std::memcpy(s.nbr.data(), pinned.nbr, c * kMaxDeg * sizeof(std::uint32_t));
+                    }
+                    if (job.morph) {
+                        floats_to_id_order(s.morphA, job.n, pinned.morphA, job.permuted ? pinned.uid : nullptr);
+                        floats_to_id_order(s.morphB, job.n, pinned.morphB, job.permuted ? pinned.uid : nullptr);
                     }
                     s.step = job.step;
                     s.seed = job.seed;
@@ -760,6 +841,9 @@ CudaSim::CudaSim(State initial, const CudaOptions& options) : impl_(std::make_un
     }
     const CheckResult c = check_invariants(initial);
     if (!c.ok()) throw std::invalid_argument("initial state rejected: " + c.message);
+    // Morphogens switched on in a state that has none yet: the cells get their starting values
+    // (the CPU reference does the same when it is constructed).
+    if (initial.params.morphogens != 0.0f && initial.morphA.empty()) init_morphogens(initial);
 
     m.device = options.device;
     m.useRowTable = options.rowTable;
@@ -814,6 +898,12 @@ CudaSim::CudaSim(State initial, const CudaOptions& options) : impl_(std::make_un
     CF_CUDA(cudaMemcpy(m.gen, initial.gen.data(), n * sizeof(std::uint32_t), cudaMemcpyHostToDevice));
     CF_CUDA(cudaMemcpy(m.deg, initial.deg.data(), n * sizeof(std::uint8_t), cudaMemcpyHostToDevice));
     CF_CUDA(cudaMemcpy(m.nbr, initial.nbr.data(), n * kMaxDeg * sizeof(std::uint32_t), cudaMemcpyHostToDevice));
+    if (!initial.morphA.empty()) {
+        m.ensure_morph();
+        m.morphPresent = true;
+        CF_CUDA(cudaMemcpy(m.morphA[0], initial.morphA.data(), n * sizeof(float), cudaMemcpyHostToDevice));
+        CF_CUDA(cudaMemcpy(m.morphB[0], initial.morphB.data(), n * sizeof(float), cudaMemcpyHostToDevice));
+    }
     {
         std::vector<std::uint32_t> identity(n);
         for (std::size_t v = 0; v < n; ++v) identity[v] = static_cast<std::uint32_t>(v);
@@ -887,7 +977,17 @@ CudaMemory CudaSim::memory() const {
 
 ParamIssues CudaSim::set_params(const Params& p) {
     ParamIssues issues = validate(p);
-    if (issues.ok()) impl_->params = p;
+    if (issues.ok()) {
+        Impl& m = *impl_;
+        m.params = p;
+        if (p.morphogens != 0.0f && !m.morphPresent) {
+            // Switched on: every cell gets its starting concentrations, by id, as on the CPU.
+            m.ensure_morph();
+            const MorphParams mp = make_morph_params(p);
+            k_morph_init<<<grid_blocks(m.n), kBlock, 0, m.stream>>>(m.uid, m.seed, m.step, mp.seeds, m.morphA[m.cur], m.morphB[m.cur], m.n);
+            m.morphPresent = true;
+        }
+    }
     return issues;
 }
 
@@ -936,6 +1036,9 @@ StepReport CudaSim::step() {
 
     // Food parameters for this step (the light's shadow map needs the bounds).
     const FoodParams fp = make_food_params(p, seed, step, box.lo, box.hi);
+    // Morphogens: everything in this step reads the concentrations as they were at its start.
+    const MorphParams mp = make_morph_params(p);
+    const bool morph = mp.on != 0u && m.morphPresent;
 
     k_keys<<<gb, kBlock, 0, st>>>(m.pos[cur], m.slotOf, m.key[0], m.idBlock, n, origin, inv, nx, ny, nz, m.counters);
     m.phase(m.times.keys, t0);
@@ -978,6 +1081,7 @@ StepReport CudaSim::step() {
         std::uint32_t* a = reinterpret_cast<std::uint32_t*>(m.pos[cur]);
         std::uint32_t* b = reinterpret_cast<std::uint32_t*>(m.normal[cur]);
         std::uint32_t* e1 = reinterpret_cast<std::uint32_t*>(m.food[cur]);
+        if (m.morphPresent) k_permute_pair<<<gb, kBlock, 0, st>>>(perm, n, m.morphA[cur], m.morphA[nxt], m.morphB[cur], m.morphB[nxt]);
         k_permute_rings_out<<<gb, kBlock, 0, st>>>(perm, inverse, n, m.nbr, a, b, spareSorted, spareKeys, e1);
         k_permute_rings_back<<<gb, kBlock, 0, st>>>(n, m.nbr, a, b, spareSorted, spareKeys, e1);
         k_after_permute<<<gb, kBlock, 0, st>>>(m.uid, m.slotOf, ids.Current(), n);
@@ -1018,7 +1122,7 @@ StepReport CudaSim::step() {
 
     // ---- 2, 4, 5. Normals from the rings (fallback: the previous normal), move and clamp.
     k_move<<<gb, kBlock, 0, st>>>(m.pos[cur], m.normal[cur], m.normal[nxt], m.nbr, m.deg, m.uid, m.pos[nxt], n, grid, kp, fp,
-                                  normal_eps2(p.linkRestLength), m.counters);
+                                  normal_eps2(p.linkRestLength), mp, morph ? m.morphB[cur] : nullptr, m.counters);
     m.phase(m.times.move, t0);
 
     // ---- 1 + 6. Food, then the division candidates, priorities and the independent set.
@@ -1036,7 +1140,33 @@ StepReport CudaSim::step() {
         k_shadow_clear<<<grid_blocks(texels), kBlock, 0, st>>>(m.shadow, texels);
         k_shadow_build<<<gb, kBlock, 0, st>>>(fp, m.pos[cur], m.shadow, n);
     }
+    // ---- Morphogens: this step's reaction-diffusion iterations, from the current
+    // concentrations into the new buffers. The iterations before the last alternate through a
+    // spare buffer (the row table's, free after the move), never over the current values.
+    if (morph) {
+        float* scratchA = reinterpret_cast<float*>(keys.Alternate());
+        float* scratchB = scratchA + n;
+        const float* srcA = m.morphA[cur];
+        const float* srcB = m.morphB[cur];
+        for (std::uint32_t it = 0; it < mp.iterations; ++it) {
+            const bool toNew = (mp.iterations - 1u - it) % 2u == 0u;
+            float* dstA = toNew ? m.morphA[nxt] : scratchA;
+            float* dstB = toNew ? m.morphB[nxt] : scratchB;
+            k_morph<<<gb, kBlock, 0, st>>>(mp, srcA, srcB, m.nbr, m.deg, dstA, dstB, n);
+            srcA = dstA;
+            srcB = dstB;
+        }
+    } else if (m.morphPresent) {
+        // Present but switched off: the values stand still, and follow the buffer swap.
+        CF_CUDA(cudaMemcpyAsync(m.morphA[nxt], m.morphA[cur], static_cast<std::size_t>(n) * sizeof(float), cudaMemcpyDeviceToDevice, st));
+        CF_CUDA(cudaMemcpyAsync(m.morphB[nxt], m.morphB[cur], static_cast<std::size_t>(n) * sizeof(float), cudaMemcpyDeviceToDevice, st));
+    }
+
     TopoView tv;
+    if (m.morphPresent) {
+        tv.morphA = m.morphA[nxt];
+        tv.morphB = m.morphB[nxt];
+    }
     tv.pos = m.pos[nxt];
     tv.normal = m.normal[nxt];
     tv.food = m.food[nxt];
@@ -1050,7 +1180,7 @@ StepReport CudaSim::step() {
     Orientation orient;  // oriented division (M8)
     orient.amount = p.orientAmount;
     orient.axis = unit_or_zero(Vec3{p.orientAxisX, p.orientAxisY, p.orientAxisZ});
-    k_food_candidates<<<gb, kBlock, 0, st>>>(tv, fp, m.food[cur], m.pos[cur], m.shadow, m.uid, p.foodThreshold, prio, m.pair, win, n, seed, step,
+    k_food_candidates<<<gb, kBlock, 0, st>>>(tv, fp, m.food[cur], m.pos[cur], m.shadow, morph ? m.morphB[cur] : nullptr, m.uid, p.foodThreshold, prio, m.pair, win, n, seed, step,
                                              orient, m.counters);
     k_winners<<<gb, kBlock, 0, st>>>(prio, m.nbr, m.deg, m.uid, win, n);
     {
@@ -1089,7 +1219,8 @@ StepReport CudaSim::step() {
         // The move failed: name the term (the grid is still intact). Nothing has been committed.
         const std::uint32_t bad = host.firstBadMove;
         std::uint32_t bits = 0;
-        k_diagnose<<<1, 1, 0, st>>>(m.pos[cur], m.normal[nxt], m.nbr, m.deg, m.slotOf, bad, grid, kp, fp, m.diagOut);
+        k_diagnose<<<1, 1, 0, st>>>(m.pos[cur], m.normal[nxt], m.nbr, m.deg, m.slotOf, bad, grid, kp, fp, mp, morph ? m.morphB[cur] : nullptr,
+                                    m.diagOut);
         CF_CUDA(cudaStreamSynchronize(st));
         CF_CUDA(cudaMemcpy(&bits, m.diagOut, sizeof bits, cudaMemcpyDeviceToHost));
         rep.status = StepStatus::Failed;
@@ -1172,6 +1303,11 @@ void CudaSim::snapshot_async(std::function<void(State&&)> done) {
         CF_CUDA(cudaMemcpyAsync(m.pinned.pos, m.pos[cur], c * sizeof(Vec3), cudaMemcpyDeviceToHost, cs));
         CF_CUDA(cudaMemcpyAsync(m.pinned.normal, m.normal[cur], c * sizeof(Vec3), cudaMemcpyDeviceToHost, cs));
         CF_CUDA(cudaMemcpyAsync(m.pinned.food, m.food[cur], c * sizeof(float), cudaMemcpyDeviceToHost, cs));
+        if (m.morphPresent) {
+            CF_CUDA(cudaMemcpyAsync(m.pinned.morphA, m.morphA[cur], c * sizeof(float), cudaMemcpyDeviceToHost, cs));
+            CF_CUDA(cudaMemcpyAsync(m.pinned.morphB, m.morphB[cur], c * sizeof(float), cudaMemcpyDeviceToHost, cs));
+        }
+        job.morph = m.morphPresent;
         CF_CUDA(cudaEventRecord(m.evGeom, cs));
         m.topoPending = true;
         m.geomPending = true;

@@ -82,6 +82,11 @@ FoodParams make_food_params(const Params& p, std::uint64_t seed, std::uint64_t s
         fp.keep = 1.0f - p.foodDecay;
     }
 
+    if (p.morphogens != 0.0f && p.morphFood != 0.0f) {
+        fp.flags |= kFoodMorph;
+        fp.morphFood = p.morphFood;
+    }
+
     if (p.crowdHigh > p.crowdLow) {
         fp.flags |= kFoodCrowd;
         fp.crowdLow = p.crowdLow;

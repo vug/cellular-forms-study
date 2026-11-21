@@ -13,6 +13,7 @@ enum class Stream : std::uint64_t {
     Priority = 2,  // division priority
     Pair = 3,      // tie-break between equally good cleavage pairs
     InitFood = 4,  // initial food level
+    Morph = 5,     // which cells start with the morphogen activator
 };
 
 // splitmix64 finaliser: a bijective, well-mixed 64-bit function.

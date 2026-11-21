@@ -14,6 +14,10 @@ void State::resize(std::uint32_t cells) {
     gen.resize(cells, 0u);
     deg.resize(cells, 0u);
     nbr.resize(static_cast<std::size_t>(cells) * kMaxDeg, kInvalid);
+    if (!morphA.empty()) {
+        morphA.resize(cells, 0.0f);
+        morphB.resize(cells, 0.0f);
+    }
 }
 
 namespace {
@@ -53,6 +57,10 @@ std::uint64_t checksum(const State& s) {
     for (std::uint32_t v = 0; v < s.n; ++v) {
         const std::uint32_t d = s.deg[v] <= kMaxDeg ? s.deg[v] : kMaxDeg;
         f.bytes(s.ring(v), static_cast<std::size_t>(d) * sizeof(std::uint32_t));
+    }
+    if (!s.morphA.empty()) {
+        f.bytes(s.morphA.data(), static_cast<std::size_t>(s.n) * sizeof(float));
+        f.bytes(s.morphB.data(), static_cast<std::size_t>(s.n) * sizeof(float));
     }
     return f.h;
 }

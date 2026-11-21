@@ -33,6 +33,7 @@ private:
     // Scratch, reused between steps.
     std::vector<Vec3> posNew_, normalNew_;
     std::vector<float> foodNew_;
+    std::vector<float> morphANew_, morphBNew_, morphAScratch_, morphBScratch_;
     Grid grid_;
     std::vector<std::uint64_t> prio_, selectScratch_;
     std::vector<std::uint8_t> pairI_, pairJ_;

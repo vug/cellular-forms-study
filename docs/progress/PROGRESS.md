@@ -406,3 +406,57 @@ Two things for you from the CUDA port (no action needed unless you want to):
   view (`TopoView`), and `tests/cuda` checks them against yours over 6,000 random divisions.
   Your tie-break change showed up there as a checksum mismatch within a minute, which is the
   point. If you change division again, the same test will say so; mirroring it is my job.
+
+## 2026-11-21 00:45 · Cloud session: 1M-cell scale check finds self-intersection beyond about 500k cells
+
+Commit `ed63564` adds a true self-intersection count and a golden-run test; this entry is the
+scale check done with them. **Local session: this matters for your M3 benchmark runs.**
+
+**New tools (in `cf_core`, so the CUDA runner can use them on downloaded states)**
+
+- `cf::self_intersections(state, threads)` in `core/stats.hpp`: the number of (link, triangle)
+  pairs where a link passes through a triangle it shares no cell with. Two triangles of the
+  mesh intersect exactly when a link of one pierces the other, so 0 means the sheet does not
+  pass through itself. The invariant checker cannot see this (it is geometry, not topology);
+  it is a diagnostic, not an invariant. Cost: about 10 s per million cells on 2 cores.
+- `cf_run --intersections` prints it at every snapshot (`piercings` in `snapshots.jsonl`) and
+  at the end.
+- `golden_run_checksum_is_unchanged` in `cf_tests`: 984 cells at step 1,500, checksum
+  `38d1abeb51663ef6`. If you change shared kernels and this fails, the model changed.
+
+**Second and third compiler** (cloud workspace, CMake 3.28 + Ninja, your `CMakeLists.txt` with
+CUDA and viewer off): GCC 13.3 and Clang 18.1 both build, pass all tests and the Python oracle
+comparison, and give the exit-run checksum `12cfc7e0294813a9`, the same as GCC 11.4. Clang's
+`-Wconversion` reported 12 sign-conversion warnings; fixed in `ed63564`.
+
+**The 1M run** (sandbox, 2 cores, resumed from `runs/cloud/m1_a/latest.cfs` in 5 chunks):
+`cf_run --load <latest.cfs> --until-cells 1000000 --max-seconds 140 --intersections --out runs/cloud/m1_1m`
+
+| Cells | Step | Invariants | Link mean | Link std | Fold ratio | Piercings | Cap fired |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 100,033 | 4,822 | ok | 1.033 | 0.133 | 0.38 | not counted | 0 |
+| 128,070 | 5,034 | ok | 1.032 | 0.134 | 0.35 | 0 | 0 |
+| 256,113 | 5,534 | ok | 0.999 | 0.149 | 0.27 | 0 | 0 |
+| 366,837 | 5,766 | ok | 0.964 | 0.163 | 0.25 | 0 | 0 |
+| 512,178 | 6,034 | ok | 0.929 | 0.175 | 0.23 | 40 | 1 (once, before 558k) |
+| 757,582 | 6,287 | ok | 0.878 | 0.187 | 0.21 | 70 | 7,496 in the chunk |
+| 909,711 | 6,434 | ok | 0.860 | 0.191 | 0.20 | 135 | tens of thousands per 50 steps |
+| 1,000,762 | 6,516 | ok | 0.854 | 0.191 | 0.20 | 179 | 120,245 in the last 82 steps |
+
+Final checksum `c537cfcaadbc2a59`; 1.17 s per step at 1M cells on 2 cores; degrees 4 to 9; no
+postponed divisions, no normal fallbacks.
+
+What it says, plainly:
+
+- **Topology is fine at 1M**: every invariant check passed.
+- **The default parameters are good to roughly 250k to 350k cells.** Beyond that the interior
+  fills with folds faster than the form can expand, links are squeezed (mean 1.03 -> 0.85), the
+  displacement cap starts to fire, and from about 500k cells the sheet passes through itself
+  in a few places (179 piercings among about 3 million links at 1M). That is a small fraction,
+  but it is not zero, and it grows.
+- So the tuned defaults meet the M1 exit (100k) but are **not** a setting for 1M to 100M runs.
+  Expected remedies, not yet tested: slower food as the form grows (the paper's "tens of
+  thousands of iterations" for 50M cells is about 2,000 steps per doubling, 4x slower than the
+  default), or stronger repulsion. I am testing those two next on 100k -> 500k continuations.
+
+![1M cells](img/m1_1m_seed1.png)

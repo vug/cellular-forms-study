@@ -2332,7 +2332,7 @@ agent switch to the simulation's final interface.
    differ), subnormals are flushed, and there are no doubles. An option, exact arithmetic,
    emulates on integers what has to be exact, and then a step is the CPU's step bit for bit. It
    is on by default once any mechanism is on; the base model alone runs as before.
-2. **The page** (`web/app/`, 3,100 lines, no build step, no dependencies, nothing from other
+2. **The page** (`web/app/`, 3,300 lines, no build step, no dependencies, nothing from other
    hosts): live simulation with every parameter and mechanism switch, ten start shapes, first
    food, seed, capacity to 2 million cells, speed limit, pause at a step; cells as spheres and
    the membrane; colour by material, age, generation, food, curvature or activator; the

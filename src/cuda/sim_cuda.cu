@@ -934,6 +934,7 @@ struct CudaSim::Impl {
     std::uint32_t recentDivisions = 0;  // most divisions in one step of the last batch; sizes the room of the next
     bool fullRoom = true;               // reserve at least what one step can add (first batch, and after one ran out of room)
     bool singleNext = false;            // the next batch is one step: it reports why a queued step was not applied
+    LightMapInfo lastLight;             // the food light of the last applied step (its shadow map is still in `shadow`)
     CudaBatchStats stats;
     std::uint32_t* diagOut = nullptr;
     void* cubTemp = nullptr;
@@ -1874,6 +1875,7 @@ BatchEnd CudaSim::Impl::run_batch(std::uint32_t steps, std::uint32_t stopCells, 
 
     // The steps the device applied stand: the simulation moves on to the state after them.
     if (done > 0u) {
+        m.lastLight = light_map_info(fp);  // of the last step queued, which with the light on is the only one
         m.n = end.n;
         m.step = step0 + done;
         m.cur = (done & 1u) != 0u ? 1 - curStart : curStart;
@@ -2069,6 +2071,12 @@ RenderCounts CudaSim::copy_render_data(const RenderTargets& t, std::uint32_t max
         m.ensure_temp(bytes);
         CF_CUDA(cub::DeviceScan::ExclusiveSum(m.cubTemp, bytes, counts, offsets, n, st));
         k_tri_write<<<gb, kBlock, 0, st>>>(m.nbr, m.deg, offsets, static_cast<std::uint32_t*>(t.index), n, t.maxIndices / 3u);
+    }
+    if (t.lightMap != nullptr && m.lastLight.valid && m.shadow != nullptr &&
+        static_cast<std::uint64_t>(m.lastLight.nu) * m.lastLight.nv <= t.maxLightTexels) {
+        CF_CUDA(cudaMemcpyAsync(t.lightMap, m.shadow, static_cast<std::size_t>(m.lastLight.nu) * m.lastLight.nv * sizeof(std::int32_t),
+                                cudaMemcpyDeviceToDevice, st));
+        out.light = m.lastLight;
     }
     CF_CUDA(cudaStreamSynchronize(st));
     out.cells = n;

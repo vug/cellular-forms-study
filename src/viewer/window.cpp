@@ -626,6 +626,11 @@ void Window::buildUi() {
     }
 
     if (ImGui::CollapsingHeader("Light")) {
+        if (live_) {
+            ImGui::Checkbox("the simulation's light, with its shadow map", &settings_.simLight);
+            if (settings_.simLight && !sc.buffers.light.valid)
+                ImGui::TextDisabled(liveStatus_.params.lightAmount > 0.0f ? "waiting for a step with the light" : "the light food source is off (Food sources: light amount)");
+        }
         ImGui::Checkbox("light follows the camera", &settings_.lightFollowsCamera);
         if (settings_.lightFollowsCamera) {
             ImGui::SliderFloat3("direction", settings_.lightDir, -1.0f, 1.0f);
@@ -840,7 +845,8 @@ void Window::drawFrame() {
         }
         // What the simulation has to publish besides positions, age and food.
         live_->setRenderNeeds(extraKindFor(settings_.colorMode), settings_.drawMode == kDrawMembrane || settings_.drawMode == kDrawMembraneSss ||
-                                                                      settings_.drawMode == kDrawMembranePathTraced);
+                                                                      settings_.drawMode == kDrawMembranePathTraced,
+                              settings_.simLight);
         // Switch to the newest frame the simulation has published; never waits for a step.
         liveFrame_ = live_->acquire();
         liveStatus_ = live_->status();

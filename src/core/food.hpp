@@ -62,6 +62,30 @@ struct FoodParams {
 // (needed for the shadow map). Defined in food.cpp, so both backends get identical values.
 FoodParams make_food_params(const Params& p, std::uint64_t seed, std::uint64_t step, Vec3 lo, Vec3 hi);
 
+// The light of the food source as a step used it, for whoever wants to show it (the viewer draws
+// its shadows from the very map the simulation fed the cells with): the direction, and the frame
+// of the shadow map (per texel, ordered_bits of the depth of the cell nearest the light).
+struct LightMapInfo {
+    bool valid = false;
+    Vec3 dir{}, u{}, v{};
+    float u0 = 0.0f, v0 = 0.0f, invPixel = 0.0f, bias = 0.0f;
+    std::uint32_t nu = 0, nv = 0;
+};
+inline LightMapInfo light_map_info(const FoodParams& fp) {
+    LightMapInfo m;
+    m.valid = (fp.flags & kFoodLight) != 0u;
+    m.dir = fp.lightDir;
+    m.u = fp.lightU;
+    m.v = fp.lightV;
+    m.u0 = fp.lightU0;
+    m.v0 = fp.lightV0;
+    m.invPixel = fp.lightInvPixel;
+    m.bias = fp.lightBias;
+    m.nu = fp.lightNu;
+    m.nv = fp.lightNv;
+    return m;
+}
+
 // The spatial field at P: (contrast-shaped) value noise in [0, 1].
 CF_FN float field_value(const FoodParams& fp, Vec3 P) {
     Vec3 q = P * fp.fieldInvScale;

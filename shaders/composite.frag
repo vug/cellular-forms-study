@@ -11,6 +11,9 @@ layout(set = 0, binding = 3) uniform sampler2D texAlbedo;
 layout(set = 0, binding = 4) uniform sampler2D texShadow;  // depth from the key light
 layout(set = 0, binding = 5) uniform usampler2D texId;     // cell index + 1 per pixel
 layout(set = 0, binding = 6) uniform sampler2D texAccum;   // the path tracer's running mean
+// The shadow map of the simulation's own light (the food source): per texel, the depth of the
+// cell nearest the light, as bits that order like the float.
+layout(set = 0, binding = 8, std430) readonly buffer SimLightMap { int simLightDepth[]; };
 
 layout(location = 0) in vec2 vUV;
 layout(location = 0) out vec4 outColor;
@@ -65,6 +68,21 @@ float keyLightVisibility(vec3 p, vec3 n) {
     return mix(1.0, lit / float(kTaps), F.lightColor.a);
 }
 
+// The same test the food source makes for a cell, for the point under this pixel: is it the
+// nearest thing to the light in its texel of the simulation's shadow map? Coarse (the map has
+// about one texel per cell) but it is exactly what decided which cells were fed.
+float simLightVisibility(vec3 p) {
+    vec3 world = (F.invView * vec4(p, 1.0)).xyz;
+    float fu = floor((dot(world, F.simLightU.xyz) - F.simLightU.w) * F.simLightMap.x);
+    float fv = floor((dot(world, F.simLightV.xyz) - F.simLightV.w) * F.simLightMap.x);
+    uint nu = uint(F.simLightMap.y), nv = uint(F.simLightMap.z);
+    uint iu = min(fu > 0.0 ? uint(fu) : 0u, nu - 1u), iv = min(fv > 0.0 ? uint(fv) : 0u, nv - 1u);
+    int bits = simLightDepth[iu + nu * iv];
+    float nearest = intBitsToFloat(bits ^ ((bits >> 31) & 0x7FFFFFFF));
+    float lit = dot(world, F.simLightDir.xyz) >= nearest - F.simLightMap.w ? 1.0 : 0.0;
+    return mix(1.0, lit, F.lightColor.a);
+}
+
 // Cell walls: where the neighbouring pixels belong to another cell.
 float wallAt(uint id) {
     if (F.wall.a <= 0.0 || id == 0u) return 0.0;
@@ -116,7 +134,7 @@ void main() {
         int debugView = int(F.misc.y + 0.5);
 
         vec3 l = normalize(F.light.xyz);
-        float visible = keyLightVisibility(viewPos(vUV, nd.w), n);
+        float visible = F.simLightDir.w > 0.5 ? simLightVisibility(viewPos(vUV, nd.w)) : keyLightVisibility(viewPos(vUV, nd.w), n);
         float ndl = max(dot(n, l), 0.0) * visible;
         float bands = F.style.w;
         if (bands >= 1.0) ndl = floor(ndl * bands + 0.5) / bands;  // toon shading: the light in steps

@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "core/food.hpp"
 #include "math.hpp"
 #include "vk_context.hpp"
 
@@ -39,6 +40,10 @@ struct FrameUniforms {
     float outline[4];
     float style[4];
     float env[4];
+    float simLightDir[4];
+    float simLightU[4];
+    float simLightV[4];
+    float simLightMap[4];
     float misc[4];
     float misc2[4];
 };
@@ -93,6 +98,9 @@ struct RenderSettings {
     float sunElevation = 50.0f;                 // degrees above the horizon
     float lightIntensity = 1.0f;
     float lightColor[3] = {1.0f, 1.0f, 1.0f};
+    // Take the direction of the key light, and its shadows, from the food light of the simulation
+    // and the shadow map that light fed the cells with (live runs with the light source on).
+    bool simLight = false;
 
     // --- light from the surroundings
     float ambient = 0.55f;                       // share of the light that comes from the sky and the ground
@@ -191,6 +199,9 @@ struct PointBuffers {
     int extraKind = 0;
     // Changes whenever the contents change (the ray-traced modes then rebuild what they trace against).
     uint64_t version = 0;
+    // The food light of the simulation and its shadow map (int32 per texel), when there is one.
+    VkBuffer lightMap = VK_NULL_HANDLE;
+    cf::LightMapInfo light;
 };
 
 class Renderer {
@@ -238,6 +249,7 @@ private:
     void ensureShadowMap(uint32_t size);
     void setEnvironment(const float* rgb, int width, int height);
     void writeEnvDescriptor();
+    void bindLightMap(VkBuffer buffer);
     void syncEnvironment(const RenderSettings& settings);
     void updateCellTree(VkCommandBuffer cmd, const PointBuffers& points, float radius, bool mesh);
     void destroyCellTree();
@@ -261,6 +273,8 @@ private:
     uint32_t accumSamples_ = 0;
     uint64_t accumKey_ = 0;         // what the accumulated samples were gathered for
     Buffer uniformBuffer_, shadowUniformBuffer_;
+    Buffer noLightMap_;                            // bound when the simulation has no light map to show
+    VkBuffer boundLightMap_ = VK_NULL_HANDLE;
     VkSampler sampler_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout setLayout_ = VK_NULL_HANDLE, rtSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;

@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "core/food.hpp"
 #include "core/sim.hpp"
 
 namespace cf {
@@ -93,10 +94,13 @@ struct RenderTargets {
     void* normal = nullptr;  // float3 per cell
     void* index = nullptr;   // uint32, three per triangle of the membrane
     std::uint32_t maxIndices = 0;
+    void* lightMap = nullptr;  // int32 per texel: the shadow map of the food light, as the last step used it
+    std::uint32_t maxLightTexels = 0;
 };
 struct RenderCounts {
     std::uint32_t cells = 0;
     std::uint32_t indices = 0;  // 0 when no triangles were asked for
+    LightMapInfo light;         // valid when the shadow map of the food light was copied
 };
 
 class CudaSim final : public Simulation {

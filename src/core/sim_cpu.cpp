@@ -116,6 +116,7 @@ StepReport CpuSim::step() {
     const bool morph = mp.on != 0u && !s_.morphA.empty();
     {
         const State& s = s_;
+        light_ = light_map_info(fp);
         if (fp.flags & kFoodLight) {
             // Shadow map: per texel, the depth of the cell nearest to the light.
             shadow_.assign(static_cast<std::size_t>(fp.lightNu) * fp.lightNv, INT32_MIN);

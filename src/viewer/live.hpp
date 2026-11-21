@@ -83,7 +83,7 @@ public:
     // --- render thread. What the simulation publishes besides positions, birth steps and food:
     // one more per-cell scalar (0 none, 1 generation, 2 curvature, 3 morphogen activator) and
     // the membrane (normals and triangles). A change is published at once, also while paused.
-    void setRenderNeeds(int extraKind, bool mesh);
+    void setRenderNeeds(int extraKind, bool mesh, bool lightMap = false);
 
     // --- render thread. Call with no frame in flight: switches to the newest published frame,
     // if there is one, and returns what to draw.
@@ -100,6 +100,11 @@ private:
         // The membrane, allocated the first time it is asked for (36 more bytes per cell and slot).
         Buffer normal, index;
         std::unique_ptr<cf::CudaExternalBuffer> cudaNormal, cudaIndex;
+        // The shadow map of the food light, allocated the first time it is asked for.
+        Buffer lightMap;
+        std::unique_ptr<cf::CudaExternalBuffer> cudaLightMap;
+        cf::LightMapInfo light;                  // valid when this frame carries the map
+        std::vector<std::int32_t> hostLightMap;  // CPU backend
         // CPU backend: host copy, uploaded by the render thread when the slot becomes the front.
         std::vector<cf::Vec3> hostPos;
         std::vector<std::uint32_t> hostBirth;
@@ -120,6 +125,7 @@ private:
     void threadMain();
     void shareBuffer(VkDeviceSize bytes, VkBufferUsageFlags usage, Buffer& buffer, std::unique_ptr<cf::CudaExternalBuffer>& mapped);
     void ensureMeshBuffers();
+    void ensureLightMapBuffers();
     void releaseSlots();
     void buildSimulation(std::uint64_t seed, int level, const cf::Params& params);
     void publish();
@@ -138,6 +144,11 @@ private:
     std::atomic<int> wantExtra_{0};
     std::atomic<bool> wantMesh_{false};
     std::atomic<bool> meshReady_{false};  // the shared membrane buffers exist
+    std::atomic<bool> wantLightMap_{false};
+    std::atomic<bool> lightMapReady_{false};
+    bool lightMapFailed_ = false;
+    Buffer frontLightMap_;                // CPU backend: device copy of the front slot's light map
+    VkDeviceSize frontLightMapBytes_ = 0;
     bool meshFailed_ = false;             // they could not be allocated: do not try again
     std::uint32_t indexCapacity_ = 0;
     std::mutex slotsMutex_;               // the membrane buffers appear while the simulation publishes

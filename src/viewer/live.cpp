@@ -107,7 +107,32 @@ void LiveSim::releaseSlots() {
         slot.cudaExtra.reset();
         slot.cudaNormal.reset();
         slot.cudaIndex.reset();
-        for (Buffer* b : {&slot.pos, &slot.birth, &slot.food, &slot.extra, &slot.normal, &slot.index}) ctx_.destroy(*b);
+        slot.cudaLightMap.reset();
+        for (Buffer* b : {&slot.pos, &slot.birth, &slot.food, &slot.extra, &slot.normal, &slot.index, &slot.lightMap}) ctx_.destroy(*b);
+    }
+    ctx_.destroy(frontLightMap_);
+}
+
+// Texels of the food light's shadow map the viewer can take (2048 x 2048; a larger map is not shown).
+constexpr std::uint32_t kSharedLightTexels = 1u << 22;
+
+// The shared buffers for the shadow map of the food light, the first time it is asked for.
+void LiveSim::ensureLightMapBuffers() {
+    std::lock_guard<std::mutex> lock(slotsMutex_);
+    if (lightMapReady_ || lightMapFailed_) return;
+    try {
+        for (Slot& slot : slots_)
+            shareBuffer(static_cast<VkDeviceSize>(kSharedLightTexels) * sizeof(std::int32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, slot.lightMap,
+                        slot.cudaLightMap);
+        lightMapReady_ = true;
+    } catch (const std::exception& e) {
+        for (Slot& slot : slots_) {
+            slot.cudaLightMap.reset();
+            ctx_.destroy(slot.lightMap);
+        }
+        lightMapFailed_ = true;
+        std::lock_guard<std::mutex> statusLock(mutex_);
+        status_.message = std::string("the light map of the simulation cannot be shown: ") + e.what();
     }
 }
 
@@ -158,10 +183,12 @@ void LiveSim::ensureMeshBuffers() {
     }
 }
 
-void LiveSim::setRenderNeeds(int extraKind, bool mesh) {
+void LiveSim::setRenderNeeds(int extraKind, bool mesh, bool lightMap) {
     bool changed = wantExtra_.exchange(extraKind) != extraKind;
     if (mesh && config_.backend == LiveBackend::Cuda && !meshReady_) ensureMeshBuffers();
+    if (lightMap && config_.backend == LiveBackend::Cuda && !lightMapReady_) ensureLightMapBuffers();
     changed = (wantMesh_.exchange(mesh) != mesh) || changed;
+    changed = (wantLightMap_.exchange(lightMap) != lightMap) || changed;
     if (changed) {
         // Show it at once, also while the simulation is paused.
         std::lock_guard<std::mutex> lock(mutex_);
@@ -262,6 +289,8 @@ void LiveSim::publish() {
     slot.extraKind = 0;
     slot.hasMesh = false;
     slot.indexCount = 0;
+    slot.light = cf::LightMapInfo{};
+    const bool lightMap = wantLightMap_.load();
     if (config_.backend == LiveBackend::Cuda) {
 #ifdef CF_HAVE_CUDA
         auto* cuda = static_cast<cf::CudaSim*>(sim_.get());
@@ -281,7 +310,12 @@ void LiveSim::publish() {
             t.index = slot.cudaIndex->device_ptr();
             t.maxIndices = indexCapacity_;
         }
+        if (lightMap && lightMapReady_) {
+            t.lightMap = slot.cudaLightMap->device_ptr();
+            t.maxLightTexels = kSharedLightTexels;
+        }
         const cf::RenderCounts counts = cuda->copy_render_data(t, capacity_);
+        slot.light = counts.light;
         slot.count = counts.cells;
         slot.extraKind = kind;
         slot.indexCount = counts.indices;
@@ -289,7 +323,17 @@ void LiveSim::publish() {
         cuda->bounds(slot.lo, slot.hi);
 #endif
     } else {
-        const cf::State& s = static_cast<cf::CpuSim*>(sim_.get())->state();
+        const auto* cpu = static_cast<cf::CpuSim*>(sim_.get());
+        const cf::State& s = cpu->state();
+        slot.hostLightMap.clear();
+        if (lightMap && cpu->light_info().valid) {
+            const cf::LightMapInfo& l = cpu->light_info();
+            const std::size_t texels = static_cast<std::size_t>(l.nu) * l.nv;
+            if (texels <= kSharedLightTexels && cpu->light_map().size() >= texels) {
+                slot.hostLightMap.assign(cpu->light_map().begin(), cpu->light_map().begin() + static_cast<std::ptrdiff_t>(texels));
+                slot.light = l;
+            }
+        }
         slot.count = s.n;
         slot.hostPos.assign(s.pos.begin(), s.pos.begin() + s.n);
         slot.hostBirth.assign(s.birth.begin(), s.birth.begin() + s.n);
@@ -366,6 +410,16 @@ LiveFrame LiveSim::acquire() {
             c.normal.swap(slot.hostNormal);
             c.indices.swap(slot.hostIndex);
             if (extra != nullptr) extra->swap(slot.hostExtra);
+            if (slot.light.valid && !slot.hostLightMap.empty()) {
+                const VkDeviceSize bytes = slot.hostLightMap.size() * sizeof(std::int32_t);
+                if (bytes > frontLightMapBytes_) {
+                    ctx_.destroy(frontLightMap_);
+                    frontLightMap_ = ctx_.createBuffer(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+                    frontLightMapBytes_ = bytes;
+                }
+                ctx_.upload(frontLightMap_, slot.hostLightMap.data(), bytes);
+            }
         }
     }
     LiveFrame f;
@@ -386,9 +440,12 @@ LiveFrame LiveSim::acquire() {
             f.buffers.indexCount = slot.indexCount;
         }
         f.buffers.version = slot.version;
+        if (slot.light.valid) f.buffers.lightMap = slot.lightMap.buffer;
     } else {
         f.buffers = frontGpu_->buffers();
+        if (slot.light.valid && !slot.hostLightMap.empty()) f.buffers.lightMap = frontLightMap_.buffer;
     }
+    if (f.buffers.lightMap) f.buffers.light = slot.light;
     return f;
 }
 

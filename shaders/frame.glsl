@@ -24,6 +24,10 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 outline;        // outline colour (rgb), strength (a; 0 = off)
     vec4 style;          // wall width (pixels), outline width (pixels), outline threshold (relative depth step), toon bands (0 = off)
     vec4 env;            // environment map: light the form with it (0 or 1), intensity, rotation (radians), show it as the background (0 or 1)
+    vec4 simLightDir;    // the simulation's food light: direction towards it (world, xyz), in use (w)
+    vec4 simLightU;      // first axis of its shadow map (xyz), lower corner along it (w)
+    vec4 simLightV;      // second axis (xyz), lower corner along it (w)
+    vec4 simLightMap;    // texels per world unit, texels along U, texels along V, depth tolerance (world units)
     vec4 misc;           // frame index, debug view, draw mode (0 cells, 1 x-ray, 2 membrane, 3 membrane with scattering, 4 path traced), x-ray density scale or scatter radius
     vec4 misc2;          // tone map (0 none, 1 Reinhard, 2 filmic), background gradient, unused, blurriest level of the environment map
 } F;

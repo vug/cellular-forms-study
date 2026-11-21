@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "food.hpp"
 #include "grid.hpp"
 #include "sim.hpp"
 #include "topology.hpp"
@@ -24,6 +25,9 @@ public:
     ParamIssues set_params(const Params& p) override;
 
     const State& state() const { return s_; }
+    // The light of the food source as the last step used it, and its shadow map (see LightMapInfo).
+    const LightMapInfo& light_info() const { return light_; }
+    const std::vector<std::int32_t>& light_map() const { return shadow_; }
     unsigned threads() const { return threads_; }
 
 private:
@@ -39,6 +43,7 @@ private:
     std::vector<std::uint8_t> pairI_, pairJ_;
     std::vector<std::uint32_t> winners_;
     std::vector<std::int32_t> shadow_;  // the light's shadow map (core/food.hpp), when the light is on
+    LightMapInfo light_;
 };
 
 // Sets every cell's food to a hashed uniform value in [0, foodThreshold), so divisions are

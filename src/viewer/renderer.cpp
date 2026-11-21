@@ -366,6 +366,8 @@ Renderer::Renderer(Context& ctx, VkFormat targetFormat) : ctx_(ctx), targetForma
     const VkMemoryPropertyFlags hostVisible = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     uniformBuffer_ = ctx_.createBuffer(sizeof(FrameUniforms), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, hostVisible, true);
     shadowUniformBuffer_ = ctx_.createBuffer(sizeof(FrameUniforms), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, hostVisible, true);
+    noLightMap_ = ctx_.createBuffer(16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hostVisible, true);
+    std::memset(noLightMap_.mapped, 0, 16);
 
     VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     si.magFilter = VK_FILTER_NEAREST;
@@ -386,15 +388,16 @@ Renderer::Renderer(Context& ctx, VkFormat targetFormat) : ctx_(ctx), targetForma
 
     // Set 0: the frame uniforms, up to six images a pass samples (see composite.frag), and the
     // environment map.
-    VkDescriptorSetLayoutBinding bindings[8]{};
+    VkDescriptorSetLayoutBinding bindings[9]{};
     bindings[0] = {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
     for (uint32_t i = 1; i < 8; ++i) bindings[i] = {i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    bindings[8] = {8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};  // the simulation's light map
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 8;
+    li.bindingCount = 9;
     li.pBindings = bindings;
     vk_check(vkCreateDescriptorSetLayout(ctx_.device, &li, nullptr, &setLayout_), "vkCreateDescriptorSetLayout");
 
-    std::vector<VkDescriptorPoolSize> sizes = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 10}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 64}};
+    std::vector<VkDescriptorPoolSize> sizes = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 10}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 64}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8}};
     if (ctx_.hasRayTracing) {
         // Set 1 of the ray-traced passes: the acceleration structure and the per-cell buffers.
         // 0 the structure, 1 positions, 2 birth steps, 3 food, 4 the extra scalar, 5 the boxes
@@ -497,6 +500,7 @@ Renderer::~Renderer() {
     if (sampler_) vkDestroySampler(ctx_.device, sampler_, nullptr);
     ctx_.destroy(uniformBuffer_);
     ctx_.destroy(shadowUniformBuffer_);
+    ctx_.destroy(noLightMap_);
 }
 
 void Renderer::createPipelines() {
@@ -678,6 +682,22 @@ void Renderer::writeDescriptors() {
     }
     vkUpdateDescriptorSets(ctx_.device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
     writeEnvDescriptor();
+    boundLightMap_ = VK_NULL_HANDLE;
+    bindLightMap(noLightMap_.buffer);
+}
+
+// The buffer the composite pass reads the simulation's light map from.
+void Renderer::bindLightMap(VkBuffer buffer) {
+    if (buffer == boundLightMap_) return;
+    const VkDescriptorBufferInfo info{buffer, 0, VK_WHOLE_SIZE};
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = setComposite_;
+    w.dstBinding = 8;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w.pBufferInfo = &info;
+    vkUpdateDescriptorSets(ctx_.device, 1, &w, 0, nullptr);
+    boundLightMap_ = buffer;
 }
 
 void Renderer::writeEnvDescriptor() {
@@ -1136,6 +1156,34 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
     const bool traceMesh = drawMode == kDrawMembranePathTraced || (membrane && tracedOcclusion);
     u.pt[3] = traceMesh ? std::clamp(settings.ptTranslucency, 0.0f, 1.0f) : 0.0f;
 
+    // The key light of the simulation: its direction in every mode, and in the raster modes its
+    // own shadow map in place of the one drawn here.
+    const bool simLight = settings.simLight && points.light.valid && points.lightMap != VK_NULL_HANDLE;
+    if (simLight) {
+        Mat4 view;
+        std::memcpy(view.m, u.view, sizeof view.m);
+        const cf::LightMapInfo& l = points.light;
+        const Vec3 inView = normalize(rotate(view, l.dir));
+        u.light[0] = inView.x;
+        u.light[1] = inView.y;
+        u.light[2] = inView.z;
+        u.sunWorld[0] = l.dir.x;
+        u.sunWorld[1] = l.dir.y;
+        u.sunWorld[2] = l.dir.z;
+        if (!pathTraced) {
+            const float dir[3] = {l.dir.x, l.dir.y, l.dir.z}, axisU[3] = {l.u.x, l.u.y, l.u.z}, axisV[3] = {l.v.x, l.v.y, l.v.z};
+            set3(u.simLightDir, dir, 1.0f);
+            set3(u.simLightU, axisU, l.u0);
+            set3(u.simLightV, axisV, l.v0);
+            u.simLightMap[0] = l.invPixel;
+            u.simLightMap[1] = static_cast<float>(l.nu);
+            u.simLightMap[2] = static_cast<float>(l.nv);
+            u.simLightMap[3] = l.bias;
+            u.lightColor[3] = std::clamp(settings.shadowStrength, 0.0f, 1.0f);
+        }
+    }
+    bindLightMap(simLight && !pathTraced ? points.lightMap : noLightMap_.buffer);
+
     if (pathTraced || tracedOcclusion) updateCellTree(cmd, points, settings.sphereRadius, traceMesh);
 
     // The path tracer refines a running mean for as long as nothing that shows in the image changes.
@@ -1168,7 +1216,7 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
     const VkPipelineStageFlags2 depthStages = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
 
     // --- shadow map: the cells seen from the key light
-    const bool shadows = u.lightColor[3] > 0.0f && havePoints && drawMode != kDrawXray && !pathTraced;
+    const bool shadows = u.lightColor[3] > 0.0f && havePoints && drawMode != kDrawXray && !pathTraced && !simLight;
     if (shadows) {
         ensureShadowMap(static_cast<uint32_t>(std::clamp(settings.shadowMapSize, 256, 8192)));
         FrameUniforms lightFrame = u;
@@ -1434,6 +1482,7 @@ const std::vector<Entry>& entries() {
         flag("paletteReverse", &RenderSettings::paletteReverse),
         triple("baseColor", &RenderSettings::baseColor),
         flag("lightFollowsCamera", &RenderSettings::lightFollowsCamera),
+        flag("simLight", &RenderSettings::simLight),
         triple("lightDir", &RenderSettings::lightDir),
         number("sunAzimuth", &RenderSettings::sunAzimuth),
         number("sunElevation", &RenderSettings::sunElevation),

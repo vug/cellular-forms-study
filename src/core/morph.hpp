@@ -17,6 +17,7 @@
 #include "config.hpp"
 #include "hash.hpp"
 #include "kernels.hpp"
+#include "noise.hpp"
 #include "params.hpp"
 
 namespace cf {
@@ -26,18 +27,29 @@ struct MorphParams {
     std::uint32_t iterations;  // reaction-diffusion iterations per simulation step
     float diffA, diffB;        // fraction of the way to the neighbours' mean, per iteration
     float feed, kill;
-    float seeds;               // fraction of cells that start with the activator
+    float seedLevel;           // cells where the seeding field is above this start with the activator
+    float seedInvScale;        // 1 / size of the seeded patches (world units)
     float food, bulge, planar, rest;  // couplings (see morph_factor)
 };
 
 // Host side; defined in morph.cpp so both backends get identical values.
 MorphParams make_morph_params(const Params& p);
 
-// Starting concentrations of the cell with this id, when morphogens are switched on at `step`.
-CF_FN void morph_initial(std::uint64_t seed, std::uint64_t step, std::uint32_t id, float seeds, float& a, float& b) {
-    const bool seeded = hash_u01(seed, step, id, Stream::Morph) < seeds;
-    a = seeded ? 0.5f : 1.0f;
-    b = seeded ? 0.5f : 0.0f;
+// Starting concentrations of the cell with this id at position P, when morphogens are switched
+// on at `step`. The activator starts in patches, not in single cells: the reaction only sustains
+// itself where a few cells across have it (a lone seeded cell is drained by its neighbours).
+// The patches are where a smooth random field in space is above seedLevel; inside them each
+// cell gets a slightly different amount, so the pattern is not symmetric.
+CF_FN void morph_initial(const MorphParams& mp, std::uint64_t seed, std::uint64_t step, std::uint32_t id, Vec3 P, float& a, float& b) {
+    const float field = value_noise3(P * mp.seedInvScale, mix64(seed ^ (0x4D4F5250ull + step)));
+    if (field > mp.seedLevel) {
+        const float jitter = hash_u01(seed, step, id, Stream::Morph);
+        a = 0.5f;
+        b = 0.25f + 0.1f * jitter;
+    } else {
+        a = 1.0f;
+        b = 0.0f;
+    }
 }
 
 // One reaction-diffusion iteration for the cell in slot v (Jacobi: reads the old arrays).

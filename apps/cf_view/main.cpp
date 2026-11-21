@@ -8,6 +8,7 @@
 #include "app.hpp"
 #include "core/params.hpp"
 #include "cloud.hpp"
+#include "state_file.hpp"
 
 namespace {
 
@@ -112,6 +113,11 @@ int main(int argc, char** argv) {
                 else if (v == "food") o.settings.colorMode = cfv::ColorMode::Food;
                 else if (v == "birth") o.settings.colorMode = cfv::ColorMode::Birth;
                 else if (v == "uniform") o.settings.colorMode = cfv::ColorMode::Uniform;
+                else if (v == "morph") {
+                    // The morphogen activator, shown through the food colouring (checkpoint files only).
+                    o.settings.colorMode = cfv::ColorMode::Food;
+                    cfv::showMorphogenAsFood(true);
+                }
                 else throw std::runtime_error("unknown colour mode " + v);
             } else if (a == "--yaw") {
                 o.yawDeg = static_cast<float>(std::atof(next()));

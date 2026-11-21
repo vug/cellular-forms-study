@@ -492,6 +492,21 @@ void Window::buildSimulationUi() {
         }
         changed |= ImGui::SliderFloat("field bulge", &uiParams_.fieldBulge, -1.0f, 1.0f);
         ImGui::TextDisabled("field bulge uses the field scale / octaves / contrast above");
+        // Morphogens: two chemicals reacting on the sheet; the activator sets local parameters.
+        bool morph = uiParams_.morphogens != 0.0f;
+        if (ImGui::Checkbox("morphogens", &morph)) {
+            uiParams_.morphogens = morph ? 1.0f : 0.0f;
+            changed = true;
+        }
+        if (morph) {
+            changed |= ImGui::SliderFloat("feed", &uiParams_.morphFeed, 0.0f, 0.1f, "%.4f");
+            changed |= ImGui::SliderFloat("kill", &uiParams_.morphKill, 0.03f, 0.08f, "%.4f");
+            changed |= ImGui::SliderFloat("iterations per step", &uiParams_.morphIterations, 1.0f, 16.0f, "%.0f");
+            changed |= ImGui::SliderFloat("activator -> food", &uiParams_.morphFood, -1.0f, 1.0f);
+            changed |= ImGui::SliderFloat("activator -> bulge", &uiParams_.morphBulge, -1.0f, 1.0f);
+            changed |= ImGui::SliderFloat("activator -> planar", &uiParams_.morphPlanar, -1.0f, 1.0f);
+            changed |= ImGui::SliderFloat("activator -> rest length", &uiParams_.morphRest, -0.5f, 0.5f);
+        }
         ImGui::TreePop();
     }
     if (changed) {

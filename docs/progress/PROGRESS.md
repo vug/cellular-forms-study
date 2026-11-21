@@ -19,10 +19,10 @@ Newest entries at the bottom. Times are local (America/New_York).
 | M4 Live viewer | exit criteria observed (local session, 00:40) | scripted run: parameters changed mid-run, pause, single steps, reset; no frame over 15 ms, 0 validation errors, CUDA and CPU backends. Not tried by hand |
 | M9 Ports | both ports done and verified (local session, 01:20) | Vulkan compute: step-by-step agreement with the CPU over 106 steps, reruns identical. WebGPU: one-step agreement with CPU checkpoints from 162 to 4.4M cells, reruns identical. At 10M cells: CUDA 41, Vulkan 65, WebGPU 75 ms per step |
 | M5 Food sources | exit criterion observed (local session, 01:30) | uniform versus light contrast at 600k cells; CUDA equals CPU with every source on; reaction-diffusion and inherited coordinates not built |
-| M7 Rendering modes | done except viewer subsurface scattering (local session, 01:38) | PLY export tested; imported and rendered in Blender 5.2; viewer x-ray and membrane modes render with validation clean |
+| M7 Rendering modes | done (local session, 01:38 and 03:50) | PLY export tested; imported and rendered in Blender 5.2; viewer x-ray, membrane and membrane-with-scattering modes render with validation clean. The scattering is a screen-space approximation |
 | M6 Exploration tools | built and run once (local session, 01:55) | descriptors tested against known shapes; a 320-run MAP-Elites search filled 27 of 48 bins; one form promoted to 1M cells. Picker is a static HTML page |
 | Speed investigation | CUDA backend 2 to 4 times faster, results unchanged (local session, 03:30) | 100M cells in 177 s (545 s before); every checksum identical, including all 21 snapshots of the 100M run; renumbering tested on every step against the CPU. More room listed in the entry |
-| M8 Model extensions | two of the listed extensions (local session, 01:58) | oriented division and field-dependent bulge: CUDA equals CPU bit for bit, default model unchanged. Per-cell inherited parameters, differentiation, morphogens not built |
+| M8 Model extensions | the first round of design.md: oriented division, per-cell parameters, morphogens (local session, 01:58 and 03:50) | CUDA equals CPU bit for bit for each, also with renumbering on every step; default model unchanged. Lineage, differentiation and the later rows of the table not built |
 
 ## Decisions made unattended
 
@@ -1257,3 +1257,106 @@ checks pause and single steps, so the check failed for a reason that has nothing
 the controls. The test now starts with slow growth (`foodMax = 0.00005`) unless a food rate
 is given; its reset stage switches to fast growth as before, and the run still ends at the
 limit.
+
+## 2026-11-21 03:50 · Local session: the two open items of the milestone list (M7 scattering, M8 morphogens)
+
+After the speed work two things in design.md's milestone list were still unbuilt: "mesh with
+SSS in the viewer" (M7) and "per-cell parameters and morphogens" (M8). Both are in now.
+
+### M7: membrane with subsurface scattering in the viewer
+
+**Built.** `cf_view --mode sss` (and "membrane, subsurface scattering" in the "draw as" menu,
+with a scatter-radius slider). It is done in screen space, in the composite shader: the
+diffuse light of a point is gathered from its surroundings over a disc of the scatter radius,
+with a Gaussian falloff per colour channel (red travels furthest, so creases fill in warm);
+depth differences count as distance, so light does not leak between layers that only look
+adjacent on screen. Light that falls on the far side of the sheet comes through, less where
+the sheet is folded onto itself. One pass, no extra render target.
+
+**Verified.** Rendered headless and in the window on the 100k-cell default form, validation
+layer on, 0 errors. Images below: the same view without and with scattering.
+
+**Not verified / limits.** It is an approximation, not a transport simulation: there is no
+real thickness (the occlusion buffer stands in for it), and the look was not compared with the
+Blender render of the same form. Checkpoint files only, like the plain membrane mode.
+
+![membrane](img/m7_viewer_sss_off_100k.png)
+
+![membrane with scattering](img/m7_viewer_sss_on_100k.png)
+
+### M8: morphogens that set per-cell parameters
+
+**Built** (`src/core/morph.hpp`, both the CPU reference and the CUDA backend):
+
+- Two chemicals live on the cells, diffuse along the links and react (Gray-Scott: an
+  activator that grows by consuming a substrate). By themselves they make a pattern of stripes
+  on the sheet. `morphIterations` reaction-diffusion iterations run per simulation step
+  (default 4).
+- The activator sets local parameters. Four couplings, each a scale between "half-to-zero"
+  and "double" on one quantity of the cell: its food increment (`morphFood`: the nutrient of
+  the reaction-diffusion row in design.md's food table), its bulge factor (`morphBulge`), its
+  planar factor (`morphPlanar`) and its link rest length (`morphRest`). Together with the
+  field-dependent bulge of 01:58 this is the "rest length, stiffness and bulge vary per cell"
+  row.
+- Daughters start with their parent's concentrations, so the pattern is carried by the tissue
+  as it grows and folds.
+- The concentrations are part of the state, the checksum and the checkpoint file (two new
+  chunks) only once morphogens have been switched on, so existing files and every existing
+  checksum are unchanged. Switching them on mid-run (viewer checkbox, `set_params`) gives every
+  cell its starting values at that step.
+- Viewer: checkbox and sliders under "Model extensions"; `cf_view --color morph` colours a
+  checkpoint by the activator. `scripts/explore.py` can now switch morphogens and oriented
+  division on in a search.
+
+**One thing went wrong on the way, and how it was found.** The first version passed its tests
+and the first three showcase runs finished with invariants ok, but the picture was a single
+flat colour: the activator had died out in every run. The tests had only tried a 2,562-cell
+mesh; the showcase starts, like every run, from the 162-cell sphere. Two causes, both
+measured: single seeded cells are drained by their neighbours before the reaction can sustain
+itself, and seeding half the sheet at once makes one pulse that burns the substrate everywhere
+and then stops. The seeding is now patches (where a smooth random field is high) covering a
+minority of the sheet, and the default feed and kill rates are a pair (0.055 / 0.062) that
+survived on both mesh sizes in a scan of six pairs. The spot regime (0.035 / 0.065) still
+dies out when started on the small sphere; that is written next to the parameter. There is
+now a test that grows from the 162-cell sphere and requires a pattern at the end.
+
+**Verified**
+
+- `cf_tests` 55 of 55 (6 new): off by default and absent from files; morphogens with all
+  couplings at zero leave positions, rings and food identical to a run without them; a
+  pattern forms and stays in range; it survives growth from the 162-cell sphere (53% of cells
+  with activator at 4,025 cells); the couplings change the form; checkpoint round trip,
+  switching on mid-run, and a refused step that leaves the concentrations untouched.
+- `cf_cuda_tests` 26 of 26 (4 new): CUDA equals the CPU bit for bit with 1, 3 and 4
+  iterations per step, with the cells renumbered on every step, combined with light, crowding
+  and oriented division, switched on, off and on again mid-run, in asynchronous snapshots, and
+  across a refused step.
+- The default model is untouched: the 1M benchmark checksum is the same and the step time is
+  the same (0.99 ms).
+- Three GPU runs to 300k cells with the crowding limit, all invariants ok, no cell clamped,
+  the pattern alive in each (56 to 62% of cells with activator). Image below, coloured by the
+  activator. Left: morphogens with no coupling (area ratio 10.1). Middle: the activator feeds
+  and bulges (`morphFood=0.9`, `morphBulge=0.7`; area ratio 13.5). Right: the activator
+  softens and stretches (`morphPlanar=-0.9`, `morphRest=0.3`, `morphFood=-0.6`): a smoother,
+  larger form (area ratio 3.8, mean link 1.15).
+- A 40-run search with the new options: 40 ok, 8 with morphogens, 7 with oriented division,
+  17 of 48 archive bins filled.
+- Live viewer with morphogens on from the start: ran to the 2M limit, 0 validation errors;
+  the self-test still passes.
+
+**Not done / not verified**
+
+- The rest of the extension table in design.md: growth without division, lineage and
+  differentiation (cells that switch type by rules), plasticity, bending energy, an
+  environment, per-cell controllers, topology changes. design.md lists oriented division,
+  per-cell parameters and morphogens as the first round; these three are what exists.
+- Only one reaction (Gray-Scott) and one activator signal. Stiffness varies through the
+  planar and bulge factors; the spring factor does not vary per cell.
+- The Vulkan compute and WebGPU ports refuse states with morphogens.
+- In live mode the cells cannot be coloured by the activator (the live path shares only
+  position, age and food with the renderer); colouring works for checkpoint files.
+- Memory: 16 more bytes per cell on the GPU while morphogens are in the state.
+- Nobody has looked for the settings that give the most interesting forms; the three runs
+  above are the first three tried after the fix.
+
+![morphogens](img/m8_morphogens_300k.png)

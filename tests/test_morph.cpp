@@ -101,6 +101,24 @@ CF_TEST(morphogens_form_a_pattern_and_stay_in_range) {
                  std::to_string(100.0 * b.high) + "% of the cells above 0.15");
 }
 
+// The usual start is a 162-cell sphere: the pattern has to get going there and survive growth.
+CF_TEST(morphogens_survive_growth_from_the_small_sphere) {
+    Params p;
+    p.foodMax = 0.01f;
+    p.morphogens = 1.0f;
+    CpuSim sim(start(2, p));
+    while (sim.cell_count() < 4000u) {
+        const StepReport r = sim.step();
+        CF_CHECK_MSG(r.ok(), r.message);
+    }
+    const Spread b = spread_of(sim.state().morphB);
+    CF_CHECK_MSG(b.hi > 0.2f, "the activator died out: max " << b.hi);
+    CF_CHECK_MSG(b.high > 0.1 && b.high < 0.9, "no pattern: fraction of cells with activator " << b.high);
+    CF_CHECK_MSG(b.lo < 0.1f, "the activator is everywhere: min " << b.lo);
+    cftest::note("grown from 162 to " + std::to_string(sim.cell_count()) + " cells: activator up to " + std::to_string(b.hi) + ", " +
+                 std::to_string(100.0 * b.high) + "% of the cells above 0.15");
+}
+
 CF_TEST(morphogens_change_the_form_through_their_couplings) {
     Params p;
     p.foodMax = 0.01f;

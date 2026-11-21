@@ -326,12 +326,13 @@ __global__ void k_split(TopoView s, const std::uint32_t* winners, const std::uin
 
 // ---- Morphogens (core/morph.hpp)
 
-// Starting concentrations, by cell id.
-__global__ void k_morph_init(const std::uint32_t* uid, std::uint64_t seed, std::uint64_t step, float seeds, float* A, float* B, std::uint32_t n) {
+// Starting concentrations, by cell id and position.
+__global__ void k_morph_init(MorphParams mp, const std::uint32_t* uid, const Vec3* pos, std::uint64_t seed, std::uint64_t step, float* A, float* B,
+                             std::uint32_t n) {
     const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
     if (v >= n) return;
     float a, b;
-    morph_initial(seed, step, uid[v], seeds, a, b);
+    morph_initial(mp, seed, step, uid[v], pos[v], a, b);
     A[v] = a;
     B[v] = b;
 }
@@ -984,7 +985,7 @@ ParamIssues CudaSim::set_params(const Params& p) {
             // Switched on: every cell gets its starting concentrations, by id, as on the CPU.
             m.ensure_morph();
             const MorphParams mp = make_morph_params(p);
-            k_morph_init<<<grid_blocks(m.n), kBlock, 0, m.stream>>>(m.uid, m.seed, m.step, mp.seeds, m.morphA[m.cur], m.morphB[m.cur], m.n);
+            k_morph_init<<<grid_blocks(m.n), kBlock, 0, m.stream>>>(mp, m.uid, m.pos[m.cur], m.seed, m.step, m.morphA[m.cur], m.morphB[m.cur], m.n);
             m.morphPresent = true;
         }
     }

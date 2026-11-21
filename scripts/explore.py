@@ -49,13 +49,17 @@ BASE_SPACE = {
     "foodMax": (0.001, 0.02, True),
     "daughterOffset": (0.05, 0.30, False),
 }
-# Optional food sources (M5): each is off, or on with parameters drawn from these ranges.
+# Optional food sources (M5) and model extensions (M8): each is off, or on with parameters
+# drawn from these ranges.
 SOURCES = {
     "light": {"lightAmount": (0.3, 1.0, False), "lightAmbient": (0.0, 0.3, False)},
     "field": {"fieldAmount": (0.3, 1.0, False), "fieldScale": (5.0, 60.0, True), "fieldContrast": (1.0, 4.0, False), "fieldOctaves": (1.0, 3.0, False)},
     "crowd": {"crowdLow": (0.70, 0.95, False), "crowdSpan": (0.05, 0.30, False)},
     "pulse": {"pulsePeriod": (50.0, 1000.0, True), "pulseDuty": (0.2, 0.8, False), "pulseLow": (0.0, 0.5, False)},
     "diffusion": {"foodDiffusion": (0.05, 0.5, False)},
+    # Model extensions (M8): oriented division, and morphogens that set local parameters.
+    "orient": {"orientAmount": (0.3, 1.0, False)},
+    "morph": {"morphFood": (-0.9, 0.9, False), "morphBulge": (-0.9, 0.9, False), "morphPlanar": (-0.9, 0.9, False), "morphRest": (-0.3, 0.3, False)},
 }
 SOURCE_PROBABILITY = 0.25
 
@@ -131,6 +135,9 @@ def to_params(genome):
         elif name == "crowd":
             p["crowdLow"] = values["crowdLow"]
             p["crowdHigh"] = values["crowdLow"] + values["crowdSpan"]
+        elif name == "morph":
+            p["morphogens"] = 1.0
+            p.update(values)
         else:
             p.update(values)
     return p

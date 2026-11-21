@@ -36,7 +36,7 @@ constexpr FloatField kExtraFields[] = {
     {"orientAmount", &Params::orientAmount},   {"orientAxisX", &Params::orientAxisX},     {"orientAxisY", &Params::orientAxisY},
     {"orientAxisZ", &Params::orientAxisZ},     {"fieldBulge", &Params::fieldBulge},       {"morphogens", &Params::morphogens},
     {"morphDiffA", &Params::morphDiffA},       {"morphDiffB", &Params::morphDiffB},       {"morphFeed", &Params::morphFeed},
-    {"morphKill", &Params::morphKill},         {"morphIterations", &Params::morphIterations}, {"morphSeeds", &Params::morphSeeds},
+    {"morphKill", &Params::morphKill},         {"morphIterations", &Params::morphIterations}, {"morphSeedLevel", &Params::morphSeedLevel}, {"morphSeedScale", &Params::morphSeedScale},
     {"morphFood", &Params::morphFood},         {"morphBulge", &Params::morphBulge},       {"morphPlanar", &Params::morphPlanar},
     {"morphRest", &Params::morphRest},
 };
@@ -133,7 +133,8 @@ ParamIssues validate(const Params& p) {
         r.errors.push_back("morphDiffA and morphDiffB must be in [0, 1]");
     if (p.morphFeed < 0.0f || p.morphFeed > 1.0f || p.morphKill < 0.0f || p.morphKill > 1.0f)
         r.errors.push_back("morphFeed and morphKill must be in [0, 1]");
-    if (p.morphSeeds < 0.0f || p.morphSeeds > 1.0f) r.errors.push_back("morphSeeds must be in [0, 1]");
+    if (p.morphSeedLevel < 0.0f || p.morphSeedLevel > 1.0f) r.errors.push_back("morphSeedLevel must be in [0, 1]");
+    if (!(p.morphSeedScale > 0.0f)) r.errors.push_back("morphSeedScale must be positive");
     if (p.morphFood < -1.0f || p.morphFood > 1.0f || p.morphBulge < -1.0f || p.morphBulge > 1.0f || p.morphPlanar < -1.0f || p.morphPlanar > 1.0f)
         r.errors.push_back("morphFood, morphBulge and morphPlanar must be in [-1, 1]");
     if (p.morphRest < -0.5f || p.morphRest > 0.5f) r.errors.push_back("morphRest must be in [-0.5, 0.5]");

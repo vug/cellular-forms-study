@@ -4,10 +4,17 @@
 
 #include "core/export.hpp"
 #include "core/io.hpp"
+#include "core/morph.hpp"
 
 namespace cfv {
 
 bool isCloudFile(const std::filesystem::path& file) { return file.extension() == ".cfs"; }
+
+namespace {
+bool g_morphogenAsFood = false;
+}
+
+void showMorphogenAsFood(bool on) { g_morphogenAsFood = on; }
 
 Cloud readCloudFile(const std::filesystem::path& file) {
     const std::vector<char> bytes = cf::read_file(file);
@@ -20,6 +27,10 @@ Cloud readCloudFile(const std::filesystem::path& file) {
         const auto faces = cf::mesh_faces(state);
         c.indices.reserve(faces.size() * 3);
         for (const auto& f : faces) c.indices.insert(c.indices.end(), f.begin(), f.end());
+        if (g_morphogenAsFood && !state.morphB.empty()) {
+            // Show the activator instead of the food: as a 0..1 signal, in units of the threshold.
+            for (std::size_t v = 0; v < s.food.size(); ++v) s.food[v] = cf::morph_signal(state.morphB[v]) * s.params.foodThreshold;
+        }
     }
     c.pos = std::move(s.pos);
     c.birth = std::move(s.birth);

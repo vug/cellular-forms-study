@@ -15,7 +15,8 @@ MorphParams make_morph_params(const Params& p) {
     mp.diffB = p.morphDiffB;
     mp.feed = p.morphFeed;
     mp.kill = p.morphKill;
-    mp.seeds = p.morphSeeds;
+    mp.seedLevel = p.morphSeedLevel;
+    mp.seedInvScale = 1.0f / p.morphSeedScale;
     mp.food = p.morphFood;
     mp.bulge = p.morphBulge;
     mp.planar = p.morphPlanar;
@@ -27,7 +28,7 @@ void init_morphogens(State& s) {
     const MorphParams mp = make_morph_params(s.params);
     s.morphA.resize(s.n);
     s.morphB.resize(s.n);
-    for (std::uint32_t v = 0; v < s.n; ++v) morph_initial(s.seed, s.step, v, mp.seeds, s.morphA[v], s.morphB[v]);
+    for (std::uint32_t v = 0; v < s.n; ++v) morph_initial(mp, s.seed, s.step, v, s.pos[v], s.morphA[v], s.morphB[v]);
 }
 
 }  // namespace cf

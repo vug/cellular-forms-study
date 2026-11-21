@@ -89,12 +89,19 @@ struct Params {
     // react (Gray-Scott), making spots and stripes on the sheet; the activator B then sets
     // local parameters. Daughters start with their parent's concentrations.
     float morphogens = 0.0f;       // 0 = off, anything else = on
-    float morphDiffA = 0.64f;      // diffusion of the substrate: fraction of the way to the neighbours' mean per iteration
-    float morphDiffB = 0.32f;      // diffusion of the activator
-    float morphFeed = 0.035f;
-    float morphKill = 0.065f;
+    float morphDiffA = 0.4f;       // diffusion of the substrate: fraction of the way to the neighbours' mean per iteration
+    float morphDiffB = 0.2f;       // diffusion of the activator (half the substrate's gives spots a few cells across)
+    // Feed and kill rates pick the pattern. The defaults give stripes that fill the sheet and
+    // survive on a mesh as small as the 162-cell starting sphere and through growth; 0.04 / 0.06
+    // is similar; the spot regime (0.035 / 0.065) needs a larger mesh to get going and died out
+    // when started on the small sphere (docs/progress/PROGRESS.md, M8 morphogens).
+    float morphFeed = 0.055f;
+    float morphKill = 0.062f;
     float morphIterations = 4.0f;  // reaction-diffusion iterations per simulation step, 1 to 16 (rounded)
-    float morphSeeds = 0.05f;      // fraction of the cells that start with the activator
+    // Where the activator starts: in the patches where a smooth random field in space (with
+    // features of size morphSeedScale) is above morphSeedLevel. Lower level = more of the sheet.
+    float morphSeedLevel = 0.75f;  // 0 to 1 (seeding half the sheet at once makes one pulse that burns out)
+    float morphSeedScale = 3.0f;   // world units
     // What the activator does. Each is a scale 1 + coupling * (2 s - 1) on a local quantity,
     // with s = min(3 B, 1): no activator halves-to-zero, full activator doubles (coupling 1).
     float morphFood = 0.0f;        // -1 to 1: the cell's food increment (the nutrient of design.md)

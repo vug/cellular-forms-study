@@ -1,0 +1,25 @@
+#version 460
+// Step 3d: one invocation per bucket sorts its cells by id (so the result equals a stable sort
+// by bucket, whatever order the fill produced) and gathers their positions.
+#include "common.glsl"
+layout(local_size_x = 64) in;
+
+void main() {
+    uint b = gl_GlobalInvocationID.x;
+    if (b > pc.tableMask) return;
+    uint begin = scanData[b];
+    uint end = scanData[b + 1u];
+    for (uint i = begin + 1u; i < end; ++i) {
+        uint x = sortedId[i];
+        uint j = i;
+        while (j > begin && sortedId[j - 1u] > x) {
+            sortedId[j] = sortedId[j - 1u];
+            --j;
+        }
+        sortedId[j] = x;
+    }
+    for (uint i = begin; i < end; ++i) {
+        vec3 p = LOAD3(posCur, sortedId[i]);
+        STORE3(sortedPos, i, p);
+    }
+}

@@ -1,0 +1,47 @@
+#version 460
+// Exclusive prefix sum over uints, in three kinds of pass (a0): 0 = block sums of one level
+// into the next, 1 = sequential scan of the small top level, 2 = push the scanned sums back
+// down into a level. Blocks are 256 entries; one invocation handles one block. Level 0 lives
+// in scanData, the others in scanLevels at an offset. Integer adds only, so it is exact.
+//   a1 = location of the level being read/written (0xFFFFFFFF: scanData, else offset in scanLevels)
+//   a2 = offset of the next level in scanLevels (passes 0 and 2); pass 1: 1 = store the total as the winner count
+//   a3 = number of entries in the level at a1
+#include "common.glsl"
+layout(local_size_x = 64) in;
+
+uint rd(uint loc, uint i) { return loc == kInvalid ? scanData[i] : scanLevels[loc + i]; }
+void wr(uint loc, uint i, uint x) {
+    if (loc == kInvalid) scanData[i] = x;
+    else scanLevels[loc + i] = x;
+}
+
+void main() {
+    uint block = gl_GlobalInvocationID.x;
+    uint count = pc.a3;
+    if (pc.a0 == 1u) {
+        if (block != 0u) return;
+        uint acc = 0u;
+        for (uint i = 0u; i < count; ++i) {
+            uint t = rd(pc.a1, i);
+            wr(pc.a1, i, acc);
+            acc += t;
+        }
+        if (pc.a2 == 1u) counters.winners = acc;
+        return;
+    }
+    uint begin = block * 256u;
+    if (begin >= count) return;
+    uint end = min(begin + 256u, count);
+    if (pc.a0 == 0u) {
+        uint sum = 0u;
+        for (uint i = begin; i < end; ++i) sum += rd(pc.a1, i);
+        scanLevels[pc.a2 + block] = sum;
+    } else {
+        uint acc = scanLevels[pc.a2 + block];
+        for (uint i = begin; i < end; ++i) {
+            uint t = rd(pc.a1, i);
+            wr(pc.a1, i, acc);
+            acc += t;
+        }
+    }
+}

@@ -1,0 +1,13 @@
+#version 460
+// Step 3c: put every cell into its bucket's range. The order inside a bucket depends on thread
+// timing here; gridsort.comp sorts each bucket by id afterwards, which makes it deterministic.
+#include "common.glsl"
+layout(local_size_x = 256) in;
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= pc.n) return;
+    uint b = bucketOfPosition(LOAD3(posCur, v));
+    uint slot = scanData[b] + atomicAdd(cellFill[b], 1u);
+    sortedId[slot] = v;
+}

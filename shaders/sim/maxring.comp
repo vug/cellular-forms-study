@@ -1,0 +1,22 @@
+#version 460
+// Step 6b: "max over self and neighbours", twice (a0 = 0: prio -> m1, a0 = 1: m1 -> m2).
+// After both rounds a candidate with prio == m2 has the largest priority within graph
+// distance 2, so winners are pairwise at distance >= 3.
+#include "common.glsl"
+layout(local_size_x = 256) in;
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= pc.n) return;
+    uint base = v * kMaxDeg;
+    uint d = deg[v];
+    if (pc.a0 == 0u) {
+        uint64_t m = prio[v];
+        for (uint k = 0u; k < d; ++k) m = max(m, prio[nbr[base + k]]);
+        m1[v] = m;
+    } else {
+        uint64_t m = m1[v];
+        for (uint k = 0u; k < d; ++k) m = max(m, m1[nbr[base + k]]);
+        m2[v] = m;
+    }
+}

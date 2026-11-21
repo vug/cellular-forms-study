@@ -1,0 +1,31 @@
+#version 460
+// Step 3a (one invocation): grid origin and dimensions from the bounds, computed the way the
+// CPU does it (the dimensions in double precision).
+#include "common.glsl"
+layout(local_size_x = 1) in;
+
+float fromOrdered(int i) { return intBitsToFloat(i ^ ((i >> 31) & 0x7FFFFFFF)); }
+
+void main() {
+    vec3 lo = vec3(fromOrdered(counters.minX), fromOrdered(counters.minY), fromOrdered(counters.minZ));
+    vec3 hi = vec3(fromOrdered(counters.maxX), fromOrdered(counters.maxY), fromOrdered(counters.maxZ));
+    precise float inv = 1.0 / pc.roi;
+    grid.originX = lo.x;
+    grid.originY = lo.y;
+    grid.originZ = lo.z;
+    grid.invCell = inv;
+    const double kMaxDim = 2097152.0lf;  // 2^21 cells per axis keeps the linear key below 2^63
+    precise double dx = floor((double(hi.x) - double(lo.x)) * double(inv)) + 1.0lf;
+    precise double dy = floor((double(hi.y) - double(lo.y)) * double(inv)) + 1.0lf;
+    precise double dz = floor((double(hi.z) - double(lo.z)) * double(inv)) + 1.0lf;
+    if (counters.firstBadPos != kInvalid || !(dx <= kMaxDim && dy <= kMaxDim && dz <= kMaxDim) || !(dx >= 1.0lf && dy >= 1.0lf && dz >= 1.0lf)) {
+        if (counters.firstBadPos == kInvalid) counters.gridTooLarge = 1u;
+        grid.nx = 1u;
+        grid.ny = 1u;
+        grid.nz = 1u;
+    } else {
+        grid.nx = uint(dx);
+        grid.ny = uint(dy);
+        grid.nz = uint(dz);
+    }
+}

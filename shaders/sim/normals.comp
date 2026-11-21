@@ -1,0 +1,50 @@
+#version 460
+// Step 2: surface normal from the neighbour ring, with the fallback to the previous normal.
+// Also folds the cell into the bounding box (order-preserving ints, atomic min/max: exact and
+// independent of thread order) and records the lowest cell id with a non-finite position.
+#include "common.glsl"
+layout(local_size_x = 256) in;
+
+int orderedInt(float f) {
+    int i = floatBitsToInt(f);
+    return i ^ ((i >> 31) & 0x7FFFFFFF);
+}
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= pc.n) return;
+    vec3 P = LOAD3(posCur, v);
+    if (!finite3(P)) {
+        atomicMin(counters.firstBadPos, v);
+    } else {
+        atomicMin(counters.minX, orderedInt(P.x));
+        atomicMin(counters.minY, orderedInt(P.y));
+        atomicMin(counters.minZ, orderedInt(P.z));
+        atomicMax(counters.maxX, orderedInt(P.x));
+        atomicMax(counters.maxY, orderedInt(P.y));
+        atomicMax(counters.maxZ, orderedInt(P.z));
+    }
+
+    uint d = deg[v];
+    uint base = v * kMaxDeg;
+    precise vec3 sum = vec3(0.0);
+    vec3 first = LOAD3(posCur, nbr[base]) - P;
+    vec3 a = first;
+    for (uint k = 1u; k < d; ++k) {
+        vec3 b = LOAD3(posCur, nbr[base + k]) - P;
+        sum += cross3(a, b);
+        a = b;
+    }
+    sum += cross3(a, first);
+    precise float l2 = dot3(sum, sum);
+    vec3 nrm;
+    if (!(l2 > pc.normalEps2)) {  // also true for NaN
+        nrm = LOAD3(nrmCur, v);
+        atomicAdd(counters.fallbacks, 1u);
+    } else {
+        precise float inv = recipSqrt(l2);
+        precise vec3 scaled = sum * inv;
+        nrm = scaled;
+    }
+    STORE3(nrmNew, v, nrm);
+}

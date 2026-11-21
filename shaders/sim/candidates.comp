@@ -1,0 +1,21 @@
+#version 460
+// Step 6a: division candidates (food above the threshold and a cleavage pair inside the
+// degree cap), their priorities and their chosen pairs.
+#include "common.glsl"
+#include "division.glsl"
+layout(local_size_x = 256) in;
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= pc.n) return;
+    uint64_t p = 0ul;
+    uint pr = kNoPair;
+    if (foodNew[v] > pc.threshold) {
+        atomicAdd(counters.ready, 1u);
+        pr = chooseCleavagePair(v, hashU64(pc.seed, pc.step, uint64_t(v), kStreamPair));
+        if (pr == kNoPair) atomicAdd(counters.postponed, 1u);
+        else p = divisionPriority(v);
+    }
+    prio[v] = p;
+    pairOf[v] = pr;
+}

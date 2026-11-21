@@ -1,0 +1,111 @@
+#version 460
+// Steps 4 and 5: move (Jacobi: reads the old positions, writes the new buffer) and clamp.
+// Invocations walk the cells in grid order, so neighbouring invocations search the same grid
+// buckets; each cell is computed exactly as in id order.
+//   a0 = 0: normal pass.  a0 = 1: diagnose cell a1 (which term is not finite) into counters.diag.
+#include "common.glsl"
+layout(local_size_x = 256) in;
+
+void terms(uint v, vec3 P, out vec3 spring, out vec3 planar, out vec3 bulge, out vec3 rep) {
+    uint d = deg[v];
+    uint base = v * kMaxDeg;
+    vec3 N = LOAD3(nrmNew, v);
+
+    // ---- link terms (core/kernels.hpp link_terms)
+    precise vec3 springSum = vec3(0.0);
+    precise vec3 planarSum = vec3(0.0);
+    precise float bulgeSum = 0.0;
+    precise float l0sq = pc.l0 * pc.l0;
+    for (uint k = 0u; k < d; ++k) {
+        vec3 L = LOAD3(posCur, nbr[base + k]);
+        precise vec3 toP = P - L;
+        precise vec3 target = L + pc.l0 * unitOrZero(toP);
+        springSum += target;
+        planarSum += L;
+        precise float dotN = -dot3(toP, N);
+        precise float arg = l0sq - dot3(toP, toP) + dotN * dotN;
+        arg = arg > 0.0 ? arg : 0.0;  // an over-stretched link: clamp (guard)
+        precise float term = sqrt(arg) + dotN;
+        bulgeSum += term;
+    }
+    precise float inv = 1.0 / float(d);
+    precise vec3 s = pc.spring * (springSum * inv - P);
+    precise vec3 pl = pc.planar * (planarSum * inv - P);
+    precise float bscale = pc.bulge * (bulgeSum * inv);
+    precise vec3 bu = bscale * N;
+    spring = s;
+    planar = pl;
+    bulge = bu;
+
+    // ---- repulsion (core/kernels.hpp repulsion_offset): non-linked cells within roi, visited
+    // in the reference order (z, y, x; ascending id inside a grid cell).
+    precise float roi2 = pc.roi * pc.roi;
+    uint cx = gridCoord(P.x, grid.originX, grid.invCell, grid.nx);
+    uint cy = gridCoord(P.y, grid.originY, grid.invCell, grid.ny);
+    uint cz = gridCoord(P.z, grid.originZ, grid.invCell, grid.nz);
+    uint x0 = cx > 0u ? cx - 1u : 0u;
+    uint x1 = cx + 1u < grid.nx ? cx + 1u : grid.nx - 1u;
+    uint y0 = cy > 0u ? cy - 1u : 0u;
+    uint y1 = cy + 1u < grid.ny ? cy + 1u : grid.ny - 1u;
+    uint z0 = cz > 0u ? cz - 1u : 0u;
+    uint z1 = cz + 1u < grid.nz ? cz + 1u : grid.nz - 1u;
+    precise vec3 sum = vec3(0.0);
+    for (uint z = z0; z <= z1; ++z) {
+        for (uint y = y0; y <= y1; ++y) {
+            for (uint x = x0; x <= x1; ++x) {
+                uint b = bucketOf(gridKey(x, y, z));
+                uint end = scanData[b + 1u];
+                for (uint q = scanData[b]; q < end; ++q) {
+                    uint u = sortedId[q];
+                    if (u == v) continue;
+                    vec3 pu = LOAD3(sortedPos, q);
+                    precise vec3 diff = P - pu;
+                    precise float d2 = dot3(diff, diff);
+                    if (!(d2 < roi2)) continue;
+                    // Several grid cells can share a bucket: take u only for its own cell.
+                    if (gridCoord(pu.x, grid.originX, grid.invCell, grid.nx) != x || gridCoord(pu.y, grid.originY, grid.invCell, grid.ny) != y ||
+                        gridCoord(pu.z, grid.originZ, grid.invCell, grid.nz) != z)
+                        continue;
+                    bool linked = false;
+                    for (uint k = 0u; k < d; ++k) linked = linked || (nbr[base + k] == u);
+                    if (linked) continue;
+                    precise float w = (roi2 - d2) / roi2;
+                    precise vec3 add = w * unitOrZero(diff);
+                    sum += add;
+                }
+            }
+        }
+    }
+    precise vec3 r = pc.repulsion * sum;
+    rep = r;
+}
+
+void main() {
+    if (pc.a0 == 1u) {
+        if (gl_GlobalInvocationID.x != 0u) return;
+        vec3 s, pl, bu, rp;
+        terms(pc.a1, LOAD3(posCur, pc.a1), s, pl, bu, rp);
+        counters.diag = (finite3(s) ? 0u : 1u) | (finite3(pl) ? 0u : 2u) | (finite3(bu) ? 0u : 4u) | (finite3(rp) ? 0u : 8u);
+        return;
+    }
+    uint q = gl_GlobalInvocationID.x;
+    if (q >= pc.n) return;
+    uint v = sortedId[q];
+    vec3 P = LOAD3(posCur, v);
+    vec3 spring, planar, bulge, rep;
+    terms(v, P, spring, planar, bulge, rep);
+    // P_new = P + link terms + collisionOffset, all from the old positions (same expression as the CPU).
+    precise vec3 delta = ((spring + planar) + bulge) + rep;
+    if (pc.maxMove > 0.0) {
+        precise float l2 = dot3(delta, delta);
+        precise float cap2 = pc.maxMove * pc.maxMove;
+        if (l2 > cap2) {
+            precise float scale = pc.maxMove / sqrt(l2);
+            delta = delta * scale;
+            atomicAdd(counters.clamped, 1u);
+        }
+    }
+    precise vec3 Pn = P + delta;
+    STORE3(posNew, v, Pn);
+    if (!finite3(Pn)) atomicMin(counters.firstBadMove, v);
+}

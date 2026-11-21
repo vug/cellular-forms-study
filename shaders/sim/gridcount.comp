@@ -1,0 +1,11 @@
+#version 460
+// Step 3b: count the cells of every grid bucket (integer atomics: the counts do not depend on
+// thread order).
+#include "common.glsl"
+layout(local_size_x = 256) in;
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= pc.n) return;
+    atomicAdd(scanData[bucketOfPosition(LOAD3(posCur, v))], 1u);
+}

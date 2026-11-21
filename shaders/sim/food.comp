@@ -1,0 +1,12 @@
+#version 460
+// Step 1: uniform random food per cell (hash of seed, step, cell id).
+#include "common.glsl"
+layout(local_size_x = 256) in;
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= pc.n) return;
+    precise float inc = pc.foodMin + pc.foodSpan * (hashU01(pc.seed, pc.step, uint64_t(v), kStreamFood));
+    precise float r = foodCur[v] + inc;
+    foodNew[v] = r;
+}

@@ -181,6 +181,11 @@ void Context::createDevice(VkSurfaceKHR surface) {
     f12.timelineSemaphore = VK_TRUE;
     VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
     f2.pNext = &f12;
+    // 64-bit integers (hashes) and doubles (grid dimensions) for the compute backend's shaders.
+    VkPhysicalDeviceFeatures supported;
+    vkGetPhysicalDeviceFeatures(gpu, &supported);
+    f2.features.shaderInt64 = supported.shaderInt64;
+    f2.features.shaderFloat64 = supported.shaderFloat64;
 
     VkDeviceCreateInfo ci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     ci.pNext = &f2;

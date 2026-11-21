@@ -1,0 +1,15 @@
+#version 460
+// Step 7: every winner splits, unless the step failed or would exceed the capacity; then
+// nothing is written and the state stays as it was (a step is all or nothing).
+#include "common.glsl"
+#include "division.glsl"
+layout(local_size_x = 256) in;
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    bool ok = counters.firstBadMove == kInvalid && counters.firstBadPos == kInvalid && counters.gridTooLarge == 0u &&
+              pc.n + counters.winners <= pc.limit;
+    if (v == 0u) counters.committed = ok ? 1u : 0u;
+    if (v >= pc.n || !ok) return;
+    if (prio[v] != 0ul && prio[v] == m2[v]) applyDivision(v, pairOf[v], pc.n + scanData[v]);
+}

@@ -1,0 +1,11 @@
+#version 460
+// Step 6c: 1 for every winner; the prefix sum of these gives each winner its rank, and the
+// daughter id is n + rank.
+#include "common.glsl"
+layout(local_size_x = 256) in;
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= pc.n) return;
+    scanData[v] = (prio[v] != 0ul && prio[v] == m2[v]) ? 1u : 0u;
+}

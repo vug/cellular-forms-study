@@ -170,8 +170,12 @@ __global__ void k_gather(const Vec3* pos, const std::uint32_t* sortedId, Vec3* s
 // Move (Jacobi: reads the old positions, writes the new buffer) and clamp.
 __global__ void k_move(const Vec3* pos, const Vec3* nrm, const std::uint32_t* nbr, const std::uint8_t* deg, Vec3* out,
                        std::uint32_t n, GridView grid, KernelParams kp, Counters* c) {
-    const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
-    if (v >= n) return;
+    // Threads walk the cells in grid order, not id order: neighbouring threads then search the
+    // same grid cells, so the neighbour search reads memory that is already in cache. Each cell
+    // is still computed exactly as in id order, so the result does not change.
+    const std::uint32_t q = blockIdx.x * blockDim.x + threadIdx.x;
+    if (q >= n) return;
+    const std::uint32_t v = grid.sortedId[q];
     const Vec3 P = pos[v];
     const std::uint32_t* ring = nbr + static_cast<std::size_t>(v) * kMaxDeg;
     const std::uint32_t d = deg[v];
@@ -413,7 +417,7 @@ struct CudaSim::Impl {
         if (pinnedFailed) return false;
         if (pinned.capacity >= cells) return true;
         free_pinned();
-        std::uint64_t want = std::max<std::uint64_t>(std::uint64_t{cells} + cells / 2, 4096);
+        std::uint64_t want = std::max<std::uint64_t>(std::uint64_t{cells} + cells / 32, 4096);  // a little headroom
         if (want > capacity) want = capacity;
         const std::size_t c = static_cast<std::size_t>(want);
         bool ok = true;

@@ -1657,9 +1657,10 @@ the simulation), 0.78 ms as path-traced membrane (worst 7.30 ms).
 - No headset: stereo is two images, not OpenXR. I could not test a headset here.
 - Whether the stereo depth is comfortable: I can check that the two views differ the right
   way, not how it looks through glasses or with crossed eyes.
-- A loaded environment image was not tried (there is none in the repo); the built-in studio
-  goes through the same upload. Small bright lights in a loaded image would converge slowly
-  in the path tracer and are capped.
+- No real panorama was tried as an environment image (there is none in the repo). The loader
+  was exercised with a PNG from this log, in a raster mode and in the path tracer, and a
+  missing file is reported and replaced by the built-in studio. Small bright lights in a
+  loaded image would converge slowly in the path tracer and are capped.
 - The cell walls on the membrane use the nearest of the three cells of a triangle. That is the
   nearest cell of all only where triangles are well shaped; I did not measure how often it is
   not.

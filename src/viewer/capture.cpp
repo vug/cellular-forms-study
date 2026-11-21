@@ -1,6 +1,7 @@
 #include "capture.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 
@@ -70,6 +71,7 @@ std::vector<std::uint8_t> renderOffscreen(Context& ctx, const PointBuffers& poin
         vkCmdCopyImageToBuffer(cmd, target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.buffer, 1, &region);
     });
 
+    if (renderer.environmentFailed()) std::fprintf(stderr, "note: %s\n", renderer.environmentStatus().c_str());
     std::vector<std::uint8_t> out(static_cast<size_t>(width) * height * 4);
     const auto* src = static_cast<const std::uint8_t*>(readback.mapped);
     if (ssaa == 1) {

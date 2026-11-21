@@ -239,6 +239,7 @@ public:
     uint32_t accumulatedSamples() const { return accumSamples_; }
     // The environment map in use ("built-in studio" or a file name), or why a file was not loaded.
     const std::string& environmentStatus() const { return envStatus_; }
+    bool environmentFailed() const { return envFailed_; }  // the file asked for could not be loaded
     bool rayTracing() const { return ctx_.hasRayTracing; }
     bool cellWallsOnMembrane() const { return ctx_.hasBarycentric; }
 
@@ -267,6 +268,7 @@ private:
     uint64_t envVersion_ = 0;
     std::string envLoaded_ = "\x01";  // the envFile the map was made from (the built-in one: empty)
     std::string envStatus_;
+    bool envFailed_ = false;
     VkSampler envSampler_ = VK_NULL_HANDLE;
     uint32_t shadowSize_ = 0;
     bool accumReady_ = false;       // the accumulation image has been through its first transition

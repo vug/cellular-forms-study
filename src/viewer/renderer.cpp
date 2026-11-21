@@ -822,6 +822,7 @@ void Renderer::setEnvironment(const float* rgb, int width, int height) {
 void Renderer::syncEnvironment(const RenderSettings& settings) {
     if (settings.envFile == envLoaded_) return;
     envLoaded_ = settings.envFile;
+    envFailed_ = false;
     std::vector<float> rgb;
     int w = 0, h = 0;
     if (!settings.envFile.empty()) {
@@ -832,6 +833,7 @@ void Renderer::syncEnvironment(const RenderSettings& settings) {
             return;
         }
         envStatus_ = error + "; using the built-in studio";
+        envFailed_ = true;
     } else {
         envStatus_ = "built-in studio";
     }

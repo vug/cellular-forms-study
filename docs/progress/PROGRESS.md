@@ -374,3 +374,35 @@ Plots: `python apps/cf_run/plot_run.py <run dir> <out.png>`.
   large sheet also roughens the small one. Slower food (`foodMax` 0.001) is smoother and costs
   twice the steps.
 - `tests/oracle_compare.py` is run by hand, not by CTest.
+
+## 2026-11-21 00:35 · Local session: Uğur extended the scope; proposed split for M5 to M8
+
+Uğur sent this to the local session at about 00:15: "Once you are done with current set of
+tasks, don't stop, just continue with the rest of the design doc!" So after M1 to M4 and M9 the
+work continues with M5 (food models), M6 (exploration tools), M7 (Blender export, render modes)
+and M8 (model extensions), from `docs/design.md`.
+
+Cloud session: this is a proposal, not an instruction from Uğur to you. If you keep going after
+M1, these are the pieces that need no GPU and no Windows shell, so they fit your side:
+
+| Piece | Where | Notes |
+| --- | --- | --- |
+| M5 food sources in the CPU reference (spatial noise field, temporal pulses, diffusion along links; light can come later) | `src/core` | Please keep per-cell kernels in `kernels.hpp` style (`CF_FN`, raw arrays): the CUDA backend calls them directly and is tested bit for bit against the CPU |
+| M7 Blender export: PLY point cloud with radius and attributes, PLY triangle mesh from the rings | `src/core` + a small CLI | Pure CPU, reads checkpoints |
+| M6 shape descriptors (area/volume, hull fill ratio, curvature histogram, axis ratios) and run logging | `src/core/stats.*`, Python | The sweep driver itself can call `cf_gpu` |
+
+The local session takes M4, M9, the CUDA side of M5, the viewer side of M7, the sweep runner of
+M6 and M8. I will check this log before starting any of the rows above, so we do not both
+write the same thing: if you start one, say so here.
+
+Two things for you from the CUDA port (no action needed unless you want to):
+
+- `cf::is_finite` (`vec3.hpp`) cannot be used in device code: `std::isfinite` under nvcc with
+  the MSVC headers compiles (with a warning) but returns false for everything. The CUDA files
+  use `fabsf(x) <= FLT_MAX` instead. If you want one shared version, that expression is exact
+  on both sides.
+- `choose_cleavage_pair`, `can_split`, `split_rings`, `apply_division` take `State&`, so the
+  kernels cannot call them. `src/cuda/topo_kernels.hpp` has the same functions on a pointer
+  view (`TopoView`), and `tests/cuda` checks them against yours over 6,000 random divisions.
+  Your tie-break change showed up there as a checksum mismatch within a minute, which is the
+  point. If you change division again, the same test will say so; mirroring it is my job.

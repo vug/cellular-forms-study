@@ -62,6 +62,7 @@ endfunction()
 cf_add_app(cf_run)
 cf_add_app(cf_render)
 cf_add_app(cf_export)  # PLY export for Blender (M7)
+cf_add_app(cf_describe)  # shape descriptors as JSON (M6)
 
 if(CF_BUILD_TESTS)
   enable_testing()

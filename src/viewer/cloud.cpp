@@ -51,6 +51,12 @@ Cloud cloudFromState(const cf::State& s, std::string label) {
 }
 
 Cloud loadCloud(const std::filesystem::path& file) {
+    if (file == "-") {  // an empty tile, for sheets laid out as a grid
+        Cloud blank;
+        blank.label = "(empty)";
+        blank.finalize();
+        return blank;
+    }
     Cloud c = readCloudFile(file);
     if (c.label.empty()) c.label = file.filename().string();
     c.finalize();

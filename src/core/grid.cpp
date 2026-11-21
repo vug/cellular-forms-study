@@ -90,6 +90,21 @@ bool Grid::build(const Vec3* pos, std::uint32_t n, float cellSize, unsigned thre
     parallel_for(n, threads, [=](std::uint32_t b, std::uint32_t e, unsigned) {
         for (std::uint32_t q = b; q < e; ++q) sp[q] = pos[sid[q]];
     });
+
+    // Row table: where each (y, z) row of grid cells starts and ends in the sorted arrays. A
+    // speed-up for the search only; skipped when the rows would outnumber the cells many times.
+    const std::uint64_t rows = static_cast<std::uint64_t>(ny_) * nz_;
+    rowBegin_.clear();
+    rowEnd_.clear();
+    if (rows <= 4ull * n + 4096ull) {
+        rowBegin_.assign(static_cast<std::size_t>(rows), 0u);
+        rowEnd_.assign(static_cast<std::size_t>(rows), 0u);
+        for (std::uint32_t q = 0; q < n; ++q) {
+            const std::uint64_t row = key_[q] / nx_;
+            if (q == 0 || key_[q - 1] / nx_ != row) rowBegin_[static_cast<std::size_t>(row)] = q;
+            if (q + 1 == n || key_[q + 1] / nx_ != row) rowEnd_[static_cast<std::size_t>(row)] = q + 1;
+        }
+    }
     return true;
 }
 
@@ -104,6 +119,10 @@ GridView Grid::view() const {
     g.sortedKey = key_.data();
     g.sortedId = id_.data();
     g.sortedPos = sortedPos_.data();
+    if (!rowBegin_.empty()) {
+        g.rowBegin = rowBegin_.data();
+        g.rowEnd = rowEnd_.data();
+    }
     return g;
 }
 

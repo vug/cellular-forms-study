@@ -30,6 +30,8 @@ private:
     std::vector<std::uint64_t> key_, keyTmp_;
     std::vector<std::uint32_t> id_, idTmp_;
     std::vector<Vec3> sortedPos_;
+    // Row table (GridView::rowBegin/rowEnd); empty when the grid has too many rows for it.
+    std::vector<std::uint32_t> rowBegin_, rowEnd_;
 };
 
 // Stable LSD radix sort of (key, id) pairs by key. `maxKey` bounds the keys (fewer passes).

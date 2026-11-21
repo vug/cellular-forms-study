@@ -334,3 +334,26 @@ CF_TEST(cuda_async_snapshots_are_exact_and_do_not_disturb_the_run) {
     cftest::note(std::to_string(expected.size()) + " asynchronous snapshots, each identical to the CPU state at its step; final " +
                  std::to_string(g.n) + " cells");
 }
+
+// Speed-ups inside the backend must not change a single bit: with the grid's row table off the
+// search covers the whole sorted array, and both ways must equal the CPU reference.
+CF_TEST(cuda_row_table_does_not_change_the_result) {
+    Params p = fast_growth();
+    p.repulsionStrength = 0.2f;
+    const State s = start(4, p, 13);  // 2,562 cells
+    CpuSim cpu(s, 0);
+    CudaOptions without;
+    without.rowTable = false;
+    CudaSim a(s), b(s, without);
+    for (int k = 1; k <= 120; ++k) {
+        CF_CHECK(cpu.step().ok());
+        CF_CHECK(a.step().ok());
+        CF_CHECK(b.step().ok());
+    }
+    State ga, gb;
+    a.download(ga);
+    b.download(gb);
+    CF_CHECK_EQ(checksum(cpu.state()), checksum(ga));
+    CF_CHECK_EQ(checksum(cpu.state()), checksum(gb));
+    cftest::note(std::to_string(ga.n) + " cells, checksum " + hex(checksum(ga)) + " with and without the row table, and on the CPU");
+}

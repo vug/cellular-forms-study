@@ -436,8 +436,8 @@ int main(int argc, char** argv) {
         }
         if (opt.timing) {
             const cf::CudaPhaseTimes t = sim.phase_times();
-            std::printf("phase_seconds food=%.3f normals=%.3f grid=%.3f move=%.3f select=%.3f split=%.3f total=%.3f steps=%llu\n", t.food, t.normals, t.grid,
-                        t.move, t.select, t.split, t.total, static_cast<unsigned long long>(t.steps));
+            std::printf("phase_seconds grid=%.3f move_and_normals=%.3f food_and_select=%.3f split=%.3f total=%.3f steps=%llu\n", t.grid, t.move, t.select,
+                        t.split, t.total, static_cast<unsigned long long>(t.steps));
         }
         return exitCode;
     } catch (const std::exception& e) {

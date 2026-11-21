@@ -94,6 +94,11 @@ struct GridView {
     const std::uint64_t* sortedKey;
     const std::uint32_t* sortedId;
     const Vec3* sortedPos;
+    // Optional row table (a speed-up, not part of the model): the cells of grid row (y, z) are
+    // sortedKey[rowBegin[y + ny z] .. rowEnd[y + ny z]). Null: the whole array is searched.
+    // Either way the same cells are visited in the same order.
+    const std::uint32_t* rowBegin = nullptr;
+    const std::uint32_t* rowEnd = nullptr;
 };
 
 CF_FN std::uint32_t grid_coord(float p, float origin, float invCell, std::uint32_t dim) {
@@ -108,9 +113,9 @@ CF_FN std::uint64_t grid_key(std::uint32_t x, std::uint32_t y, std::uint32_t z, 
     return static_cast<std::uint64_t>(x) + static_cast<std::uint64_t>(nx) * (static_cast<std::uint64_t>(y) + static_cast<std::uint64_t>(ny) * z);
 }
 
-// First index in sortedKey[0..count) whose key is >= key.
-CF_FN std::uint32_t grid_lower_bound(const std::uint64_t* sortedKey, std::uint32_t count, std::uint64_t key) {
-    std::uint32_t lo = 0, hi = count;
+// First index in sortedKey[first..count) whose key is >= key (count when there is none).
+CF_FN std::uint32_t grid_lower_bound(const std::uint64_t* sortedKey, std::uint32_t count, std::uint64_t key, std::uint32_t first = 0) {
+    std::uint32_t lo = first, hi = count;
     while (lo < hi) {
         const std::uint32_t mid = lo + (hi - lo) / 2;
         if (sortedKey[mid] < key) lo = mid + 1;
@@ -140,12 +145,19 @@ CF_FN Vec3 repulsion_offset(const GridView& g, std::uint32_t v, Vec3 P, const st
         for (std::uint32_t y = y0; y <= y1; ++y) {
             const std::uint64_t keyLo = grid_key(x0, y, z, g.nx, g.ny);
             const std::uint64_t keyHi = grid_key(x1, y, z, g.nx, g.ny);
-            for (std::uint32_t q = grid_lower_bound(g.sortedKey, g.count, keyLo); q < g.count && g.sortedKey[q] <= keyHi; ++q) {
-                const std::uint32_t u = g.sortedId[q];
-                if (u == v) continue;
+            std::uint32_t q = 0, end = g.count;
+            if (g.rowBegin != nullptr) {
+                const std::uint64_t row = static_cast<std::uint64_t>(y) + static_cast<std::uint64_t>(g.ny) * z;
+                q = g.rowBegin[row];
+                end = g.rowEnd[row];  // an empty row has begin == end
+            }
+            for (q = grid_lower_bound(g.sortedKey, end, keyLo, q); q < end && g.sortedKey[q] <= keyHi; ++q) {
+                // The distance first: most candidates fail it, and then their id is never read.
                 const Vec3 diff = P - g.sortedPos[q];
                 const float d2 = dot(diff, diff);
                 if (!(d2 < roi2)) continue;
+                const std::uint32_t u = g.sortedId[q];
+                if (u == v) continue;
                 bool linked = false;
                 for (std::uint32_t k = 0; k < d; ++k) linked = linked || (ring[k] == u);
                 if (linked) continue;

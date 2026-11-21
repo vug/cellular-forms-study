@@ -23,6 +23,13 @@ if(CF_GPU_APP_SOURCES)
   target_link_libraries(cf_gpu PRIVATE cf_cuda cf_core cf_options)
 endif()
 
+# --- step benchmark on a fixed checkpoint (for comparing optimisations)
+file(GLOB CF_BENCH_APP_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/apps/cf_bench/*.cpp)
+if(CF_BENCH_APP_SOURCES)
+  add_executable(cf_bench ${CF_BENCH_APP_SOURCES})
+  target_link_libraries(cf_bench PRIVATE cf_cuda cf_core cf_options)
+endif()
+
 # --- tests: CUDA against the CPU reference (uses the harness in tests/)
 file(GLOB CF_CUDA_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/cuda/*.cpp)
 if(CF_BUILD_TESTS AND CF_CUDA_TEST_SOURCES)

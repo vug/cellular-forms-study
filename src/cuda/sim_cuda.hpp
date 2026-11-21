@@ -25,6 +25,8 @@ struct CudaOptions {
     // Refuse to start when the buffers need more than this fraction of the GPU memory that is
     // free right now (instead of letting Windows spill into slow shared memory).
     double maxFractionOfFreeMemory = 0.92;
+    // Speed-ups that do not change the result; the switches exist so tests can hold them to that.
+    bool rowTable = true;  // per-row index of the grid instead of searching the whole sorted array
 };
 
 struct CudaMemory {
@@ -38,7 +40,8 @@ struct CudaMemory {
 // Per-phase wall time accumulated over steps (seconds), for the benchmark. Timing forces a
 // device synchronisation after every phase, so it is off unless enabled.
 struct CudaPhaseTimes {
-    double food = 0, normals = 0, grid = 0, move = 0, select = 0, split = 0, total = 0;
+    // `move` includes the normals and `select` includes the food stage (each pair is one pass).
+    double grid = 0, move = 0, select = 0, split = 0, total = 0;
     std::uint64_t steps = 0;
 };
 

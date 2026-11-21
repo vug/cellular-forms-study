@@ -10,7 +10,7 @@ target_compile_options(cf_cuda PRIVATE
   # No fused multiply-add: every float operation is then a single IEEE operation, the same as
   # in the MSVC build of the CPU reference, which is what makes the two backends agree bit for
   # bit. (A faster, non-matching mode would drop this flag.)
-  $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>
+  $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<NOT:$<BOOL:${CF_CUDA_FMA}>>>:--fmad=false>
   # CCCL (CUB, Thrust) needs the conforming preprocessor.
   $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>
   $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8>)

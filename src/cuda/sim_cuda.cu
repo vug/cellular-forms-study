@@ -837,7 +837,11 @@ void CudaSim::bounds(Vec3& lo, Vec3& hi) const {
     lo = impl_->boundsLo;
     hi = impl_->boundsHi;
 }
-CudaPhaseTimes CudaSim::phase_times() const { return impl_->times; }
+CudaPhaseTimes CudaSim::phase_times() const {
+    CudaPhaseTimes t = impl_->times;
+    t.grid = t.bounds + t.keys + t.sort + t.gather;
+    return t;
+}
 
 CudaMemory CudaSim::memory() const {
     CudaMemory r;
@@ -898,8 +902,9 @@ StepReport CudaSim::step() {
     }
     m.boundsLo = box.lo;
     m.boundsHi = box.hi;
+    m.phase(m.times.bounds, t0);
     const Vec3 origin = box.lo;
-    const float inv = 1.0f / p.radiusOfInfluence;
+    const float inv = 1.0f / (p.radiusOfInfluence / static_cast<float>(CF_GRID_REFINE));  // grid cell size = roi
     constexpr double kMaxDim = 2097152.0;  // 2^21 cells per axis keeps the linear key below 2^63
     const double dx = std::floor((static_cast<double>(box.hi.x) - box.lo.x) * inv) + 1.0;
     const double dy = std::floor((static_cast<double>(box.hi.y) - box.lo.y) * inv) + 1.0;
@@ -917,6 +922,7 @@ StepReport CudaSim::step() {
     const FoodParams fp = make_food_params(p, seed, step, box.lo, box.hi);
 
     k_keys<<<gb, kBlock, 0, st>>>(m.pos[cur], m.slotOf, m.key[0], m.idBlock, n, origin, inv, nx, ny, nz);
+    m.phase(m.times.keys, t0);
     cub::DoubleBuffer<std::uint64_t> keys(m.key[0], m.key[1]);
     cub::DoubleBuffer<std::uint32_t> ids(m.idBlock, m.idBlock + m.capacity);
     {
@@ -928,6 +934,7 @@ StepReport CudaSim::step() {
         m.ensure_temp(bytes);
         CF_CUDA(cub::DeviceRadixSort::SortPairs(m.cubTemp, bytes, keys, ids, n, 0, endBit, st));
     }
+    m.phase(m.times.sort, t0);
     GridView grid;
     grid.sortedPos = m.sortedPos;
     if (m.renumber_due(n, step)) {
@@ -990,7 +997,7 @@ StepReport CudaSim::step() {
         grid.rowBegin = rowBegin;
         grid.rowEnd = rowEnd;
     }
-    m.phase(m.times.grid, t0);
+    m.phase(m.times.gather, t0);
 
     // ---- 2, 4, 5. Normals from the rings (fallback: the previous normal), move and clamp.
     k_move<<<gb, kBlock, 0, st>>>(m.pos[cur], m.normal[cur], m.normal[nxt], m.nbr, m.deg, m.uid, m.pos[nxt], n, grid, kp, fp,

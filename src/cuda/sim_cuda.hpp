@@ -48,7 +48,10 @@ struct CudaMemory {
 // device synchronisation after every phase, so it is off unless enabled.
 struct CudaPhaseTimes {
     // `move` includes the normals and `select` includes the food stage (each pair is one pass).
+    // `grid` is the sum of its four parts: bounds, keys, sort, and gather (sorted positions and
+    // the row table, or the renumbering on the steps that have one).
     double grid = 0, move = 0, select = 0, split = 0, total = 0;
+    double bounds = 0, keys = 0, sort = 0, gather = 0;
     std::uint64_t steps = 0;
 };
 

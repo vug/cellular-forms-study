@@ -29,6 +29,11 @@ endif()
 option(CF_BUILD_TESTS "Build the tests" ON)
 option(CF_BUILD_CUDA "Build the CUDA backend (needs nvcc)" ON)
 option(CF_BUILD_VIEWER "Build the Vulkan viewer (needs the Vulkan SDK)" ON)
+# Experiments for the speed investigation (docs/progress/PROGRESS.md). Both change results, so
+# neither belongs in a normal build: tests that compare against recorded checksums or against
+# the CPU reference fail with them.
+set(CF_GRID_REFINE "1" CACHE STRING "Experiment: grid cells per radius of influence in the repulsion search (1 = the model)")
+option(CF_CUDA_FMA "Experiment: let nvcc fuse multiply-adds in the CUDA backend" OFF)
 
 # Compile options for our own code (not for third-party code under external/).
 add_library(cf_options INTERFACE)
@@ -51,6 +56,7 @@ file(GLOB CF_CORE_HEADERS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/core/*.hpp)
 add_library(cf_core STATIC ${CF_CORE_SOURCES} ${CF_CORE_HEADERS})
 target_include_directories(cf_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(cf_core PUBLIC Threads::Threads PRIVATE cf_options)
+target_compile_definitions(cf_core PUBLIC CF_GRID_REFINE=${CF_GRID_REFINE})
 
 function(cf_add_app name)
   file(GLOB app_sources CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/apps/${name}/*.cpp)

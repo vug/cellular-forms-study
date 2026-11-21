@@ -179,8 +179,9 @@ int main(int argc, char** argv) {
             } else {
                 const cf::CudaPhaseTimes t = sim.phase_times();
                 const double k = 1000.0 / static_cast<double>(t.steps);
-                std::printf("phase_ms: grid=%.3f move=%.3f select=%.3f split=%.3f total=%.3f\n", t.grid * k, t.move * k, t.select * k, t.split * k,
-                            t.total * k);
+                std::printf("phase_ms: grid=%.3f (bounds=%.3f keys=%.3f sort=%.3f gather=%.3f) move=%.3f select=%.3f split=%.3f total=%.3f", t.grid * k,
+                            t.bounds * k, t.keys * k, t.sort * k, t.gather * k, t.move * k, t.select * k, t.split * k, t.total * k);
+                std::puts("");
             }
         }
         return 0;

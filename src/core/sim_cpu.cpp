@@ -93,7 +93,7 @@ StepReport CpuSim::step() {
     {
         std::uint32_t bad = kInvalid;
         std::string error;
-        if (!grid_.build(s_.pos.data(), n, p.radiusOfInfluence, threads_, bad, error)) {
+        if (!grid_.build(s_.pos.data(), n, p.radiusOfInfluence / static_cast<float>(CF_GRID_REFINE), threads_, bad, error)) {
             rep.status = StepStatus::Failed;
             rep.cell = bad;
             rep.term = bad != kInvalid ? "position" : "grid";

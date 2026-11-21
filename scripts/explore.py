@@ -16,9 +16,16 @@ What it does, in the order of the design document:
   5. Promote:  python scripts/explore.py --out <same dir> --promote <id> --cells 2000000
 
 Every run is one line in <out>/log.jsonl: parameters, seed, code version, outcome, descriptors.
-Only the Python standard library is used. Same --seed, same code, same GPU: same search.
+Only the Python standard library is used. Same --seed, --jobs and code, same GPU: same search.
+
+--jobs N runs N simulations at a time. Small runs spend most of their time waiting on the GPU
+between steps, so several of them overlap well. The search then proceeds in batches of N: the
+N children are drawn from the archive as it was before the batch, and entered in id order.
+A run is dropped as stalled by a step budget (--max-steps), not by the clock, so what a search
+finds does not depend on how busy the machine is.
 """
 import argparse
+import concurrent.futures
 import html
 import json
 import math
@@ -162,11 +169,11 @@ def parse_summary(text):
     return out
 
 
-def run_one(out_dir, run_id, params, seed, cells, max_seconds, level=2):
+def run_one(out_dir, run_id, params, seed, cells, max_seconds, max_steps, level=2):
     run_dir = os.path.join(out_dir, "runs", f"{run_id:05d}")
     os.makedirs(run_dir, exist_ok=True)
     cmd = [tool("cf_gpu"), "--new", f"icosphere:{level}", "--seed", str(seed), "--capacity", str(int(cells * 1.5) + 4096),
-           "--until-cells", str(cells), "--max-seconds", str(max_seconds), "--out", run_dir, "--snapshot-factor", "0", "--checkpoint-factor", "0"]
+           "--until-cells", str(cells), "--until-step", str(max_steps), "--max-seconds", str(max_seconds), "--out", run_dir, "--snapshot-factor", "0", "--checkpoint-factor", "0"]
     for k, v in params.items():
         cmd += ["--param", f"{k}={v:.9g}"]
     t0 = time.time()
@@ -178,7 +185,7 @@ def run_one(out_dir, run_id, params, seed, cells, max_seconds, level=2):
         record["status"] = "broken"
         record["detail"] = (proc.stderr or proc.stdout)[-400:]
     elif summary.get("stop_reason") != "until-cells":
-        record["status"] = "stalled" if summary.get("stop_reason") == "time-budget" else str(summary.get("stop_reason"))
+        record["status"] = "stalled" if summary.get("stop_reason") in ("time-budget", "until-step", "steps") else str(summary.get("stop_reason"))
     else:
         described = subprocess.run([tool("cf_describe"), os.path.join(run_dir, "latest.cfs")], capture_output=True, text=True)
         if described.returncode != 0:
@@ -277,7 +284,9 @@ def main():
     ap.add_argument("--out", required=True, help="output directory (created; a search can be continued in it)")
     ap.add_argument("--runs", type=int, default=100, help="number of runs to add")
     ap.add_argument("--cells", type=int, default=30000, help="cell count every run grows to")
-    ap.add_argument("--max-seconds", type=float, default=12.0, help="time budget per run")
+    ap.add_argument("--max-steps", type=int, default=60000, help="step budget per run; a run that needs more is dropped as stalled")
+    ap.add_argument("--max-seconds", type=float, default=120.0, help="safety net per run, in seconds (the step budget is the real limit)")
+    ap.add_argument("--jobs", type=int, default=1, help="simulations to run at a time")
     ap.add_argument("--seed", type=int, default=1, help="seed of the search itself")
     ap.add_argument("--random-start", type=int, default=40, help="random runs before mutation starts")
     ap.add_argument("--promote", type=int, help="grow run <id> to --cells instead of searching")
@@ -303,38 +312,49 @@ def main():
     counts = {}
     t_start = time.time()
     with open(os.path.join(out_dir, "log.jsonl"), "a", encoding="utf-8") as logfile:
-        for k in range(args.runs):
-            run_id = next_id + k
-            if run_id < args.random_start or not archive:
-                genome, parent = random_genome(rng), None
-            else:
-                parent_entry = rng.choice(sorted(archive.values(), key=lambda e: e["id"]))
-                genome, parent = mutate(rng, parent_entry["genome"]), parent_entry["id"]
-            record, run_dir = run_one(out_dir, run_id, to_params(genome), seed=1 + run_id, cells=args.cells, max_seconds=args.max_seconds)
-            record.update({"genome": genome, "parent": parent, "code": version, "kept": False})
-            counts[record["status"]] = counts.get(record["status"], 0) + 1
-            keep = False
-            if record["status"] == "ok":
-                d = record["descriptors"]
-                record["quality"] = quality(d, record["summary"])
-                key = (bin_of(d["area_ratio"], BINS_AREA), bin_of(d["elongation"], BINS_ELONGATION))
-                record["bin"] = list(key)
-                old = archive.get(key)
-                if old is None or record["quality"] > old["quality"]:
-                    keep = True
-                    if old is not None:
-                        shutil.rmtree(old["run_dir"], ignore_errors=True)  # replaced: its files are no longer needed
-                    archive[key] = {**record, "run_dir": run_dir}
-            record["kept"] = keep
-            if not keep:
-                shutil.rmtree(run_dir, ignore_errors=True)
-            logfile.write(json.dumps(record) + "\n")
-            logfile.flush()
-            if (k + 1) % 10 == 0 or k + 1 == args.runs:
-                print(f"{k + 1}/{args.runs} runs, {len(archive)} archive cells filled, outcomes {counts}, {time.time() - t_start:.0f} s", flush=True)
+        done = 0
+        jobs = max(1, args.jobs)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+            while done < args.runs:
+                # Draw a batch of children from the archive as it is now.
+                batch = []
+                for k in range(done, min(done + jobs, args.runs)):
+                    run_id = next_id + k
+                    if run_id < args.random_start or not archive:
+                        genome, parent = random_genome(rng), None
+                    else:
+                        parent_entry = rng.choice(sorted(archive.values(), key=lambda e: e["id"]))
+                        genome, parent = mutate(rng, parent_entry["genome"]), parent_entry["id"]
+                    future = pool.submit(run_one, out_dir, run_id, to_params(genome), 1 + run_id, args.cells, args.max_seconds, args.max_steps)
+                    batch.append((genome, parent, future))
+                # Enter the results in id order.
+                for genome, parent, future in batch:
+                    record, run_dir = future.result()
+                    record.update({"genome": genome, "parent": parent, "code": version, "kept": False})
+                    counts[record["status"]] = counts.get(record["status"], 0) + 1
+                    keep = False
+                    if record["status"] == "ok":
+                        d = record["descriptors"]
+                        record["quality"] = quality(d, record["summary"])
+                        key = (bin_of(d["area_ratio"], BINS_AREA), bin_of(d["elongation"], BINS_ELONGATION))
+                        record["bin"] = list(key)
+                        old = archive.get(key)
+                        if old is None or record["quality"] > old["quality"]:
+                            keep = True
+                            if old is not None:
+                                shutil.rmtree(old["run_dir"], ignore_errors=True)  # replaced: its files are no longer needed
+                            archive[key] = {**record, "run_dir": run_dir}
+                    record["kept"] = keep
+                    if not keep:
+                        shutil.rmtree(run_dir, ignore_errors=True)
+                    logfile.write(json.dumps(record) + "\n")
+                    logfile.flush()
+                    done += 1
+                    if done % 10 == 0 or done == args.runs:
+                        print(f"{done}/{args.runs} runs, {len(archive)} archive cells filled, outcomes {counts}, {time.time() - t_start:.0f} s", flush=True)
 
     write_atlas(out_dir, archive, args.cells)
-    summary = {"runs_total": next_id + args.runs, "archive_cells_filled": len(archive), "archive_cells": (len(BINS_AREA) - 1) * (len(BINS_ELONGATION) - 1),
+    summary = {"runs_total": next_id + args.runs, "seconds_this_session": round(time.time() - t_start, 1), "jobs": max(1, args.jobs), "archive_cells_filled": len(archive), "archive_cells": (len(BINS_AREA) - 1) * (len(BINS_ELONGATION) - 1),
                "outcomes_this_session": counts, "code": version, "cells": args.cells}
     with open(os.path.join(out_dir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)

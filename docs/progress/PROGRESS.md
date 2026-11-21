@@ -15,8 +15,8 @@ Newest entries at the bottom. Times are local (America/New_York).
 | --- | --- | --- |
 | M1 CPU reference + CLI | exit criteria observed with GCC in the sandbox (cloud session, 00:20); MSVC run on the PC pending | 100,033 cells, 69 invariant checks ok, checksum identical on 4 reruns incl. 1 thread and a 5-part resume; 28/28 tests |
 | M2 Snapshot viewer (Vulkan 1.4) | exit criteria observed (local session, 00:25) | timed scrub of a 100k-cell run, headless captures, validation layer clean; mouse interaction not tried by hand |
-| M3 CUDA backend | in progress (local session) | |
-| M4 Live viewer | not started | blocked (needs M2 + M3) |
+| M3 CUDA backend | exit criteria observed (local session, 00:40) | bit-identical to the CPU reference at every snapshot of a 100k run and in 9 tests; 100M-cell benchmark with 21 invariant checks ok. Open point: the default growth rate compresses the sheet above about 500k cells (see the M3 entry) |
+| M4 Live viewer | exit criteria observed (local session, 00:40) | scripted run: parameters changed mid-run, pause, single steps, reset; no frame over 15 ms, 0 validation errors, CUDA and CPU backends. Not tried by hand |
 | M9 Ports | not started | blocked / last by plan |
 
 ## Decisions made unattended
@@ -460,3 +460,160 @@ What it says, plainly:
   default), or stronger repulsion. I am testing those two next on 100k -> 500k continuations.
 
 ![1M cells](img/m1_1m_seed1.png)
+
+## 2026-11-21 00:40 · Local session: M3 CUDA backend, benchmark to 100M cells
+
+**Built** (`src/cuda`, `apps/cf_gpu`, `tests/cuda`)
+
+- `cf::CudaSim` implements `cf::Simulation`. One step is the CPU pipeline kernel for kernel:
+  food, normals, grid (bounds by CUB transform-reduce, keys, CUB radix sort), move + clamp,
+  candidates, two "max over self and neighbours" rounds, CUB select for the winners, split.
+  The per-cell math is the same code as the CPU (`core/kernels.hpp` included in the `.cu`).
+- Built with `--fmad=false`, so every float operation is one IEEE operation as in the MSVC
+  build of the reference, and the summation order of the repulsion is the same. Result: **the
+  two backends agree bit for bit**, which turns "statistics agree" into a checksum comparison.
+- Asynchronous snapshots: full-state copy on a second CUDA stream into pinned memory while the
+  simulation keeps stepping, then a worker thread runs the invariant checker and statistics
+  and hands the encoded files to `cf::AsyncWriter`. No staging copy on the GPU: positions,
+  normals and food are read from the half of the double buffers that the simulation does not
+  write for one more step, and the simulation waits for the ring copy only if it gets to the
+  next division first.
+- All buffers are allocated once for the capacity (150 bytes per cell). Starting with more
+  than fits in the free GPU memory is refused with a message; reaching the capacity during a
+  run is `StepStatus::CapacityReached` with the state untouched.
+- `cf_gpu`: same run directory as `cf_run`; `--capacity auto`, `--milestones`, `--timing`.
+
+**Verified**
+
+- `cf_cuda_tests`: 9 of 9. Checksums equal the CPU reference at 27 compared steps while growing
+  642 -> 137,842 cells (137,200 divisions), and again with strong repulsion to 156,275 cells;
+  20 asynchronous snapshots each equal the CPU state of their step; reruns identical; capacity
+  (parameter and buffer) and a blow-up stop cleanly with the state unchanged, and both backends
+  name the same failing term; the device division code equals the core functions over 6,000
+  random divisions (both tie-break modes).
+- Whole run, default parameters: `cf_run` and `cf_gpu` with `--new icosphere:2 --seed 1
+  --until-cells 100000`: both stop at step 4,822 with 100,033 cells, and all 11 snapshots have
+  identical checksums, link-length histograms and degree histograms. Final checksum
+  `12cfc7e0294813a9` from the GPU, from the CPU with 32 threads and from the CPU with 7
+  threads. CPU 37.5 s, GPU 1.8 s.
+- That run is also **M1's exit criteria observed on this PC with the MSVC build**: 100k cells
+  under uniform food, invariants ok at every check (58 checks in the 7-thread run), same
+  checksum on every rerun.
+- `cf_tests` 30 of 30 and `cf_cuda_tests` 9 of 9 after the M4 changes.
+
+**Benchmark** (RTX 4090, driver 610.88; default parameters, `icosphere:2`, seed 1; snapshot and
+invariant check at every doubling, running on the worker thread; `--timing` on)
+
+`cf_gpu --new icosphere:2 --seed 1 --capacity 110000000 --until-cells 100000000 --milestones
+1000000,10000000,50000000,100000000 --out runs\bench_100m --checkpoint-factor 0 --no-latest --timing`
+
+| Cells reached | Step | Wall time | ms per step at that size | GPU memory the cells need |
+| --- | --- | --- | --- | --- |
+| 1,000,762 | 6,516 | 3.2 s | 2.6 | 0.14 GiB |
+| 10,009,644 | 8,156 | 25.3 s | 41 | 1.40 GiB |
+| 50,041,537 | 9,311 | 209.6 s | 377 | 6.99 GiB |
+| 100,020,159 | 9,811 | 544.5 s | 962 | 13.97 GiB |
+
+- Peak GPU memory: 15.4 GiB, allocated up front for the 110M-cell capacity (150 bytes per cell).
+  About 135M cells would fit in what CUDA reports free (22.5 GiB), but other programs on this PC
+  hold 6 to 9 GiB of VRAM, so 110M is the safe figure tonight.
+- 21 snapshots, 21 invariant checks, all ok (the 100M check took about 100 s on the worker; the
+  simulation was blocked 3.2 s in total starting snapshots). 652 s including the final check
+  and the 1.1 GB snapshot file.
+- Where the time went: move (links + repulsion) 381 s, selection 79 s, normals 55 s, grid 26 s.
+- The same run before one change took 54 s to reach 4M cells; now 9.8 s. The change: the move
+  kernel walks the cells in grid order, so neighbouring threads search the same grid cells
+  (the result is unchanged; the tests above ran after it).
+
+**The numbers above are for a form that is not healthy at that size. Read this before setting budgets.**
+
+With the default food rate (cell count doubles every 500 steps) the sheet cannot spread as
+fast as it grows once the form is large. From the snapshots of the benchmark run:
+
+| Cells | Mean link length | Fold ratio | Cells hitting the displacement cap |
+| --- | --- | --- | --- |
+| 128k | 1.03 | 0.35 | none |
+| 1.0M | 0.85 | 0.20 | starts (about 2k per step) |
+| 4.1M | 0.75 | 0.16 | about 1.5M per step |
+| 65.6M | 0.57 | 0.08 | about 50M per step |
+
+Topology stays valid throughout (every check passes), but links are compressed to half their
+rest length and most cells move by the cap every step: a dense crumpled ball, not a relaxed
+folded sheet. Model.md section 9 says "link lengths stay near rest length"; that holds up to a
+few hundred thousand cells with the defaults, not beyond.
+
+A run with a quarter of the food rate (`--param foodMax=0.0005`, doubling every 2,000 steps)
+stays healthy further: at 4.0M cells the mean link is 1.02, nothing hits the cap, and a step
+costs 6.5 ms instead of 13.2 ms because cells are not crowded. It needs four times the steps:
+4M cells in 25 s instead of 10 s. The trend there (1.054, 1.042, 1.021 at 1M, 2M, 4M) says it
+will also start compressing somewhere past 10M. Relaxation spreads like diffusion, so the time
+to relax grows with the square of the size while exponential growth keeps the doubling time
+fixed: large forms need a growth rate that falls as they grow. That is a modelling decision
+for Uğur (candidates: a food rate that drops with size, or food that depends on local
+crowding); nothing was changed in the model tonight.
+
+**Not verified / not done**
+
+- Morton renumbering (model.md section 8) is not implemented. Cost per cell rises from 2.6 ns
+  at 1M to 9.6 ns at 100M; part of that is the crowding above, part is memory locality.
+- The pinned-memory path was exercised up to 100M cells (11 GiB pinned); the fallback for when
+  Windows refuses pinned memory is written but did not trigger, so it is untested.
+- One GPU model only.
+
+![100M cells](img/m3_bench_100M_cells.png)
+
+100,020,159 cells (default parameters; compressed, see above). Viewer capture, 6 s to load and render.
+
+![sheet](img/m3_bench_sheet_1M_4M_16M_65M.png)
+
+1.0M, 4.1M, 16.4M and 65.6M cells of the same run.
+
+**Decisions made unattended (local session)**
+
+11. **Bit-exact with the CPU, at a small cost.** `--fmad=false` and the CPU's summation order
+    were kept on purpose. A faster non-matching mode (FMA on, reordered cells) can be added
+    behind a setting later; correctness came first.
+12. **Own runner (`cf_gpu`) instead of a backend switch in `cf_run`.** `cf_run` is the cloud
+    session's file and the GPU runner's snapshot path is different (asynchronous). Both write
+    the same run directory.
+13. **Capacity is allocated up front.** Predictable memory and an orderly refusal at start,
+    instead of growing buffers and failing mid-run.
+
+## 2026-11-21 00:40 · Local session: M4 live viewer
+
+**Built** (`src/viewer/live.*`, `src/viewer/window.cpp`, `src/cuda/interop.*`)
+
+- `cf_view --live`: the simulation runs on its own thread; the window never waits for a step.
+- CUDA backend: three frame slots, each three Vulkan buffers (positions, birth steps, food)
+  created with exportable memory (`VK_KHR_external_memory_win32`) and imported into CUDA
+  (`cudaImportExternalMemory`). The simulation copies device-to-device into the back slot,
+  waits for the copy, then publishes the slot; the renderer switches to the newest published
+  slot at the top of a frame, when its previous frame has finished. Positions never go through
+  the CPU. The hand-off is ordered on the CPU side (stream synchronise before publishing, fence
+  wait before switching), which is the "simplest correct hand-off" HANDOFF.md asked to start
+  with; no external semaphores yet.
+- CPU reference backend through the same three-slot scheme with a host copy.
+- Dear ImGui panel: run / pause, single step, step x100, steps-per-second limit, every model
+  parameter (applied between steps while it runs), defaults, seed, start level, reset, capacity,
+  backend. Rejected parameters, failures and the capacity stop are shown in the panel; the last
+  good state stays on screen.
+- `--live-selftest`: scripts those controls so the exit criterion can be observed unattended.
+
+**Verified**
+
+`cf_view --live-selftest --backend cuda --validate --exit-after 2400`:
+
+- 2,368 frames, mean 4.18 ms, p99 5.8 ms, max 13.5 ms, no frame over 33 ms; 0 validation errors.
+- Parameters changed while running at 27k, 343k and 907k cells; an invalid set (`springFactor`
+  9) was rejected and the run carried on with the old values; pause; exactly 25 single steps;
+  resume; reset with the next seed; two more parameter changes. The run then reached the 2M
+  capacity and stopped with the message in the panel (image below).
+- Same script with `--backend cpu`: pass, max frame 15 ms.
+
+**Not verified**
+
+- Nobody has used it by hand: sliders, buttons and the mouse camera were exercised only through
+  the script and the automatic camera.
+- Live runs above the 2M default capacity. Resizing the window during a live run.
+
+![live viewer](img/m4_live_viewer_cuda.png)

@@ -153,6 +153,13 @@ Window::Window(const ViewOptions& o) : o_(o), playing_(o.play), playFps_(o.playF
     camera_.pitch = o.pitchDeg * kDegToRad;
     if (o.live) {
         uiParams_ = o.liveParams;
+        // The scripted self-test checks pause, single steps and resume on a simulation that is
+        // still growing. Its stages are placed by frame count, so how far the form gets before
+        // them depends on the frame rate and on how fast the backend is; with the default food
+        // rate the CUDA backend now reaches the cell limit first. Unless a food rate was given,
+        // the test starts with slow growth (its reset stage switches to fast growth, and the
+        // run then ends at the limit, which is the other thing the test shows).
+        if (o.liveSelfTest && uiParams_.foodMax == cf::Params{}.foodMax) uiParams_.foodMax = 0.00005f;
         uiLevel_ = o.liveLevel;
         uiSeed_ = static_cast<int>(o.liveSeed);
         uiMaxCells_ = static_cast<int>(o.liveParams.maxCells);

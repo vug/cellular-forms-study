@@ -21,6 +21,7 @@ Newest entries at the bottom. Times are local (America/New_York).
 | M5 Food sources | exit criterion observed (local session, 01:30) | uniform versus light contrast at 600k cells; CUDA equals CPU with every source on; reaction-diffusion and inherited coordinates not built |
 | M7 Rendering modes | done except viewer subsurface scattering (local session, 01:38) | PLY export tested; imported and rendered in Blender 5.2; viewer x-ray and membrane modes render with validation clean |
 | M6 Exploration tools | built and run once (local session, 01:55) | descriptors tested against known shapes; a 320-run MAP-Elites search filled 27 of 48 bins; one form promoted to 1M cells. Picker is a static HTML page |
+| Speed investigation | CUDA backend 2 to 4 times faster, results unchanged (local session, 03:30) | 100M cells in 177 s (545 s before); every checksum identical, including all 21 snapshots of the 100M run; renumbering tested on every step against the CPU. More room listed in the entry |
 | M8 Model extensions | two of the listed extensions (local session, 01:58) | oriented division and field-dependent bulge: CUDA equals CPU bit for bit, default model unchanged. Per-cell inherited parameters, differentiation, morphogens not built |
 
 ## Decisions made unattended
@@ -40,6 +41,19 @@ Newest entries at the bottom. Times are local (America/New_York).
 4. **Paper copy not saved.** `andylomas.com` is not reachable from either shell this session
    has (proxy allow-list), so `docs/paper/` is still empty. The paper was read through the web
    fetch tool and agrees with `docs/model.md` sections 2 and 3.
+5. **The CUDA backend keeps its cells in another order than their ids** (local session, 03:30
+   entry). Ids are permanent and everything visible goes by id, so results are unchanged; it
+   is 8 more bytes per cell (158), which lowers the largest form that fits by 5%. Chosen
+   because it is worth up to 1.7 times at 10M cells and cannot be seen from outside.
+   `CudaOptions::renumberMinCells = 0xFFFFFFFF` switches it off.
+6. **Speed-ups went into the shared kernel, not into a CUDA-only copy** (`src/core/kernels.hpp`,
+   `food_update` gained an id argument). One definition of the arithmetic is what keeps the
+   backends bit-identical; the CPU reference was checked not to get slower (it got 3% faster).
+7. **No change that alters results was adopted.** Fused multiply-add and a finer search grid
+   are in the build as experiments (`CF_CUDA_FMA`, `CF_GRID_REFINE`), both off.
+8. **`scripts/explore.py` drops a run by a step budget (60,000 steps), not a time budget**, so a
+   search finds the same forms whatever else the machine is doing. Searches made before this
+   (`runs\explore\night1`) used the 12-second budget.
 
 ## 2026-11-20 23:40 · Toolchain check
 
@@ -1090,3 +1104,156 @@ Run 304 promoted to 1M cells, coloured by age.
 
 400k cells each. Left: oriented division along the vertical axis. Middle: oriented division
 along x with light from above. Right: field-dependent bulge.
+
+## 2026-11-21 03:30 · Local session: speed investigation (CUDA backend)
+
+Uğur asked: investigate ways to make the evolution run as fast as possible, and see whether
+there is room for improvement. Short answer: yes. The CUDA backend is now 2 to 4 times faster
+than at 01:55, with **every result unchanged** (same checksums as before and as the CPU
+reference), and there is more room, listed at the end.
+
+![speed-up](img/perf_speedup.svg)
+
+**How it was measured**
+
+- `cf_bench <checkpoint> --steps 100 --warmup 10` (new, `apps/cf_bench`): times the step on a
+  fixed checkpoint and prints the checksum of the state after the run, so a change that claims
+  to keep the result is held to it. Checkpoints in `runs\perf`: 1M, 10M and 40M cells grown
+  with the default food rate (a compressed sheet: at 10M half the cells hit the displacement
+  cap every step), and 1M and 10M grown with the crowding limit (`crowdLow=0.9`,
+  `crowdHigh=1.05`: a healthy sheet, no cell clamped).
+- Full growth runs with `cf_gpu`, including the 100M-cell benchmark of the M3 entry, repeated
+  with the same command.
+
+**Result**
+
+| | 01:55 | now | times faster |
+|---|---|---|---|
+| One step at 1M cells, default food | 2.50 ms | 0.95 ms | 2.6 |
+| One step at 10M cells, default food | 40.7 ms | 15.4 ms | 2.6 |
+| One step at 40M cells, default food | 291 ms | 105 ms | 2.8 |
+| One step at 1M cells, crowding limit | 1.94 ms | 0.81 ms | 2.4 |
+| One step at 10M cells, crowding limit | 35.8 ms | 8.6 ms | 4.2 |
+| Grow to 1M cells, default food | 3.18 s | 1.62 s | 2.0 |
+| Grow to 10M | 25.3 s | 9.41 s | 2.7 |
+| Grow to 50M | 209.6 s | 68.0 s | 3.1 |
+| Grow to 100M | 544.5 s | 176.8 s | 3.1 |
+| Grow to 1M cells, crowding limit | 3.54 s | 1.80 s | 2.0 |
+| Grow to 10M cells, crowding limit | 64.5 s | 21.3 s | 3.0 |
+
+Per step at 10M cells, after each change (default food / crowding limit, in ms):
+
+| Change | default | crowding |
+|---|---|---|
+| Start | 40.7 | 35.8 |
+| Fewer passes over the cells: the normal is computed in the move pass; the independent set is found from the candidates' two-link neighbourhoods instead of two passes over every cell; food merged into the candidate pass; a row table for the grid search | 33.1 | 24.3 |
+| Renumbering: cells are moved into spatial order in memory from time to time | 28.3 | 14.4 |
+| The "is this a linked neighbour" test on local copies of the ring instead of reading the ring from memory for every nearby cell; exact multiplication instead of division by roi² | 17.3 | 9.9 |
+| Distance-test 32 candidates into a bit mask first, then do the full work only for the hits | 16.0 | 8.5 |
+| One wait on the GPU per step instead of two, and fewer kernels | 15.4 | 8.6 |
+
+What these are, briefly:
+
+- **Renumbering.** A cell's data sat at the index of its id, and ids have nothing to do with
+  where a cell is in space, so every look at a neighbour was a random read. Now every cell
+  keeps its id for life but lives in a slot, and when the form has grown by 5% the backend
+  moves all cells into the order of the search grid. Random numbers, division order, the
+  grid's tie order, downloads, snapshots and failure reports all go by id, so nothing outside
+  the backend can tell. It costs 8 more bytes per cell (158 instead of 150) and no scratch
+  memory (the neighbour rings are parked in spare halves of existing buffers while they move).
+- **The two changes in the repulsion loop** came from profiling, after two of my guesses were
+  wrong. Switching parts of the move pass off one at a time (temporary code, not kept) showed
+  that the neighbour search itself was cheap; half of the pass was the test "is this nearby
+  cell one of my linked neighbours", which read the ring from memory each time. The other
+  finding is specific to GPUs: the 32 threads of a warp walk a run of candidates together, so
+  the expensive in-range work ran for nearly every candidate, because nearly always some
+  thread had it in range. Both fixes are in the kernel the CPU reference shares
+  (`src/core/kernels.hpp`), and the order of the sum is kept, so results are bit-identical.
+- **Small forms** are not limited by work but by a fixed cost per step: about 20 kernels and
+  one wait. That is now 0.12 ms per step (0.14 earlier tonight); growing to 30,000 cells, the size the
+  parameter search uses, takes 0.48 s, and a 60-run search takes 31 s (0.52 s per run; the
+  320-run search of the M6 entry took 1.12 s per run).
+
+**Verified**
+
+- `cf_tests` 49 of 49: the golden checksum of the default model is unchanged (the CPU reference
+  runs the changed kernel), and the CPU run to 100,033 cells still ends on `12cfc7e0294813a9`.
+- `cf_cuda_tests` 22 of 22, 5 of them new: the row table on and off; and renumbering forced on
+  **every step from the first cell on**, compared with the CPU reference bit for bit: the plain
+  model; every food source plus both model extensions; 21 asynchronous snapshots; a capacity
+  stop and a blow-up, which must leave the state untouched and name the same cell as the CPU.
+- `cf_bench`: the checksum after 110 steps is the same at every stage above, on all five
+  checkpoints.
+- The 100M-cell run, twice (after the renumbering change and at the end): same steps and cell
+  counts at every milestone, and all 21 snapshot checksums equal those of the 00:40 run, up to
+  100,020,159 cells (`895b00046dd777b3`); 21 invariant checks ok.
+- The renumbering policy does not matter much: growth thresholds from 1% to 25% give step
+  times within 5% of each other, and identical checksums.
+- `cf_vkc --verify 10 --steps 300`: the Vulkan compute backend still agrees with the CPU.
+- `cf_view --live-selftest --backend cuda --validate`: pass, 0 validation errors (see the note
+  on the self-test below).
+- CPU reference, 100k-cell run: 18.0 s, against 18.5 s built from the commit before this work.
+
+**Tried and not adopted** (all measured at 10M cells)
+
+- Skipping grid cells that are out of reach of the cell, per thread, with the runs walked in
+  one flat loop: slower (move pass 36.8 ms against 28.2 ms). It breaks the lockstep of a warp,
+  so threads stop sharing memory reads. The result stayed bit-identical; the code is not kept.
+- Fused multiply-add (`-DCF_CUDA_FMA=ON`): 1% or less, and results then differ from the CPU.
+- Search grid cells of half the size, 125 cells searched instead of 27
+  (`-DCF_GRID_REFINE=2`): 4% with default food, 0% with the crowding limit, and every checksum
+  changes. Measured before the loop was restructured; not measured again after.
+- 64 or 16 candidates per mask instead of 32: both slower.
+- Several search runs at once (`explore.py --jobs`): slower on one GPU (60 runs in 48 s with
+  6 at a time, 35 s one at a time; separate processes take turns on the GPU). The option is
+  kept, default 1.
+- The CPU reference for tiny forms: slower than the GPU's fixed cost at every size (0.16 ms
+  per step averaged up to 1,000 cells, one thread).
+
+**Where the time goes now, and the room that is left**
+
+At 10M cells a step is 15.4 ms with default food (move pass 12.5, grid 2.6, food and division
+0.8) and 8.6 ms with the crowding limit (move 4.9, grid 2.4, food and division 1.4). In the
+100M run the move pass is 152 of 175 s.
+
+1. **The food rate is worth as much as the code.** A step on the compressed sheet that the
+   default rate produces costs 1.8 times a step on a healthy sheet of the same size, because
+   every cell has more cells within the radius of influence. This is the open point of the M3
+   entry seen from the cost side.
+2. **Small forms and the search.** Below about 100k cells the step is all fixed cost. Getting
+   under 0.1 ms per step needs several steps per round trip, which means the step count,
+   the cell count and the grid size have to live on the device, and the library sort, select
+   and reduce calls (which take their sizes from the host) have to be padded or replaced. I
+   estimate 2 to 3 times for 30k-cell runs. Not started; it is a redesign of the step driver.
+3. **The grid** is 17 to 28% of a step. The key pass reads positions in id order, which is a
+   random read once cells are renumbered (0.9 to 1.0 ms at 10M); a pass in slot order plus a
+   reorder inside each grid cell would avoid that. Sort keys of 32 bits when the grid fits
+   would speed up the sort. Together perhaps 5 to 8% in the healthy case. Not done.
+4. **The move pass** is still the largest part. What is left in it is the arithmetic for
+   cells in range (a square root and a division each) and the distance tests. Doing better
+   needs fewer candidates, and that needs freedom to visit them in another order, which the
+   model's fixed summation order does not give. Summing in an order-independent way (for
+   example in fixed point) would give that freedom to every backend, at the price of changing
+   every checksum once. That is a change to the model definition, so it is a decision for
+   Uğur; the one measurement I have (half-size grid cells, above) says the gain may be small.
+5. **The ports.** None of this is in the Vulkan compute or WebGPU backends. Their shader loops
+   have the same shape, so the ring test and the mask loop should carry over. Not measured.
+
+**Not verified**
+
+- Frame times of the live viewer after these changes. Tonight every frame is paced at exactly
+  20.0 ms whatever the load (4.2 ms in the 00:40 test); I believe the display has gone to
+  sleep, but I did not confirm that. The self-test's control checks pass on both backends; on
+  the CPU backend 2 of 449 frames were over 33 ms under this pacing. Please run
+  `cf_view --live-selftest` once with the display on.
+- The WebGPU page was not run again (its code did not change, and the CPU results it is
+  verified against are unchanged).
+- Renumbering on another GPU or driver, and at cell counts above 100M.
+- The crowding-limit runs above 10M cells were not benchmarked.
+
+**The live self-test changed.** Its stages are placed by frame count. With the faster backend
+(and the slower frames tonight) the simulation reached the 2M cell limit before the stage that
+checks pause and single steps, so the check failed for a reason that has nothing to do with
+the controls. The test now starts with slow growth (`foodMax = 0.00005`) unless a food rate
+is given; its reset stage switches to fast growth as before, and the run still ends at the
+limit.

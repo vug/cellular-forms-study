@@ -18,9 +18,10 @@ What it does, in the order of the design document:
 Every run is one line in <out>/log.jsonl: parameters, seed, code version, outcome, descriptors.
 Only the Python standard library is used. Same --seed, --jobs and code, same GPU: same search.
 
---jobs N runs N simulations at a time. Small runs spend most of their time waiting on the GPU
-between steps, so several of them overlap well. The search then proceeds in batches of N: the
-N children are drawn from the archive as it was before the batch, and entered in id order.
+--jobs N runs N simulations at a time, in batches: the N children are drawn from the archive as
+it was before the batch, and entered in id order. On one GPU this measured slower than one at a
+time (60 runs: 35 s with --jobs 1, 48 s with --jobs 6; separate processes take turns on the GPU),
+so the default is 1; it is there for machines with more than one GPU or for a CPU backend.
 A run is dropped as stalled by a step budget (--max-steps), not by the clock, so what a search
 finds does not depend on how busy the machine is.
 """
@@ -286,7 +287,7 @@ def main():
     ap.add_argument("--cells", type=int, default=30000, help="cell count every run grows to")
     ap.add_argument("--max-steps", type=int, default=60000, help="step budget per run; a run that needs more is dropped as stalled")
     ap.add_argument("--max-seconds", type=float, default=120.0, help="safety net per run, in seconds (the step budget is the real limit)")
-    ap.add_argument("--jobs", type=int, default=1, help="simulations to run at a time")
+    ap.add_argument("--jobs", type=int, default=1, help="simulations to run at a time (slower than 1 on a single GPU; see the top of this file)")
     ap.add_argument("--seed", type=int, default=1, help="seed of the search itself")
     ap.add_argument("--random-start", type=int, default=40, help="random runs before mutation starts")
     ap.add_argument("--promote", type=int, help="grow run <id> to --cells instead of searching")

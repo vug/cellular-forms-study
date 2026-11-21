@@ -1,0 +1,1919 @@
+<title>Form Atlas</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600&display=swap">
+<style>
+/* Layout: a specimen catalogue. One sticky bar of views, one filter row shared by gallery, map and
+   table, then the working surface; the record of a run slides in over whatever is open. */
+:root {
+  --bg: #f1f2f5; --surface: #fbfbfc; --well: #e7e9ee; --ink: #161920; --ink-2: #464d5b; --muted: #636b7a;
+  --line: #d9dce3; --line-2: #bcc2cc; --accent: #2c4c9c; --accent-soft: #e1e7f6; --on-accent: #ffffff;
+  --star: #b97700; --plate: #5a5f6b; --plate-ink: #eceef2; --plate-shade: rgba(15, 17, 21, 0.7);
+  --scrim: rgba(20, 23, 30, 0.5); --shadow: 0 8px 30px rgba(20, 23, 30, 0.18);
+  /* marks: categorical slots, ordinal and sequential blue, diverging poles, run status */
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948; --other: #8a909c;
+  --o1: #86b6ef; --o2: #5598e7; --o3: #2a78d6; --o4: #1c5cab; --o5: #104281; --o1-ink: #0b0b0b; --o3-ink: #ffffff; --o5-ink: #ffffff;
+  --q0: #9ec5f4; --q1: #5598e7; --q2: #2a78d6; --q3: #1c5cab; --q4: #0d366b;
+  --pos: #2a78d6; --neg: #e34948; --grid: #e4e6eb; --axis: #bcc2cc;
+  --st-ok: #7d8492; --st-stalled: #eda100; --st-broken: #d03b3b;
+  --font: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --cond: "IBM Plex Sans Condensed", "IBM Plex Sans", "Arial Narrow", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1115; --surface: #181b21; --well: #23272f; --ink: #eceef2; --ink-2: #b8bfca; --muted: #8d95a3;
+    --line: #2a2f38; --line-2: #3d434e; --accent: #9db5f0; --accent-soft: #232c44; --on-accent: #10141f;
+    --star: #e0a526; --plate: #5a5f6b; --plate-ink: #eceef2; --plate-shade: rgba(15, 17, 21, 0.7);
+    --scrim: rgba(0, 0, 0, 0.6); --shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #0ca30c; --s7: #9085e9; --s8: #e66767; --other: #7b8290;
+    --o1: #184f95; --o2: #256abf; --o3: #3987e5; --o4: #6da7ec; --o5: #9ec5f4; --o1-ink: #ffffff; --o3-ink: #ffffff; --o5-ink: #0b0b0b;
+    --q0: #184f95; --q1: #256abf; --q2: #3987e5; --q3: #6da7ec; --q4: #cde2fb;
+    --pos: #3987e5; --neg: #e66767; --grid: #262a33; --axis: #3d434e;
+    --st-ok: #8d95a3; --st-stalled: #c98500; --st-broken: #d03b3b;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1115; --surface: #181b21; --well: #23272f; --ink: #eceef2; --ink-2: #b8bfca; --muted: #8d95a3;
+  --line: #2a2f38; --line-2: #3d434e; --accent: #9db5f0; --accent-soft: #232c44; --on-accent: #10141f;
+  --star: #e0a526; --plate: #5a5f6b; --plate-ink: #eceef2; --plate-shade: rgba(15, 17, 21, 0.7);
+  --scrim: rgba(0, 0, 0, 0.6); --shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #0ca30c; --s7: #9085e9; --s8: #e66767; --other: #7b8290;
+  --o1: #184f95; --o2: #256abf; --o3: #3987e5; --o4: #6da7ec; --o5: #9ec5f4; --o1-ink: #ffffff; --o3-ink: #ffffff; --o5-ink: #0b0b0b;
+  --q0: #184f95; --q1: #256abf; --q2: #3987e5; --q3: #6da7ec; --q4: #cde2fb;
+  --pos: #3987e5; --neg: #e66767; --grid: #262a33; --axis: #3d434e;
+  --st-ok: #8d95a3; --st-stalled: #c98500; --st-broken: #d03b3b;
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 14px/1.45 var(--font); -webkit-text-size-adjust: 100%; }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 30; background: var(--surface); }
+html.locked, html.locked body { overflow: hidden; }
+button, input, select, textarea { font: inherit; color: inherit; }
+h1, h2, h3, h4, p, dl, dd, figure { margin: 0; }
+a { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.wrap { max-width: 1480px; margin-inline: auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.mono { font-family: var(--mono); }
+.muted { color: var(--muted); }
+.empty { color: var(--ink-2); padding: 28px 0; max-width: 60ch; }
+
+/* controls */
+.btn { appearance: none; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); border-radius: 6px; padding: 6px 10px; min-height: 32px; cursor: pointer; line-height: 1.2; white-space: nowrap; }
+.btn:hover { background: var(--well); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn.quiet { border-color: transparent; background: transparent; color: var(--ink-2); }
+.btn.quiet:hover { background: var(--well); }
+.btn:disabled { opacity: 0.45; cursor: default; }
+.inp { border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); border-radius: 6px; padding: 5px 8px; min-height: 32px; min-width: 0; }
+select.inp { padding-right: 4px; max-width: 100%; }
+label.lab { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); min-width: 0; }
+label.chk { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-2); cursor: pointer; }
+.pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+.pill i { width: 7px; height: 7px; border-radius: 50%; background: var(--st-ok); flex: none; }
+.pill.st-stoppedearly i { background: var(--s1); border-radius: 1px; }
+.pill.st-stalled i { background: var(--st-stalled); }
+.pill.st-broken i { background: var(--st-broken); }
+@media (max-width: 759px) { input, select, textarea { font-size: 16px; } }
+
+/* top bar */
+.bar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20; background: var(--surface); border-bottom: 1px solid var(--line); }
+.bar-in { display: flex; flex-wrap: wrap; align-items: center; gap: 0 18px; padding-top: 6px; }
+.brand { font: 600 17px/1 var(--cond); letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink); text-decoration: none; padding: 8px 0; }
+.tabs { display: flex; gap: 2px; order: 3; flex-basis: 100%; overflow-x: auto; scrollbar-width: none; }
+.tabs a { padding: 8px 11px 9px; color: var(--ink-2); text-decoration: none; border-bottom: 2px solid transparent; white-space: nowrap; font-weight: 500; }
+.tabs a:hover { color: var(--ink); }
+.tabs a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--accent); }
+.bar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12.5px; color: var(--ink-2); }
+#meta { white-space: nowrap; }
+.save { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.save i { width: 8px; height: 8px; border-radius: 50%; background: var(--line-2); flex: none; }
+.save.ok i { background: var(--s3); }
+.save.busy i { background: var(--s4); }
+.save.err i { background: var(--st-broken); }
+.save.err { color: var(--ink); }
+@media (min-width: 900px) { .tabs { order: 0; flex-basis: auto; } .bar-in { padding-top: 0; } }
+@media (max-width: 619px) { #meta { display: none; } }
+
+/* filters */
+.filters { padding-block: 12px 2px; display: grid; gap: 8px; }
+.f-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+#f-q { flex: 1 1 200px; max-width: 420px; }
+.f-count { margin-left: auto; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.f-count b { color: var(--ink); font-weight: 600; }
+.f-more { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.chips .cl { color: var(--muted); font-size: 12.5px; margin-right: 2px; }
+.chip { appearance: none; border: 1px solid var(--line-2); background: transparent; border-radius: 999px; padding: 3px 10px; min-height: 28px; cursor: pointer; color: var(--ink-2); font-size: 13px; }
+.chip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--ink); }
+.f-metric { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: var(--muted); font-size: 12.5px; }
+.f-metric input { width: 96px; }
+@media (max-width: 759px) {
+  .f-more { display: grid; grid-template-columns: 1fr 1fr; }
+  .f-more:not(.open) { display: none; }
+  .f-more > select { width: 100%; }
+  .f-more .chips, .f-more .f-metric { grid-column: 1 / -1; }
+  .f-metric select { flex: 1 1 100%; }
+  .f-metric input { flex: 1 1 80px; width: auto; }
+}
+@media (min-width: 760px) { #f-toggle { display: none; } }
+
+main { padding-block: 4px 48px; }
+.tools { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding-block: 8px 10px; }
+.tools .right { margin-left: auto; color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.note { color: var(--muted); font-size: 12.5px; max-width: 80ch; }
+
+/* pictures */
+.thumb { display: block; position: relative; aspect-ratio: 4 / 3; width: 100%; max-width: 100%; background-color: var(--plate); background-repeat: no-repeat; border-radius: 4px; color: var(--plate-ink); }
+.thumb.none { display: grid; place-items: center; font-size: 11px; line-height: 1.2; text-align: center; padding: 4px; }
+.flag { position: absolute; left: 4px; top: 4px; font: 500 10.5px/1 var(--cond); letter-spacing: 0.05em; text-transform: uppercase; background: var(--plate-shade); color: var(--plate-ink); padding: 3px 5px; border-radius: 3px; }
+
+/* gallery */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 14px 10px; }
+.card { appearance: none; border: 0; background: none; padding: 0; text-align: left; cursor: pointer; display: grid; gap: 4px; min-width: 0; color: inherit; align-content: start; }
+.card:hover .thumb, .card:focus-visible .thumb { outline: 2px solid var(--accent); outline-offset: 1px; }
+.card:focus-visible { outline: none; }
+.cap { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+.id { font: 500 13px var(--mono); }
+.stars { color: var(--star); font-size: 12px; letter-spacing: 1px; white-space: nowrap; }
+.val { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0 6px; font-size: 12px; color: var(--muted); min-width: 0; }
+.val .vv { color: var(--ink-2); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.more { display: flex; justify-content: center; padding: 18px 0 0; }
+
+/* map */
+.plot { position: relative; height: clamp(300px, min(66vh, 105vw), 700px); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; touch-action: manipulation; }
+.plot canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.pcard { position: absolute; z-index: 2; width: 236px; display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 8px; padding: 8px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 8px; box-shadow: var(--shadow); pointer-events: none; font-size: 12px; line-height: 1.35; }
+.pcard.pinned { pointer-events: auto; }
+.pcard .t { font: 600 13px var(--mono); }
+.pcard .kv { display: flex; justify-content: space-between; gap: 6px; color: var(--muted); }
+.pcard .kv b { color: var(--ink); font-weight: 500; font-family: var(--mono); }
+.pcard .btn { grid-column: 1 / -1; }
+.legend { display: flex; flex-wrap: wrap; gap: 2px 4px; padding-block: 8px 2px; align-items: center; font-size: 13px; color: var(--ink-2); }
+.legend .lt { color: var(--muted); margin-right: 4px; }
+.lg { appearance: none; display: inline-flex; align-items: center; gap: 6px; border: 1px solid transparent; background: none; border-radius: 6px; padding: 3px 8px; min-height: 28px; cursor: pointer; color: var(--ink-2); font-size: 13px; }
+.lg:hover { background: var(--well); }
+.lg[aria-pressed="true"] { border-color: var(--line-2); background: var(--well); color: var(--ink); }
+.lg .n { color: var(--muted); font-variant-numeric: tabular-nums; }
+.lg svg, .key svg { flex: none; }
+.ramp { height: 10px; width: 160px; max-width: 40vw; border-radius: 3px; background: linear-gradient(90deg, var(--q0), var(--q1), var(--q2), var(--q3), var(--q4)); margin: 0 6px; }
+
+/* table */
+.t-scroll { overflow: auto; max-height: 76vh; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+table.db { border-collapse: separate; border-spacing: 0; font-size: 12.5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.db th, .db td { padding: 5px 9px; border-bottom: 1px solid var(--line); text-align: left; background: var(--surface); }
+.db td.num, .db th.num { text-align: right; }
+.db td.num { font-family: var(--mono); }
+.db thead th { position: sticky; z-index: 2; font: 600 12px/1.2 var(--cond); letter-spacing: 0.03em; color: var(--ink-2); }
+.db thead tr.grp th { top: 0; height: 24px; padding-block: 0; text-transform: uppercase; font-size: 10.5px; letter-spacing: 0.08em; color: var(--muted); border-bottom: 0; }
+.db thead tr.col th { top: 24px; padding: 0; border-bottom: 1px solid var(--line-2); }
+.db thead th button { appearance: none; border: 0; background: none; font: inherit; letter-spacing: inherit; color: inherit; cursor: pointer; padding: 6px 9px; width: 100%; text-align: inherit; white-space: nowrap; }
+.db thead th button:hover { color: var(--ink); }
+.db thead th[aria-sort] button { color: var(--ink); }
+.db th.c-id, .db td.c-id { position: sticky; left: 0; z-index: 1; border-right: 1px solid var(--line); }
+.db thead th.c-id { z-index: 3; }
+.db tbody tr { cursor: pointer; }
+.db tbody tr:hover td { background: var(--well); }
+.db tbody tr:focus-visible { outline-offset: -2px; }
+details.pick { position: relative; }
+details.pick > summary { cursor: pointer; list-style: none; }
+details.pick > summary::-webkit-details-marker { display: none; }
+.pick-list { position: absolute; z-index: 10; top: calc(100% + 4px); left: 0; width: min(520px, calc(100vw - 32px)); max-height: 50vh; overflow: auto; background: var(--surface); border: 1px solid var(--line-2); border-radius: 8px; box-shadow: var(--shadow); padding: 10px 12px; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px 12px; }
+.pick-list label { display: flex; gap: 6px; align-items: center; font: 12.5px var(--mono); cursor: pointer; }
+
+/* kinds */
+.kinds { display: grid; gap: 14px; }
+.kind { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px 16px; display: grid; gap: 12px; }
+.kind-head { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+.kind-name { font-weight: 600; font-size: 16px; flex: 1 1 220px; max-width: 360px; }
+.kind-head .work { color: var(--ink-2); }
+.kind-head .cnt { color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.kind-head .sv { font-size: 12.5px; color: var(--muted); }
+.kind-body { display: grid; grid-template-columns: minmax(0, 300px) minmax(0, 1fr); gap: 18px; align-items: start; }
+.kind-body .typ { appearance: none; border: 0; background: none; padding: 0; cursor: pointer; display: grid; gap: 4px; text-align: left; color: var(--muted); font-size: 12.5px; }
+.kind-side { display: grid; gap: 12px; min-width: 0; }
+.strip { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; max-width: 760px; }
+.strip button { appearance: none; border: 0; background: none; padding: 0; cursor: pointer; display: grid; gap: 2px; font: 11px var(--mono); color: var(--muted); text-align: left; }
+.strip button:hover .thumb, .typ:hover .thumb { outline: 2px solid var(--accent); outline-offset: 1px; }
+h4.sub { font: 600 11px/1.2 var(--cond); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+.apart { display: grid; gap: 4px; }
+.frow { display: grid; grid-template-columns: minmax(110px, 190px) 120px 52px minmax(0, 1fr); gap: 10px; align-items: center; font-size: 13px; }
+.frow .fa { color: var(--muted); font-size: 12.5px; }
+.frow .fv { font-family: var(--mono); text-align: right; font-variant-numeric: tabular-nums; }
+.dv { position: relative; height: 8px; background: var(--well); border-radius: 2px; }
+.dv::after { content: ""; position: absolute; left: 50%; top: -3px; bottom: -3px; width: 1px; background: var(--axis); }
+.dv i { position: absolute; top: 0; bottom: 0; background: var(--pos); border-radius: 0 3px 3px 0; left: 50%; }
+.dv i.neg { background: var(--neg); border-radius: 3px 0 0 3px; left: auto; right: 50%; }
+@media (max-width: 759px) {
+  .strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .kind-body { grid-template-columns: 1fr; }
+  .frow { grid-template-columns: minmax(0, 1fr) 90px 52px; }
+  .frow .fa { grid-column: 1 / -1; margin-top: -4px; }
+}
+
+/* early stop */
+.stop { display: grid; gap: 22px; }
+.stop p.lead { max-width: 76ch; color: var(--ink-2); }
+.stop h3, .sec h3 { font: 600 12px/1.2 var(--cond); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2); margin-bottom: 10px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.tile { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+.tile .v { font-weight: 600; font-size: 28px; line-height: 1.15; }
+.tile .l { color: var(--ink-2); }
+.tile .s { color: var(--muted); font-size: 12.5px; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; min-width: 0; }
+.segs { display: grid; gap: 10px; }
+.segrow { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 10px; align-items: center; }
+.seg { display: flex; gap: 2px; height: 28px; }
+.sg { border-radius: 4px; min-width: 3px; display: flex; align-items: center; padding-left: 7px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.sg.a { background: var(--o1); color: var(--o1-ink); } .sg.b { background: var(--o3); color: var(--o3-ink); } .sg.c { background: var(--o5); color: var(--o5-ink); } .sg.d { background: var(--well); color: var(--ink-2); }
+.keys { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; color: var(--ink-2); margin-top: 10px; }
+.key { display: inline-flex; align-items: center; gap: 6px; }
+.key i { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+.key i.ln { height: 2px; border-radius: 1px; width: 16px; }
+.scroll-x { overflow-x: auto; }
+table.plain { border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+.plain th, .plain td { padding: 5px 12px 5px 0; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.plain th { font: 600 12px var(--cond); letter-spacing: 0.03em; color: var(--ink-2); }
+.plain td.num, .plain th.num { text-align: right; font-family: var(--mono); }
+.plain th.num { font-family: var(--cond); }
+.wcell { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.wcell .dv { width: 84px; flex: none; }
+.wcell span { width: 46px; text-align: right; font-family: var(--mono); }
+.picks { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px 10px; }
+.picks .card { font-size: 12px; color: var(--muted); }
+.picks.six { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+@media (max-width: 759px) { .picks.six { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.cmd span { white-space: nowrap; }
+@media (max-width: 559px) { .segrow { grid-template-columns: 1fr; gap: 4px; } }
+
+/* run record */
+.detail { position: fixed; inset: 0; z-index: 50; }
+.scrim { position: absolute; inset: 0; background: var(--scrim); }
+.sheet { position: absolute; top: 0; right: 0; bottom: 0; width: min(880px, 100%); background: var(--surface); box-shadow: var(--shadow); display: flex; flex-direction: column; outline: none; }
+.d-head { flex: none; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); padding: calc(8px + env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) 8px max(16px, env(safe-area-inset-left, 0px)); }
+.d-head .d-pos { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; min-width: 0; }
+.d-head .d-close { margin-left: auto; }
+.d-body { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 14px max(16px, env(safe-area-inset-right, 0px)) calc(32px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); display: grid; gap: 0; align-content: start; }
+.d-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; padding-bottom: 12px; }
+.d-title h2 { font: 600 22px/1.1 var(--font); }
+.d-title h2 span { font-family: var(--mono); font-weight: 500; }
+.d-top { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 300px); gap: 16px; padding-bottom: 16px; }
+.pics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; align-content: start; }
+.pics.one { grid-template-columns: minmax(0, 1fr); max-width: 400px; }
+.pics img { display: block; width: 100%; height: auto; aspect-ratio: 4 / 3; background: var(--plate); border-radius: 4px; }
+.pics .cap2 { grid-column: 1 / -1; font-size: 12px; color: var(--muted); }
+.rate-box { display: grid; gap: 10px; align-content: start; min-width: 0; }
+.rate { display: flex; align-items: center; gap: 0; flex-wrap: wrap; }
+.starb { appearance: none; border: 0; background: none; font-size: 27px; line-height: 1; padding: 4px 3px; min-width: 36px; min-height: 36px; color: var(--line-2); cursor: pointer; border-radius: 6px; }
+.starb.on { color: var(--star); }
+.starb:disabled, .rate-box :disabled { cursor: default; }
+.field { display: grid; gap: 3px; min-width: 0; }
+.field > span { font-size: 12px; color: var(--muted); }
+.field textarea { resize: vertical; min-height: 64px; line-height: 1.4; }
+.d-save { font-size: 12.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.d-save.err { color: var(--ink); }
+.sec { border-top: 1px solid var(--line); padding: 14px 0 16px; min-width: 0; }
+dl.facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px 16px; }
+dl.facts dt { font-size: 12px; color: var(--muted); }
+dl.facts dd { overflow-wrap: anywhere; }
+.linkb { appearance: none; border: 0; background: none; padding: 0; color: var(--accent); cursor: pointer; text-decoration: underline; font: inherit; }
+.params { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0 22px; }
+.prow { display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--line); padding: 3px 0; font: 12.5px var(--mono); }
+.prow span { color: var(--ink-2); overflow-wrap: anywhere; }
+.charts { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; }
+.chart { min-width: 0; }
+.chart svg { display: block; max-width: 100%; }
+.chart svg text { font: 11px var(--font); fill: var(--muted); }
+.chart svg text.lb { fill: var(--ink-2); }
+.chart svg text.vl { fill: var(--ink); font-family: var(--mono); font-size: 10.5px; }
+.chart h4 { font: 600 13px var(--font); margin-bottom: 2px; }
+.chart .cs { color: var(--muted); font-size: 12.5px; margin-bottom: 6px; max-width: 70ch; }
+details.nums { margin-top: 6px; font-size: 12.5px; }
+details.nums summary { cursor: pointer; color: var(--ink-2); }
+.mgroup { margin-top: 12px; }
+.mgroup:first-of-type { margin-top: 0; }
+.mrow { display: grid; grid-template-columns: minmax(120px, 172px) 82px 64px minmax(0, 1fr); gap: 10px; align-items: baseline; padding: 4px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.mrow .mk { font: 12.5px var(--mono); overflow-wrap: anywhere; }
+.mrow .mv { font: 500 12.5px var(--mono); text-align: right; font-variant-numeric: tabular-nums; }
+.mrow .ma { color: var(--muted); font-size: 12.5px; }
+.pct { position: relative; height: 6px; background: var(--well); border-radius: 3px; align-self: center; }
+.pct i { position: absolute; top: -3px; width: 2px; height: 12px; margin-left: -1px; background: var(--ink-2); border-radius: 1px; }
+.cmd { font: 12px/1.5 var(--mono); background: var(--well); border-radius: 6px; padding: 10px 12px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.cmd-row { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 8px; }
+.tip { position: fixed; z-index: 90; pointer-events: none; background: var(--surface); border: 1px solid var(--line-2); border-radius: 6px; box-shadow: var(--shadow); padding: 8px 10px; font-size: 12px; line-height: 1.4; max-width: 260px; }
+.tip .th { color: var(--muted); margin-bottom: 4px; }
+.tip .tr { display: flex; align-items: center; gap: 6px; }
+.tip .tr b { font: 500 12px var(--mono); color: var(--ink); min-width: 62px; text-align: right; }
+.tip .tr i { width: 12px; height: 2px; border-radius: 1px; flex: none; }
+.tip .tr span { color: var(--ink-2); }
+@media (max-width: 759px) {
+  .d-top { grid-template-columns: 1fr; }
+  .mrow { grid-template-columns: minmax(0, 1fr) 82px 56px; }
+  .mrow .ma { grid-column: 1 / -1; margin-top: -4px; }
+}
+@media (prefers-reduced-motion: no-preference) { .btn, .chip, .lg { transition: background-color 0.12s; } }
+</style>
+
+<header class="bar">
+  <div class="wrap bar-in">
+    <a class="brand" href="#gallery">Form Atlas</a>
+    <nav class="tabs" aria-label="Views">
+      <a href="#gallery" data-view="gallery">Gallery</a>
+      <a href="#map" data-view="map">Map</a>
+      <a href="#table" data-view="table">Table</a>
+      <a href="#kinds" data-view="kinds">Kinds</a>
+      <a href="#stop" data-view="stop">Early stop</a>
+    </nav>
+    <div class="bar-right">
+      <span id="meta"></span>
+      <button class="btn quiet" type="button" id="reload" title="Read the runs again">Reload data</button>
+      <span class="save" id="save" role="status"><i></i><span id="save-text">Ratings</span></span>
+      <button class="btn" type="button" id="save-retry" hidden>Retry</button>
+    </div>
+  </div>
+</header>
+
+<section class="wrap filters" id="filters" aria-label="Filter the runs" hidden>
+  <div class="f-row">
+    <input class="inp" type="search" id="f-q" placeholder="Search id, kind, source, note" title="Searches the id, kind name, sources, category and note" aria-label="Search runs by id, kind name, source, category or note" autocomplete="off">
+    <button class="btn" type="button" id="f-toggle" aria-expanded="false" aria-controls="f-more">Filters</button>
+    <button class="btn quiet" type="button" id="f-clear" hidden>Clear filters</button>
+    <span class="f-count" id="f-count" role="status"></span>
+  </div>
+  <div class="f-more" id="f-more">
+    <select class="inp" id="f-status" aria-label="Status"></select>
+    <select class="inp" id="f-origin" aria-label="Origin"></select>
+    <select class="inp" id="f-kind" aria-label="Kind"></select>
+    <select class="inp" id="f-rating" aria-label="Rating">
+      <option value="">Any rating</option><option value="unrated">Unrated</option><option value="rated">Rated</option><option value="3">3 stars and up</option><option value="5">Favourites (5 stars)</option>
+    </select>
+    <div class="chips" id="f-sources" role="group" aria-label="Sources that must be on"></div>
+    <div class="f-metric">
+      <select class="inp" id="f-metric" aria-label="Metric to filter by"></select>
+      <span>between</span>
+      <input class="inp mono" type="number" step="any" id="f-min" placeholder="min" aria-label="Metric at least">
+      <span>and</span>
+      <input class="inp mono" type="number" step="any" id="f-max" placeholder="max" aria-label="Metric at most">
+    </div>
+  </div>
+</section>
+
+<main class="wrap" id="main">
+  <p class="empty" id="boot" role="status">Reading the runs…</p>
+
+  <section id="view-gallery" hidden>
+    <div class="tools">
+      <label class="lab">Sort by <select class="inp" id="g-sort"></select></label>
+      <button class="btn" type="button" id="g-dir"></button>
+      <span class="right" id="g-shown"></span>
+    </div>
+    <div class="grid" id="grid"></div>
+    <p class="empty" id="g-empty" hidden>No run matches these filters.</p>
+    <div class="more"><button class="btn" type="button" id="g-more" hidden>Show more</button></div>
+  </section>
+
+  <section id="view-map" hidden>
+    <div class="tools">
+      <label class="lab">X <select class="inp" id="m-x"></select></label>
+      <label class="chk"><input type="checkbox" id="m-lx"> log</label>
+      <label class="lab">Y <select class="inp" id="m-y"></select></label>
+      <label class="chk"><input type="checkbox" id="m-ly"> log</label>
+      <label class="lab">Colour <select class="inp" id="m-color"></select></label>
+      <label class="chk"><input type="checkbox" id="m-fit"> zoom to the matches</label>
+    </div>
+    <div class="plot" id="plot">
+      <canvas id="map-cv" tabindex="0" role="img" aria-label="Scatter plot of the matching runs. Arrow keys step through the points, Enter opens one. The Table view lists the same runs."></canvas>
+      <div class="pcard" id="pcard" hidden></div>
+    </div>
+    <div class="legend" id="legend"></div>
+    <p class="note" id="m-note"></p>
+  </section>
+
+  <section id="view-table" hidden>
+    <div class="tools">
+      <details class="pick" id="t-pick"><summary class="btn" id="t-pick-sum">Metric columns</summary><div class="pick-list" id="t-pick-list"></div></details>
+      <button class="btn" type="button" id="t-prev">‹ Previous</button>
+      <button class="btn" type="button" id="t-next">Next ›</button>
+      <span class="right" id="t-pos"></span>
+    </div>
+    <div class="t-scroll" id="t-scroll" tabindex="0" aria-label="Runs, scrollable table"><table class="db" id="db"><thead></thead><tbody></tbody></table></div>
+    <p class="empty" id="t-empty" hidden>No run matches these filters.</p>
+  </section>
+
+  <section id="view-kinds" hidden>
+    <div class="tools"><p class="note" id="k-note"></p></div>
+    <div class="kinds" id="kinds"></div>
+  </section>
+
+  <section id="view-stop" hidden><div class="stop" id="stop"></div></section>
+</main>
+
+<div class="detail" id="detail" role="dialog" aria-modal="true" aria-label="Run record" hidden>
+  <div class="scrim" id="scrim"></div>
+  <div class="sheet" id="sheet" tabindex="-1">
+    <div class="d-head" id="sheet-head"></div>
+    <div class="d-body" id="sheet-body"></div>
+  </div>
+</div>
+<div class="tip" id="tip" hidden></div>
+
+<script>
+(() => {
+"use strict";
+
+const LOCAL = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+const VIEWS = ["gallery", "map", "table", "kinds", "stop"];
+const FILTER_VIEWS = ["gallery", "map", "table"];
+const PAGE = 60, ROWS = 100;
+const BASE_PARAMS = ["springFactor", "planarFactor", "bulgeFactor", "repulsionStrength", "radiusOfInfluence", "foodMax", "daughterOffset"];
+const TABLE_METRICS = ["structure", "relief_total", "relief_evenness", "relief_micro", "relief_meso", "relief_macro", "area_ratio", "buried_fraction", "thickness_p50", "reach", "elongation", "lobe_degree"];
+const SOURCE_ORDER = ["light", "field", "crowd", "pulse", "diffusion", "orient", "morph"];
+const GROUPS = [
+  ["Structure and relief", ["structure", "relief_total", "relief_evenness", "relief_micro", "relief_meso", "relief_macro", "relief_peak_sigma", "relief_patchiness", "growth_unevenness", "skew_s4", "skew_s8"]],
+  ["Body plan", ["reach", "lobe_degree", "lobe_2", "lobe_3", "lobe_4", "elongation", "flatness", "ellipsoid_fill"]],
+  ["Thickness and folds", ["thickness_p50", "thickness_p10", "buried_fraction", "gap_median", "area_ratio", "sphericity", "curvature_mean", "curvature_std", "concave_fraction", "box_dimension"]],
+  ["Size and health", ["radius", "sheet_radius", "link_mean", "link_std", "fold_ratio", "close_pairs_per_cell"]],
+];
+const SHAPES = [0, 1, 2, 3, 0, 4, 1, 3]; // circle, square, triangle, diamond, circle, triangle down, square, diamond
+const BLANK = () => ({q: "", status: "", origin: "", kind: "", sources: [], rating: "", metric: "", min: "", max: ""});
+
+let D = null;
+const S = {
+  runs: [], byId: new Map(), kindById: new Map(), metricKeys: [], about: {}, stats: {}, statuses: [], origins: [], sources: [],
+  view: "gallery", shown: null, detail: null, filtered: [], order: [], labelsChanged: false, lastFocus: null,
+  filters: BLANK(),
+  gallery: {sort: "structure", dir: -1}, gList: [], gShown: 0,
+  map: {x: "map", y: "map", lx: false, ly: false, color: "kind", fit: false, pin: null, hover: null, hl: null},
+  table: {sort: "id", dir: 1, page: 0, cols: TABLE_METRICS.slice()},
+};
+const MapV = {pts: [], ax: null, ay: null, col: null, dx: [0, 1], dy: [0, 1], missing: 0};
+
+// ---------------------------------------------------------------- small helpers
+const $ = (sel, root) => (root || document).querySelector(sel);
+const PROPS = new Set(["value", "checked", "disabled", "hidden", "selected", "tabIndex", "open"]);
+function h(tag, props, ...kids) {
+  const e = document.createElement(tag);
+  if (props) for (const k in props) {
+    const v = props[k];
+    if (v == null) continue;
+    if (k === "class") e.className = v;
+    else if (k === "text") e.textContent = v;
+    else if (k === "style") e.style.cssText = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else if (PROPS.has(k)) e[k] = v;
+    else if (v !== false) e.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat(Infinity)) if (kid != null && kid !== false) e.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  return e;
+}
+function sv(tag, attrs, ...kids) {
+  const e = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  if (attrs) for (const k in attrs) if (attrs[k] != null) e.setAttribute(k, attrs[k]);
+  for (const kid of kids.flat(Infinity)) if (kid != null && kid !== false) e.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  return e;
+}
+const clean = (kids) => kids.flat(Infinity).filter((k) => k != null && k !== false);
+function fill(e, ...kids) { e.replaceChildren(...clean(kids)); return e; }
+function add(e, ...kids) { e.append(...clean(kids)); return e; }
+const NF = new Intl.NumberFormat("en-US");
+function fmt(v, sig) {
+  if (v == null || (typeof v === "number" && !isFinite(v))) return "–";
+  if (typeof v !== "number") return String(v);
+  let t;
+  if (Number.isInteger(v)) t = NF.format(v);
+  else {
+    const a = Math.abs(v);
+    t = a < 1e-4 || a >= 1e7 ? v.toExponential(Math.max(0, (sig || 4) - 2)) : String(Number(v.toPrecision(sig || 4)));
+  }
+  return t.replace(/-/g, "−");
+}
+const pc = (x, d) => x == null ? "–" : x > 0 && x < 0.001 ? "<0.1%" : (x * 100).toFixed(d == null ? 1 : d) + "%";
+const stageCells = (s) => Math.round(Math.pow(10, s / 4));
+const clampRating = (x) => { const n = Math.round(Number(x)); return n >= 1 && n <= 5 ? n : 0; };
+const stars = (n) => "★".repeat(n || 0);
+const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+function fillSelect(sel, groups, value) {
+  sel.replaceChildren();
+  for (const g of groups) {
+    const host = g.label ? h("optgroup", {label: g.label}) : sel;
+    for (const [v, label] of g.options) host.append(h("option", {value: v, text: label}));
+    if (g.label) sel.append(host);
+  }
+  sel.value = value;
+  if (sel.value !== value) sel.selectedIndex = 0;
+}
+function kindLabel(k) { return k ? (k.given || k.name || "kind " + k.id) : "no kind yet"; }
+function kindName(id) { return id == null ? "" : kindLabel(S.kindById.get(id) || {id}); }
+function pill(status) { return h("span", {class: "pill st-" + String(status).replace(/[^a-z]/g, "")}, h("i"), String(status).replace("-", " ")); }
+function sortBy(list, get, dir, num) {
+  const arr = list.map((r) => [get(r), r]);
+  arr.sort((a, b) => {
+    const x = a[0], y = b[0], xn = x == null || x === "", yn = y == null || y === "";
+    if (xn || yn) return xn && yn ? a[1].id - b[1].id : xn ? 1 : -1;
+    const c = num ? x - y : String(x).localeCompare(String(y));
+    return c ? c * dir : a[1].id - b[1].id;
+  });
+  return arr.map((a) => a[1]);
+}
+function linTicks(lo, hi, n) {
+  const span = hi - lo;
+  if (!(span > 0)) return [lo];
+  const raw = span / n, mag = Math.pow(10, Math.floor(Math.log10(raw))), e = raw / mag;
+  const step = (e < 1.5 ? 1 : e < 3.5 ? 2 : e < 7.5 ? 5 : 10) * mag;
+  const out = [];
+  for (let v = Math.ceil(lo / step - 1e-9) * step; v <= hi + step * 1e-9; v += step) out.push(Math.abs(v) < step * 1e-9 ? 0 : v);
+  return out;
+}
+function logTicks(lo, hi) {
+  const dec = Math.log10(hi / lo), mult = dec > 3.2 ? [1] : dec > 1.3 ? [1, 3] : [1, 2, 5], out = [];
+  for (let e = Math.floor(Math.log10(lo)); e <= Math.ceil(Math.log10(hi)); e++) for (const m of mult) {
+    const v = m * Math.pow(10, e);
+    if (v >= lo * 0.9999 && v <= hi * 1.0001) out.push(v);
+  }
+  return out.length >= 2 ? out : linTicks(lo, hi, 3);
+}
+function showTip(kids, x, y) {
+  const t = $("#tip");
+  fill(t, kids);
+  t.hidden = false;
+  const w = t.offsetWidth, hh = t.offsetHeight;
+  let L = x + 14, T = y + 14;
+  if (L + w > innerWidth - 8) L = Math.max(8, x - 14 - w);
+  if (T + hh > innerHeight - 8) T = Math.max(8, y - 14 - hh);
+  t.style.left = L + "px";
+  t.style.top = T + "px";
+}
+function hideTip() { $("#tip").hidden = true; }
+
+// ---------------------------------------------------------------- pictures: tiles cut from contact sheets
+const sheetCache = new Map();
+function sheetInfo(set, i) {
+  const url = set.files[i];
+  let p = sheetCache.get(url);
+  if (!p) {
+    p = new Promise((res, rej) => {
+      const im = new Image();
+      im.onload = () => {
+        const th = im.naturalWidth / set.columns * set.tile[1] / set.tile[0];
+        res({url, rows: Math.max(1, Math.round(im.naturalHeight / th))});
+      };
+      im.onerror = () => { sheetCache.delete(url); rej(new Error("sheet")); };
+      im.src = url;
+    });
+    sheetCache.set(url, p);
+  }
+  return p;
+}
+function pickPicture(r, large) {
+  const small = r.thumb && D.thumbs.files[r.thumb[0]] ? {set: D.thumbs, ref: r.thumb} : null;
+  const big = r.tile && D.sheets.files[r.tile[0]] ? {set: D.sheets, ref: r.tile} : null;
+  const pick = large ? big || small : small || big;
+  if (pick) return pick;
+  return r.img && r.img.a ? {url: r.img.a} : null;
+}
+function paintThumb(e) {
+  const r = e._run;
+  if (!r || e._done) return;
+  e._done = true;
+  const pic = pickPicture(r, e._large);
+  if (!pic) { e.classList.add("none"); e.append("no picture yet"); return; }
+  if (pic.url) {
+    e.style.backgroundImage = 'url("' + encodeURI(pic.url) + '")';
+    e.style.backgroundSize = "cover";
+    e.style.backgroundPosition = "center";
+    return;
+  }
+  sheetInfo(pic.set, pic.ref[0]).then((info) => {
+    const cols = pic.set.columns;
+    e.style.backgroundImage = 'url("' + encodeURI(info.url) + '")';
+    e.style.backgroundSize = cols * 100 + "% " + info.rows * 100 + "%";
+    e.style.backgroundPosition = (cols > 1 ? pic.ref[1] / (cols - 1) * 100 : 0) + "% " + (info.rows > 1 ? pic.ref[2] / (info.rows - 1) * 100 : 0) + "%";
+  }, () => { e.classList.add("none"); e.append("picture missing"); });
+}
+const thumbIO = "IntersectionObserver" in window ? new IntersectionObserver((entries) => {
+  for (const en of entries) if (en.isIntersecting) { thumbIO.unobserve(en.target); paintThumb(en.target); }
+}, {rootMargin: "300px"}) : null;
+function thumb(r, large, now) {
+  const e = h("span", {class: "thumb", role: "img", "aria-label": "Run " + r.id});
+  e._run = r;
+  e._large = !!large;
+  if (now || !thumbIO) paintThumb(e); else thumbIO.observe(e);
+  return e;
+}
+function runCard(r, lines) {
+  return h("button", {class: "card", type: "button", "data-run": r.id}, thumb(r), h("span", {class: "cap"}, h("span", {class: "id", text: String(r.id)}), h("span", {class: "stars", text: stars(r.rating)})), lines || null);
+}
+
+// ---------------------------------------------------------------- ratings and names: one adapter, three back ends
+const Store = {
+  mode: LOCAL ? "local" : "pending", db: null, readOnly: false, over: new Map(), kindOver: new Map(),
+  edits: new Map(), ver: 0, inflight: new Set(), timers: new Map(), error: "", note: "", saved: false,
+};
+const DEVICE_KEY = "atlas-labels-v1", UNSAVED_KEY = "atlas-unsaved-v1", UI_KEY = "atlas-ui-v1";
+function applyLabel(r) {
+  const e = Store.edits.get("run:" + r.id), src = e ? e.val : Store.over.get(r.id) || r._b;
+  r.rating = clampRating(src.rating);
+  r.category = src.category || "";
+  r.note = src.note || "";
+}
+function applyKind(k) {
+  const e = Store.edits.get("kind:" + k.id), o = Store.kindOver.get(k.id);
+  k.given = e ? e.val.name : o != null ? o : k._b;
+}
+function backupUnsaved() {
+  try {
+    if (Store.edits.size && !Store.readOnly) localStorage.setItem(UNSAVED_KEY, JSON.stringify([...Store.edits].map(([k, e]) => [k, e.val])));
+    else localStorage.removeItem(UNSAVED_KEY);
+  } catch (e) { /* storage is a convenience here */ }
+}
+function restoreUnsaved() {
+  try {
+    for (const [key, val] of JSON.parse(localStorage.getItem(UNSAVED_KEY) || "[]")) {
+      if (typeof key !== "string" || !val || typeof val !== "object" || Store.edits.has(key)) continue;
+      const id = Number(key.split(":")[1]);
+      if (key.startsWith("run:") ? S.byId.has(id) : S.kindById.has(id)) Store.edits.set(key, {val, ver: ++Store.ver});
+    }
+  } catch (e) { /* nothing to restore */ }
+}
+function editLabel(id, patch, delay) {
+  const r = S.byId.get(id);
+  if (!r || Store.readOnly) return;
+  const key = "run:" + id;
+  Store.edits.set(key, {val: Object.assign({rating: r.rating, category: r.category, note: r.note}, patch), ver: ++Store.ver});
+  applyLabel(r);
+  S.labelsChanged = true;
+  backupUnsaved();
+  queueSave(key, delay);
+  refreshRunUi(id);
+  updateSaveUi();
+}
+function editKind(id, name, delay) {
+  const k = S.kindById.get(id);
+  if (!k || Store.readOnly) return;
+  const key = "kind:" + id;
+  Store.edits.set(key, {val: {name}, ver: ++Store.ver});
+  applyKind(k);
+  backupUnsaved();
+  queueSave(key, delay);
+  refreshKindNames();
+  updateSaveUi();
+}
+function queueSave(key, delay) {
+  clearTimeout(Store.timers.get(key));
+  Store.timers.delete(key);
+  if (delay) Store.timers.set(key, setTimeout(() => flush(key), delay)); else flush(key);
+}
+function flushAll() { for (const key of [...Store.edits.keys()]) flush(key); }
+async function flush(key) {
+  clearTimeout(Store.timers.get(key));
+  Store.timers.delete(key);
+  const e = Store.edits.get(key);
+  if (!e || Store.mode === "pending" || Store.inflight.has(key)) { updateSaveUi(); return; }
+  Store.inflight.add(key);
+  updateSaveUi();
+  let failed = null;
+  try { await write(key, e.val); } catch (x) { failed = x || new Error("failed"); }
+  Store.inflight.delete(key);
+  if (!failed) {
+    commit(key, e.val);
+    Store.error = "";
+    Store.saved = true;
+    const now = Store.edits.get(key);
+    if (now && now.ver === e.ver) Store.edits.delete(key); else if (now) flush(key);
+  } else {
+    if (Store.mode === "db" && failed.code === "invalid_argument") {
+      Store.readOnly = true;
+      Store.error = "Your access to this page lets you see ratings and names but not change them.";
+    } else if (Store.mode === "db" && failed.code === "quota_exceeded") Store.error = "The shared store is full, so this was not saved. It is still on this page.";
+    else if (Store.mode === "device") Store.error = "This browser did not let the page keep it. It is still on this page.";
+    else Store.error = (Store.mode === "local" ? "The server on this PC did not take it" : "The shared store did not take it") + (failed.message && Store.mode === "local" ? " (" + failed.message + ")" : "") + ". It is still on this page: press Retry.";
+  }
+  backupUnsaved();
+  updateSaveUi();
+}
+function commit(key, val) {
+  const id = Number(key.split(":")[1]);
+  if (key.startsWith("run:")) {
+    const r = S.byId.get(id), copy = {rating: val.rating || 0, category: val.category || "", note: val.note || ""};
+    if (Store.mode === "local") { if (r) r._b = copy; } else Store.over.set(id, copy);
+  } else {
+    const k = S.kindById.get(id);
+    if (Store.mode === "local") { if (k) k._b = val.name || ""; } else Store.kindOver.set(id, val.name || "");
+  }
+}
+async function write(key, val) {
+  const run = key.startsWith("run:"), id = Number(key.split(":")[1]);
+  const body = run ? {rating: val.rating || 0, category: val.category || "", note: val.note || ""} : {name: val.name || ""};
+  if (Store.mode === "local") {
+    let res;
+    try {
+      res = await fetch(run ? "api/label" : "api/kind", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(Object.assign(run ? {run: id} : {id}, body))});
+    } catch (e) { throw new Error("no answer"); }
+    if (!res.ok) throw new Error("answer " + res.status);
+    return;
+  }
+  if (Store.mode === "db") {
+    const ref = Store.db.collection(run ? "labels" : "kinds").doc(String(id));
+    try { await ref.set(body); } catch (e) {
+      if (!e || e.code !== "unavailable") throw e;
+      await new Promise((r) => setTimeout(r, 400 + Math.random() * 800));
+      await ref.set(body);
+    }
+    return;
+  }
+  // this device only
+  const labels = {}, kinds = {};
+  for (const [k, v] of Store.over) labels[k] = v;
+  for (const [k, v] of Store.kindOver) kinds[k] = v;
+  if (run) labels[id] = body; else kinds[id] = body.name;
+  localStorage.setItem(DEVICE_KEY, JSON.stringify({labels, kinds}));
+}
+function loadDevice() {
+  try {
+    const d = JSON.parse(localStorage.getItem(DEVICE_KEY) || "null");
+    if (!d) return;
+    for (const k in d.labels || {}) Store.over.set(Number(k), d.labels[k]);
+    for (const k in d.kinds || {}) Store.kindOver.set(Number(k), String(d.kinds[k] || ""));
+  } catch (e) { /* starts empty */ }
+}
+function applyAllLabels() {
+  for (const r of S.runs) applyLabel(r);
+  for (const k of D ? D.kinds : []) applyKind(k);
+}
+function remoteChanged() {
+  S.labelsChanged = true;
+  if (!D) return;
+  if (S.detail != null) syncDetailLabel(); else scheduleApply();
+}
+const scheduleApply = debounce(() => { if (D && S.detail == null) applyFilters(true); }, 250);
+async function connectStore() {
+  if (LOCAL) { updateSaveUi(); return; }
+  const c = window.claude;
+  let db = null;
+  if (c && typeof c.use === "function") { try { db = await c.use("db"); } catch (e) { db = null; } }
+  if (!db) {
+    Store.mode = "device";
+    loadDevice();
+    if (D) { applyAllLabels(); remoteChanged(); refreshKindNames(); }
+    flushAll();
+    updateSaveUi();
+    return;
+  }
+  Store.db = db;
+  Store.mode = "db";
+  c.use("user").then((u) => u && u.can("data.write")).then((can) => { if (can === false) { Store.readOnly = true; updateSaveUi(); if (S.detail != null) renderDetail(S.detail); } }).catch(() => {});
+  const slow = setTimeout(() => { Store.note = "The shared ratings can't be reached yet."; updateSaveUi(); }, 10000);
+  const fresh = (snap) => { if (snap.metadata && !snap.metadata.fromCache) { clearTimeout(slow); Store.note = ""; updateSaveUi(); } };
+  const dead = (e) => {
+    clearTimeout(slow);
+    Store.note = e && e.code === "revoked" ? "Shared ratings are not available in this view." : "Shared ratings stopped updating. Reload the page to connect again.";
+    updateSaveUi();
+  };
+  const changes = (snap) => typeof snap.docChanges === "function" ? snap.docChanges() : snap.docs.map((doc) => ({type: "added", doc}));
+  db.collection("labels").onSnapshot((snap) => {
+    fresh(snap);
+    let any = false;
+    for (const ch of changes(snap)) {
+      const id = Number(ch.doc.id);
+      if (!Number.isFinite(id)) continue;
+      if (ch.type === "removed") Store.over.delete(id);
+      else {
+        const d = ch.doc.data() || {};
+        Store.over.set(id, {rating: clampRating(d.rating), category: typeof d.category === "string" ? d.category : "", note: typeof d.note === "string" ? d.note : ""});
+      }
+      const r = S.byId.get(id);
+      if (r) { applyLabel(r); any = true; }
+    }
+    if (any) remoteChanged();
+  }, dead);
+  db.collection("kinds").onSnapshot((snap) => {
+    fresh(snap);
+    for (const ch of changes(snap)) {
+      const id = Number(ch.doc.id);
+      if (!Number.isFinite(id)) continue;
+      if (ch.type === "removed") Store.kindOver.delete(id);
+      else { const d = ch.doc.data() || {}; Store.kindOver.set(id, typeof d.name === "string" ? d.name : ""); }
+      const k = S.kindById.get(id);
+      if (k) applyKind(k);
+    }
+    if (D) refreshKindNames();
+  }, dead);
+  flushAll();
+  updateSaveUi();
+}
+function saveState() {
+  const what = "Ratings, categories, notes and names ";
+  const idle = {local: what + "are saved in the database on this PC.", db: what + "are shared with everyone who can open this page.", device: what + "stay on this device only: this page has no shared store here."}[Store.mode];
+  const done = {local: "Saved in the database on this PC.", db: "Saved and shared.", device: "Saved on this device only."}[Store.mode];
+  if (Store.readOnly) return {cls: "", short: "Ratings: view only", long: Store.error || "You can see ratings and names here but not change them."};
+  if (Store.edits.size) {
+    if (Store.inflight.size || Store.timers.size) return {cls: "busy", short: "Saving…", long: "Saving…"};
+    if (Store.mode === "pending") return {cls: "busy", short: "Waiting to save", long: "Not saved yet: the store for ratings is still connecting. Your change is kept on this page."};
+    return {cls: "err", short: "Not saved", long: Store.error || "Not saved. It is still on this page: press Retry.", retry: true};
+  }
+  if (Store.note) return {cls: "", short: "Ratings: offline", long: Store.note};
+  if (Store.mode === "pending") return {cls: "", short: "Ratings: connecting", long: "Connecting the store for ratings…"};
+  const short = {local: "this PC", db: "shared", device: "this device only"}[Store.mode];
+  return Store.saved ? {cls: "ok", short: "Saved · " + short, long: done} : {cls: "", short: "Ratings: " + short, long: idle};
+}
+function updateSaveUi() {
+  const st = saveState();
+  $("#save").className = "save " + st.cls;
+  $("#save-text").textContent = st.short;
+  $("#save").title = st.long;
+  $("#save-retry").hidden = !st.retry;
+  const line = $("#d-save");
+  if (line) {
+    line.className = "d-save " + st.cls;
+    fill(line, st.long, st.retry ? h("button", {class: "btn", type: "button", onclick: flushAll}, "Retry") : null);
+  }
+  for (const e of document.querySelectorAll(".kind .sv")) {
+    const key = "kind:" + e.dataset.kind;
+    e.textContent = Store.edits.has(key) ? (Store.inflight.has(key) || Store.timers.has(key) ? "saving…" : "not saved") : e.dataset.touched ? "saved" : "";
+  }
+}
+
+// ---------------------------------------------------------------- data
+function prepare(data) {
+  D = data;
+  D.thumbs = D.thumbs || {files: [], tile: [120, 90], columns: 8};
+  D.sheets = D.sheets || {files: [], tile: [240, 180], columns: 8};
+  D.kinds = D.kinds || [];
+  D.metrics = D.metrics || [];
+  D.params = D.params || [];
+  D.stop = D.stop || {};
+  S.runs = D.runs || [];
+  S.byId = new Map(S.runs.map((r) => [r.id, r]));
+  S.kindById = new Map(D.kinds.map((k) => [k.id, k]));
+  D.kinds.forEach((k, i) => { k._slot = i < 8 ? i : -1; k._b = k.given || ""; });
+  S.metricKeys = D.metrics.map((m) => m.key);
+  S.about = Object.fromEntries(D.metrics.map((m) => [m.key, m.about]));
+  const seen = {status: new Set(), origin: new Set(), source: new Set()};
+  for (const r of S.runs) {
+    r.m = r.m || {};
+    r.params = r.params || {};
+    r.sources = r.sources || [];
+    r.img = r.img || {};
+    r.relief = r.relief || {sigma: [], value: [], skew: []};
+    r.traj = r.traj || {};
+    r._b = {rating: r.rating || 0, category: r.category || "", note: r.note || ""};
+    seen.status.add(r.status);
+    seen.origin.add(r.origin);
+    for (const s of r.sources) seen.source.add(s);
+  }
+  S.statuses = ["ok", "stopped-early", "stalled", "broken"].filter((s) => seen.status.has(s)).concat([...seen.status].filter((s) => !["ok", "stopped-early", "stalled", "broken"].includes(s)));
+  S.origins = [...seen.origin];
+  S.sources = SOURCE_ORDER.filter((s) => seen.source.has(s)).concat([...seen.source].filter((s) => !SOURCE_ORDER.includes(s)).sort());
+  S.stats = {};
+  for (const k of S.metricKeys) {
+    const v = [];
+    for (const r of S.runs) { const x = r.m[k]; if (typeof x === "number" && isFinite(x)) v.push(x); }
+    v.sort((a, b) => a - b);
+    S.stats[k] = {v, min: v[0], max: v[v.length - 1], q: (p) => v.length ? v[Math.min(v.length - 1, Math.max(0, Math.round(p * (v.length - 1))))] : null};
+  }
+  applyAllLabels();
+  // settings kept from an earlier visit may name things this data does not have
+  const f = S.filters, okMetric = (k) => S.metricKeys.includes(k);
+  if (f.status && !S.statuses.includes(f.status)) f.status = "";
+  if (f.origin && !S.origins.includes(f.origin)) f.origin = "";
+  if (f.kind && f.kind !== "none" && !S.kindById.has(Number(f.kind))) f.kind = "";
+  f.sources = f.sources.filter((s) => S.sources.includes(s));
+  if (f.metric && !okMetric(f.metric)) { f.metric = ""; f.min = ""; f.max = ""; }
+  if (!["id", "rating"].includes(S.gallery.sort) && !okMetric(S.gallery.sort)) S.gallery.sort = okMetric("structure") ? "structure" : "id";
+  for (const a of ["x", "y"]) if (S.map[a] !== "map" && !okMetric(S.map[a])) S.map[a] = "map";
+  if (!["kind", "status", "origin", "rating"].includes(S.map.color) && !okMetric(S.map.color)) S.map.color = "kind";
+  S.table.cols = S.table.cols.filter(okMetric);
+}
+function percentile(key, v) {
+  const a = S.stats[key] ? S.stats[key].v : [];
+  if (!a.length || v == null) return null;
+  let lo = 0, hi = a.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (a[mid] < v) lo = mid + 1; else hi = mid; }
+  return a.length > 1 ? lo / (a.length - 1) : 0.5;
+}
+function loadUi() {
+  try {
+    const u = JSON.parse(localStorage.getItem(UI_KEY) || "null");
+    if (!u) return;
+    if (u.f) Object.assign(S.filters, BLANK(), u.f, {sources: Array.isArray(u.f.sources) ? u.f.sources.map(String) : []});
+    if (u.g) Object.assign(S.gallery, {sort: String(u.g.sort || "structure"), dir: u.g.dir === 1 ? 1 : -1});
+    if (u.m) Object.assign(S.map, {x: String(u.m.x || "map"), y: String(u.m.y || "map"), lx: !!u.m.lx, ly: !!u.m.ly, color: String(u.m.color || "kind"), fit: !!u.m.fit});
+    if (u.t && Array.isArray(u.t.cols)) S.table.cols = u.t.cols.map(String);
+  } catch (e) { /* defaults */ }
+}
+function saveUi() {
+  try {
+    const m = S.map;
+    localStorage.setItem(UI_KEY, JSON.stringify({f: S.filters, g: S.gallery, m: {x: m.x, y: m.y, lx: m.lx, ly: m.ly, color: m.color, fit: m.fit}, t: {cols: S.table.cols}}));
+  } catch (e) { /* not kept */ }
+}
+async function load(again) {
+  const btn = $("#reload");
+  btn.disabled = true;
+  btn.textContent = "Reading…";
+  try {
+    const res = await fetch("data.json", {cache: "no-store"});
+    if (!res.ok) throw new Error("data.json answered " + res.status);
+    prepare(await res.json());
+    if (!again) restoreUnsaved();
+    applyAllLabels();
+    $("#boot").hidden = true;
+    $("#meta").textContent = fmt(S.runs.length) + " runs · data from " + (D.generated || "an unknown time");
+    buildControls();
+    S.shown = null;
+    showView();
+    if (S.detail != null) showDetail(true);
+    if (!again) flushAll();
+  } catch (e) {
+    if (!D) {
+      $("#boot").hidden = false;
+      $("#boot").replaceChildren("The runs could not be read (" + (e && e.message ? e.message : "no answer") + "). ", LOCAL ? "Check that the atlas server is running, then press Reload data." : "Press Reload data to try again.");
+    } else $("#meta").textContent = "Reading failed; showing the data from " + (D.generated || "before");
+  }
+  btn.disabled = false;
+  btn.textContent = "Reload data";
+}
+
+// ---------------------------------------------------------------- routing: #gallery #map #table #kinds #stop, and #run-12 for a record
+function go(hash, replace) {
+  try { if (replace) location.replace("#" + hash); else location.hash = hash; } catch (e) { /* the state below still changes */ }
+  applyRoute(hash);
+}
+function applyRoute(x) {
+  x = String(x || "").replace(/^#/, "");
+  const m = /^run-(\d+)$/.exec(x), detail = m ? Number(m[1]) : null, view = VIEWS.includes(x) ? x : S.view;
+  const viewChanged = view !== S.view, detailChanged = detail !== S.detail;
+  S.view = view;
+  S.detail = detail;
+  if (viewChanged || S.shown !== view) showView();
+  if (detailChanged) showDetail();
+}
+function showView() {
+  for (const v of VIEWS) $("#view-" + v).hidden = !D || v !== S.view;
+  for (const a of document.querySelectorAll(".tabs a")) { if (a.dataset.view === S.view) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); }
+  $("#filters").hidden = !D || !FILTER_VIEWS.includes(S.view);
+  if (!D) return;
+  if (S.shown && S.shown !== S.view) window.scrollTo(0, 0);
+  S.shown = S.view;
+  hideTip();
+  applyFilters(false);
+}
+function openRun(id) { go("run-" + id, S.detail != null); }
+function closeDetail() { go(S.view, true); }
+
+// ---------------------------------------------------------------- filters
+function buildControls() {
+  const count = (key, v) => S.runs.reduce((n, r) => n + (r[key] === v ? 1 : 0), 0);
+  fillSelect($("#f-status"), [{options: [["", "Any status"]].concat(S.statuses.map((s) => [s, s + " (" + fmt(count("status", s)) + ")"]))}], S.filters.status);
+  fillSelect($("#f-origin"), [{options: [["", "Any origin"]].concat(S.origins.map((s) => [s, s + " (" + fmt(count("origin", s)) + ")"]))}], S.filters.origin);
+  fillKindSelect();
+  const metricOptions = S.metricKeys.map((k) => [k, k]);
+  fillSelect($("#f-metric"), [{options: [["", "No metric filter"]].concat(metricOptions)}], S.filters.metric);
+  fill($("#f-sources"), h("span", {class: "cl", text: "With"}), S.sources.map((s) => h("button", {class: "chip", type: "button", "data-source": s, "aria-pressed": String(S.filters.sources.includes(s)), text: s})));
+  fillSelect($("#g-sort"), [{label: "Run", options: [["id", "id"], ["rating", "rating"]]}, {label: "Metric", options: metricOptions}], S.gallery.sort);
+  for (const a of ["x", "y"]) fillSelect($("#m-" + a), [{options: [["map", "map position"]]}, {label: "Metric", options: metricOptions}], S.map[a]);
+  fillSelect($("#m-color"), [{options: [["kind", "kind"], ["status", "status"], ["origin", "origin"], ["rating", "rating"]]}, {label: "Metric", options: metricOptions}], S.map.color);
+  fill($("#t-pick-list"), S.metricKeys.map((k) => h("label", {title: S.about[k]}, h("input", {type: "checkbox", id: "t-col-" + k, value: k, checked: S.table.cols.includes(k)}), k)));
+  syncFilterUi();
+}
+function fillKindSelect() {
+  fillSelect($("#f-kind"), [{options: [["", "Any kind"]].concat(D.kinds.map((k) => [String(k.id), kindLabel(k)]), [["none", "No kind yet"]])}], S.filters.kind);
+}
+function syncFilterUi() {
+  const f = S.filters;
+  $("#f-q").value = f.q;
+  $("#f-status").value = f.status;
+  $("#f-origin").value = f.origin;
+  $("#f-kind").value = f.kind;
+  $("#f-rating").value = f.rating;
+  $("#f-metric").value = f.metric;
+  $("#f-min").value = f.min;
+  $("#f-max").value = f.max;
+  for (const b of document.querySelectorAll("#f-sources .chip")) b.setAttribute("aria-pressed", String(f.sources.includes(b.dataset.source)));
+  const st = f.metric ? S.stats[f.metric] : null;
+  $("#f-min").placeholder = st && st.v.length ? "min " + fmt(st.min, 3) : "min";
+  $("#f-max").placeholder = st && st.v.length ? "max " + fmt(st.max, 3) : "max";
+  $("#f-min").disabled = $("#f-max").disabled = !f.metric;
+}
+function activeFilters() {
+  const f = S.filters;
+  return (f.q ? 1 : 0) + (f.status ? 1 : 0) + (f.origin ? 1 : 0) + (f.kind ? 1 : 0) + f.sources.length + (f.rating ? 1 : 0) + (f.metric && (f.min !== "" || f.max !== "") ? 1 : 0);
+}
+function applyFilters(keep) {
+  const f = S.filters, tokens = f.q.toLowerCase().split(/\s+/).filter(Boolean);
+  const min = f.min === "" ? null : Number(f.min), max = f.max === "" ? null : Number(f.max), useMetric = f.metric && (min != null || max != null);
+  S.filtered = S.runs.filter((r) => {
+    if (f.status && r.status !== f.status) return false;
+    if (f.origin && r.origin !== f.origin) return false;
+    if (f.kind && (f.kind === "none" ? r.kind != null : String(r.kind) !== f.kind)) return false;
+    for (const s of f.sources) if (!r.sources.includes(s)) return false;
+    if (f.rating === "unrated" && r.rating) return false;
+    if (f.rating === "rated" && !r.rating) return false;
+    if (f.rating === "3" && !(r.rating >= 3)) return false;
+    if (f.rating === "5" && r.rating !== 5) return false;
+    if (useMetric) {
+      const v = r.m[f.metric];
+      if (v == null || (min != null && v < min) || (max != null && v > max)) return false;
+    }
+    if (tokens.length) {
+      const k = S.kindById.get(r.kind);
+      const hay = ((k ? kindLabel(k) + " " + (k.name || "") : "") + " " + r.sources.join(" ") + " " + r.category + " " + r.note + " " + r.origin + " " + r.status + " " + r.init).toLowerCase();
+      for (const t of tokens) if (String(r.id) !== t && !hay.includes(t)) return false;
+    }
+    return true;
+  });
+  S.labelsChanged = false;
+  const n = activeFilters();
+  $("#f-count").replaceChildren(h("b", {text: fmt(S.filtered.length)}), " of " + fmt(S.runs.length) + " runs");
+  $("#f-clear").hidden = n === 0;
+  $("#f-toggle").textContent = n ? "Filters (" + n + ")" : "Filters";
+  saveUi();
+  if (S.view === "gallery") renderGallery(keep);
+  else if (S.view === "map") renderMap();
+  else if (S.view === "table") renderTable(keep);
+  else {
+    S.order = S.filtered.map((r) => r.id);
+    if (S.view === "kinds") { if (!keep) renderKinds(); } else if (!keep) renderStop();
+  }
+}
+function setFilters(patch, view) {
+  S.filters = Object.assign(BLANK(), patch);
+  syncFilterUi();
+  if (view && view !== S.view) go(view); else applyFilters(false);
+}
+
+// ---------------------------------------------------------------- gallery
+function galleryMetric() { return ["id", "rating"].includes(S.gallery.sort) ? (S.metricKeys.includes("structure") ? "structure" : S.metricKeys[0]) : S.gallery.sort; }
+function cardLines(r) {
+  const mk = galleryMetric();
+  return mk ? h("span", {class: "val"}, h("span", {text: mk}), h("span", {class: "vv", text: fmt(r.m[mk])})) : null;
+}
+function galleryCard(r) {
+  const c = runCard(r, cardLines(r));
+  if (r.status !== "ok") c.firstChild.append(h("span", {class: "flag", text: String(r.status).replace("-", " ")}));
+  return c;
+}
+function renderGallery(keep) {
+  const g = S.gallery;
+  const get = g.sort === "id" ? (r) => r.id : g.sort === "rating" ? (r) => r.rating || null : (r) => r.m[g.sort];
+  const list = sortBy(S.filtered, get, g.dir, true), ids = list.map((r) => r.id), grid = $("#grid");
+  $("#g-dir").textContent = g.dir < 0 ? "↓ High to low" : "↑ Low to high";
+  $("#g-sort").value = g.sort;
+  const same = keep && ids.length === S.order.length && ids.every((id, i) => id === S.order[i]) && grid.childElementCount;
+  S.gList = list;
+  S.order = ids;
+  if (same) { for (const c of grid.children) refreshCard(c); return; }
+  const n = keep ? Math.max(PAGE, S.gShown) : PAGE;
+  grid.replaceChildren();
+  S.gShown = 0;
+  appendCards(n);
+}
+function appendCards(n) {
+  const list = S.gList, end = Math.min(list.length, S.gShown + n), frag = document.createDocumentFragment();
+  for (let i = S.gShown; i < end; i++) frag.append(galleryCard(list[i]));
+  $("#grid").append(frag);
+  S.gShown = end;
+  $("#g-more").hidden = end >= list.length;
+  $("#g-shown").textContent = list.length ? "Showing " + fmt(end) + " of " + fmt(list.length) : "";
+  $("#g-empty").hidden = list.length > 0;
+}
+function refreshCard(c) {
+  const r = S.byId.get(Number(c.dataset.run)), s = r && $(".stars", c);
+  if (s) s.textContent = stars(r.rating);
+}
+function refreshRunUi(id) {
+  for (const c of document.querySelectorAll('.card[data-run="' + id + '"]')) refreshCard(c);
+  const r = S.byId.get(id);
+  if (r && S.detail === id) for (const b of document.querySelectorAll("#sheet-body .starb")) {
+    const on = Number(b.dataset.star) <= r.rating;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-pressed", String(Number(b.dataset.star) === r.rating));
+  }
+}
+const moreIO = "IntersectionObserver" in window ? new IntersectionObserver((entries) => {
+  if (entries.some((en) => en.isIntersecting) && S.view === "gallery" && S.gShown < S.gList.length) {
+    appendCards(PAGE);
+    moreIO.unobserve($("#g-more"));
+    moreIO.observe($("#g-more"));
+  }
+}, {rootMargin: "500px"}) : null;
+
+// ---------------------------------------------------------------- map
+function axisDef(sel, which, log) {
+  if (sel === "map") return {label: which === "x" ? "map x" : "map y", get: which === "x" ? (r) => r.x : (r) => r.y, log: false, isMap: true, key: null};
+  return {label: sel, get: (r) => r.m[sel], log: !!log && S.stats[sel] && S.stats[sel].min > 0, isMap: false, key: sel};
+}
+function colouring(mode) {
+  const cat = (title, items, of) => ({type: "cat", title, items, of, index: new Map(items.map((it, i) => [it.key, i]))});
+  if (mode === "kind") {
+    const items = D.kinds.filter((k) => k._slot >= 0).map((k) => ({key: "k" + k.id, label: kindLabel(k), v: "--s" + (k._slot + 1), shape: SHAPES[k._slot]}));
+    if (D.kinds.length > 8) items.push({key: "other", label: "other kinds", v: "--other", shape: 0});
+    items.push({key: "none", label: "no kind yet", hollow: true, shape: 0});
+    return cat("Kind", items, (r) => { const k = S.kindById.get(r.kind); return !k ? "none" : k._slot >= 0 ? "k" + k.id : "other"; });
+  }
+  if (mode === "status") {
+    const known = {ok: ["--st-ok", 0], "stopped-early": ["--s1", 1], stalled: ["--st-stalled", 2], broken: ["--st-broken", 3]};
+    const items = S.statuses.filter((s) => known[s]).map((s) => ({key: s, label: s.replace("-", " "), v: known[s][0], shape: known[s][1]}));
+    if (S.statuses.some((s) => !known[s])) items.push({key: "other", label: "other", v: "--other", shape: 4});
+    return cat("Status", items, (r) => known[r.status] ? r.status : "other");
+  }
+  if (mode === "origin") {
+    const items = S.origins.slice(0, 8).map((o, i) => ({key: "o:" + o, label: o, v: "--s" + (i + 1), shape: SHAPES[i]}));
+    if (S.origins.length > 8) items.push({key: "other", label: "other origins", v: "--other", shape: 0});
+    return cat("Origin", items, (r) => S.origins.indexOf(r.origin) < 8 ? "o:" + r.origin : "other");
+  }
+  if (mode === "rating") {
+    const items = [1, 2, 3, 4, 5].map((n) => ({key: "r" + n, label: stars(n), v: "--o" + n, shape: 0}));
+    items.push({key: "none", label: "unrated", hollow: true, shape: 0});
+    return cat("Rating", items, (r) => r.rating ? "r" + r.rating : "none");
+  }
+  const st = S.stats[mode], lo = st.q(0.02), hi = st.q(0.98), log = lo > 0 && hi / lo > 30, T = log ? Math.log10 : (v) => v;
+  return {type: "seq", title: mode, key: mode, lo, hi, log, t: (v) => hi > lo ? Math.min(1, Math.max(0, (T(Math.max(v, log ? lo : -Infinity)) - T(lo)) / (T(hi) - T(lo)))) : 0.5};
+}
+function drawMark(ctx, shape, x, y, r) {
+  ctx.beginPath();
+  if (shape === 1) ctx.rect(x - r * 0.88, y - r * 0.88, r * 1.76, r * 1.76);
+  else if (shape === 2) { const a = r * 1.3; ctx.moveTo(x, y - a); ctx.lineTo(x + a * 0.9, y + a * 0.6); ctx.lineTo(x - a * 0.9, y + a * 0.6); ctx.closePath(); }
+  else if (shape === 3) { const a = r * 1.3; ctx.moveTo(x, y - a); ctx.lineTo(x + a, y); ctx.lineTo(x, y + a); ctx.lineTo(x - a, y); ctx.closePath(); }
+  else if (shape === 4) { const a = r * 1.3; ctx.moveTo(x, y + a); ctx.lineTo(x + a * 0.9, y - a * 0.6); ctx.lineTo(x - a * 0.9, y - a * 0.6); ctx.closePath(); }
+  else ctx.arc(x, y, r, 0, 6.2832);
+}
+function shapeIcon(it) {
+  const p = ["M6 1.5a4.5 4.5 0 1 0 0 9a4.5 4.5 0 1 0 0-9z", "M2 2h8v8H2z", "M6 1l5 9H1z", "M6 0.5L11.5 6L6 11.5L0.5 6z", "M6 11L1 2h10z"][it.shape || 0];
+  return sv("svg", {width: 12, height: 12, viewBox: "0 0 12 12", "aria-hidden": "true"}, sv("path", it.hollow ? {d: p, fill: "none", stroke: "var(--other)", "stroke-width": 1.4} : {d: p, fill: "var(" + it.v + ")"}));
+}
+function extent(list, get, log) {
+  let lo = Infinity, hi = -Infinity;
+  for (const r of list) { const v = get(r); if (typeof v !== "number" || !isFinite(v) || (log && !(v > 0))) continue; const t = log ? Math.log10(v) : v; if (t < lo) lo = t; if (t > hi) hi = t; }
+  if (!(hi >= lo)) return [0, 1];
+  if (hi === lo) { lo -= 0.5; hi += 0.5; }
+  const pad = (hi - lo) * 0.04;
+  return [lo - pad, hi + pad];
+}
+function renderMap() {
+  const m = S.map;
+  for (const a of ["x", "y"]) {
+    const sel = m[a], can = sel !== "map" && S.stats[sel] && S.stats[sel].min > 0, box = $("#m-l" + a);
+    box.disabled = !can;
+    box.checked = can && m["l" + a];
+    $("#m-" + a).value = sel;
+  }
+  $("#m-color").value = m.color;
+  $("#m-fit").checked = m.fit;
+  const ax = MapV.ax = axisDef(m.x, "x", m.lx), ay = MapV.ay = axisDef(m.y, "y", m.ly), col = MapV.col = colouring(m.color);
+  const pts = [];
+  let missing = 0;
+  for (const r of S.filtered) {
+    const x = ax.get(r), y = ay.get(r);
+    if (typeof x !== "number" || typeof y !== "number" || !isFinite(x) || !isFinite(y) || (ax.log && !(x > 0)) || (ay.log && !(y > 0))) { missing++; continue; }
+    const p = {r, x: ax.log ? Math.log10(x) : x, y: ay.log ? Math.log10(y) : y, sx: 0, sy: 0};
+    if (col.type === "cat") p.c = col.of(r); else p.v = r.m[col.key];
+    pts.push(p);
+  }
+  if (col.type === "seq") pts.sort((a, b) => (a.v == null ? -Infinity : a.v) - (b.v == null ? -Infinity : b.v));
+  MapV.pts = pts;
+  MapV.missing = missing;
+  const from = m.fit && pts.length ? pts.map((p) => p.r) : S.runs;
+  MapV.dx = extent(from, ax.get, ax.log);
+  MapV.dy = extent(from, ay.get, ay.log);
+  S.order = S.filtered.map((r) => r.id);
+  if (m.pin != null && !pts.some((p) => p.r.id === m.pin)) m.pin = null;
+  m.hover = null;
+  if (m.hl && col.type === "cat" && !col.index.has(m.hl)) m.hl = null;
+  drawMap();
+  renderLegend();
+  const dir = D.kinds_report && D.kinds_report.map_directions, share = D.kinds_report && D.kinds_report.map_shares;
+  const words = (i) => dir && dir[i] ? Object.entries(dir[i]).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 5).map(([k, w]) => (w < 0 ? "less " : "more ") + k).join(", ") : "";
+  const parts = [];
+  if (missing) parts.push(fmt(missing) + " of " + fmt(S.filtered.length) + " matching runs have no " + (ax.isMap || ay.isMap ? "map position yet" : "value here") + " and are not drawn.");
+  if (ax.isMap && words(0)) parts.push("To the right: " + words(0) + (share ? " (" + pc(share[0], 0) + " of the differences between forms)." : "."));
+  if (ay.isMap && words(1)) parts.push("Upwards: " + words(1) + (share ? " (" + pc(share[1], 0) + ")." : "."));
+  $("#m-note").textContent = parts.join(" ");
+}
+function drawMap() {
+  const cv = $("#map-cv"), box = $("#plot"), w = box.clientWidth, hh = box.clientHeight;
+  if (!w || !hh || !MapV.ax) return;
+  const dpr = window.devicePixelRatio || 1;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(hh * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(hh * dpr); }
+  const ctx = cv.getContext("2d"), ax = MapV.ax, ay = MapV.ay, col = MapV.col, m = S.map;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, hh);
+  const C = {surface: cssVar("--surface"), grid: cssVar("--grid"), axis: cssVar("--axis"), muted: cssVar("--muted"), ink2: cssVar("--ink-2"), ink: cssVar("--ink"), other: cssVar("--other")};
+  const mL = 56, mR = 14, mT = 12, mB = 42, pw = w - mL - mR, ph = hh - mT - mB;
+  let [x0, x1] = MapV.dx, [y0, y1] = MapV.dy;
+  if (ax.isMap && ay.isMap) { // the two map axes share one unit
+    const u = Math.max((x1 - x0) / pw, (y1 - y0) / ph), cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    x0 = cx - u * pw / 2; x1 = cx + u * pw / 2; y0 = cy - u * ph / 2; y1 = cy + u * ph / 2;
+  }
+  const X = (t) => mL + (t - x0) / (x1 - x0) * pw, Y = (t) => mT + ph - (t - y0) / (y1 - y0) * ph;
+  const font = '11px "IBM Plex Sans", system-ui, sans-serif';
+  ctx.font = font;
+  ctx.lineWidth = 1;
+  const ticks = (a, lo, hi) => a.log ? logTicks(Math.pow(10, lo), Math.pow(10, hi)).map((v) => [Math.log10(v), v]) : linTicks(lo, hi, a === ax ? Math.max(3, Math.floor(pw / 90)) : Math.max(3, Math.floor(ph / 60))).map((v) => [v, v]);
+  ctx.strokeStyle = C.grid;
+  ctx.fillStyle = C.muted;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  for (const [t, v] of ticks(ax, x0, x1)) {
+    const px = Math.round(X(t)) + 0.5;
+    if (px < mL - 1 || px > mL + pw + 1) continue;
+    ctx.beginPath(); ctx.moveTo(px, mT); ctx.lineTo(px, mT + ph); ctx.stroke();
+    ctx.fillText(fmt(v, 3), px, mT + ph + 6);
+  }
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  for (const [t, v] of ticks(ay, y0, y1)) {
+    const py = Math.round(Y(t)) + 0.5;
+    if (py < mT - 1 || py > mT + ph + 1) continue;
+    ctx.beginPath(); ctx.moveTo(mL, py); ctx.lineTo(mL + pw, py); ctx.stroke();
+    ctx.fillText(fmt(v, 3), mL - 6, py);
+  }
+  ctx.strokeStyle = C.axis;
+  ctx.strokeRect(mL + 0.5, mT + 0.5, pw, ph);
+  ctx.fillStyle = C.ink2;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText(ax.label + (ax.log ? " (log)" : ""), mL + pw / 2, hh - 8);
+  ctx.save();
+  ctx.translate(13, mT + ph / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText(ay.label + (ay.log ? " (log)" : ""), 0, 0);
+  ctx.restore();
+  // marks
+  const pts = MapV.pts, rad = pts.length > 1500 ? 3 : pts.length > 400 ? 3.6 : 4.4;
+  const colors = col.type === "cat" ? col.items.map((it) => it.hollow ? null : cssVar(it.v)) : null;
+  const stops = col.type === "seq" ? [0, 1, 2, 3, 4].map((i) => { const c = cssVar("--q" + i); return [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16)]; }) : null;
+  const ramp = (t) => { const f = t * 4, i = Math.min(3, Math.floor(f)), u = f - i, a = stops[i], b = stops[i + 1]; return "rgb(" + Math.round(a[0] + (b[0] - a[0]) * u) + "," + Math.round(a[1] + (b[1] - a[1]) * u) + "," + Math.round(a[2] + (b[2] - a[2]) * u) + ")"; };
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(mL, mT, pw, ph);
+  ctx.clip();
+  for (let pass = 0; pass < 2; pass++) for (const p of pts) {
+    p.sx = X(p.x);
+    p.sy = Y(p.y);
+    let fill = null, shape = 0;
+    if (col.type === "cat") { const i = col.index.get(p.c); fill = colors[i]; shape = col.items[i].shape; } else if (p.v != null) fill = ramp(col.t(p.v));
+    if ((fill == null) !== (pass === 0)) continue; // hollow marks go underneath
+    ctx.globalAlpha = m.hl && p.c !== m.hl ? 0.1 : 1;
+    drawMark(ctx, shape, p.sx, p.sy, rad);
+    if (fill == null) { ctx.strokeStyle = C.other; ctx.lineWidth = 1.2; ctx.stroke(); }
+    else { ctx.fillStyle = fill; ctx.fill(); ctx.strokeStyle = C.surface; ctx.lineWidth = 1; ctx.stroke(); }
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+  for (const id of [m.hover, m.pin]) {
+    const p = id == null ? null : pts.find((q) => q.r.id === id);
+    if (!p) continue;
+    ctx.beginPath();
+    ctx.arc(p.sx, p.sy, rad + 4.5, 0, 6.2832);
+    ctx.strokeStyle = C.ink;
+    ctx.lineWidth = id === m.pin ? 2 : 1.2;
+    ctx.stroke();
+  }
+  placeCard();
+}
+function renderLegend() {
+  const col = MapV.col, host = $("#legend"), counts = new Map();
+  host.replaceChildren(h("span", {class: "lt", text: "Colour: " + col.title}));
+  if (col.type === "cat") {
+    for (const p of MapV.pts) counts.set(p.c, (counts.get(p.c) || 0) + 1);
+    for (const it of col.items) {
+      host.append(h("button", {class: "lg", type: "button", "data-key": it.key, "aria-pressed": String(S.map.hl === it.key), title: "Show only these"}, shapeIcon(it), h("span", {text: it.label}), h("span", {class: "n", text: fmt(counts.get(it.key) || 0)})));
+    }
+  } else {
+    const none = MapV.pts.reduce((n, p) => n + (p.v == null ? 1 : 0), 0);
+    add(host, h("span", {class: "mono", text: fmt(col.lo, 3)}), h("span", {class: "ramp", role: "img", "aria-label": "from low to high"}), h("span", {class: "mono", text: fmt(col.hi, 3)}),
+      h("span", {class: "lt", text: (col.log ? " · log scale" : "") + " · values beyond the 2nd and 98th percentile take the end colours"}),
+      none ? h("span", {class: "key"}, shapeIcon({hollow: true, shape: 0}), fmt(none) + " without a value") : null);
+  }
+}
+function nearestPoint(px, py, maxd) {
+  let best = null, bd = maxd * maxd;
+  const hl = S.map.hl;
+  for (const p of MapV.pts) {
+    if (hl && p.c !== hl) continue;
+    const d = (p.sx - px) * (p.sx - px) + (p.sy - py) * (p.sy - py);
+    if (d <= bd) { bd = d; best = p; }
+  }
+  return best;
+}
+function placeCard() {
+  const m = S.map, card = $("#pcard"), id = m.hover != null ? m.hover : m.pin, p = id == null ? null : MapV.pts.find((q) => q.r.id === id);
+  if (!p) { card.hidden = true; card._id = null; return; }
+  const pinned = id === m.pin, sig = id + (pinned ? "p" : "h") + m.color + m.x + m.y;
+  if (card._id !== sig) {
+    card._id = sig;
+    const r = p.r, rows = [];
+    const row = (k, v) => rows.push(h("div", {class: "kv"}, h("span", {text: k}), h("b", {text: v})));
+    const used = [MapV.ax.key, MapV.ay.key, MapV.col.key];
+    if (MapV.ax.key) row(MapV.ax.key, fmt(r.m[MapV.ax.key]));
+    if (MapV.ay.key && MapV.ay.key !== MapV.ax.key) row(MapV.ay.key, fmt(r.m[MapV.ay.key]));
+    if (MapV.col.type === "seq" && MapV.col.key !== MapV.ax.key && MapV.col.key !== MapV.ay.key) row(MapV.col.key, fmt(r.m[MapV.col.key]));
+    if (rows.length < 3 && !used.includes("structure") && r.m.structure != null) row("structure", fmt(r.m.structure));
+    if (rows.length < 3) row("cells", fmt(r.cells));
+    fill(card, thumb(r, false, true), h("div", null, h("div", {class: "t", text: "Run " + r.id}), h("div", {class: "muted", text: (kindName(r.kind) || "no kind yet") + (r.status !== "ok" ? " · " + r.status.replace("-", " ") : "")}), rows, r.rating ? h("div", {class: "stars", text: stars(r.rating)}) : null),
+      pinned ? h("button", {class: "btn primary", type: "button", onclick: () => openRun(r.id)}, "Open run " + r.id) : null);
+    card.classList.toggle("pinned", pinned);
+  }
+  card.hidden = false;
+  const box = $("#plot"), w = box.clientWidth, hh = box.clientHeight, cw = card.offsetWidth, ch = card.offsetHeight;
+  let L = p.sx + 14;
+  if (L + cw > w - 4) L = p.sx - 14 - cw;
+  if (L < 4) L = Math.max(4, Math.min(w - cw - 4, p.sx - cw / 2));
+  let T = p.sy - ch / 2;
+  if (L < p.sx && L + cw > p.sx) T = p.sy + 14 + ch > hh - 4 ? p.sy - 14 - ch : p.sy + 14;
+  card.style.left = L + "px";
+  card.style.top = Math.max(4, Math.min(hh - ch - 4, T)) + "px";
+}
+function bindMap() {
+  const cv = $("#map-cv"), m = S.map;
+  const pos = (e) => { const b = cv.getBoundingClientRect(); return [e.clientX - b.left, e.clientY - b.top]; };
+  cv.addEventListener("pointermove", (e) => {
+    if (e.pointerType !== "mouse") return;
+    const [x, y] = pos(e), p = nearestPoint(x, y, 24), id = p ? p.r.id : null;
+    cv.style.cursor = p ? "pointer" : "default";
+    if (id !== m.hover) { m.hover = id; drawMap(); }
+  });
+  cv.addEventListener("pointerleave", () => { if (m.hover != null) { m.hover = null; drawMap(); } });
+  cv.addEventListener("click", (e) => {
+    const [x, y] = pos(e), p = nearestPoint(x, y, 28);
+    if (p && m.pin === p.r.id) { openRun(p.r.id); return; }
+    m.pin = p ? p.r.id : null;
+    m.hover = null;
+    drawMap();
+  });
+  cv.addEventListener("keydown", (e) => {
+    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Enter"].includes(e.key) || !MapV.pts.length) return;
+    e.preventDefault();
+    if (e.key === "Enter") { if (m.pin != null) openRun(m.pin); return; }
+    const byX = MapV.pts.slice().sort((a, b) => a.sx - b.sx || a.r.id - b.r.id), i = byX.findIndex((p) => p.r.id === m.pin);
+    const step = e.key === "ArrowRight" || e.key === "ArrowUp" ? 1 : -1;
+    m.pin = byX[i < 0 ? 0 : (i + step + byX.length) % byX.length].r.id;
+    drawMap();
+  });
+  $("#legend").addEventListener("click", (e) => {
+    const b = e.target.closest(".lg");
+    if (!b) return;
+    m.hl = m.hl === b.dataset.key ? null : b.dataset.key;
+    for (const x of document.querySelectorAll("#legend .lg")) x.setAttribute("aria-pressed", String(x.dataset.key === m.hl));
+    drawMap();
+  });
+  if ("ResizeObserver" in window) new ResizeObserver(() => { if (S.view === "map" && D) drawMap(); }).observe($("#plot"));
+}
+
+// ---------------------------------------------------------------- table
+function tableColumns() {
+  const cols = [
+    {k: "id", label: "id", get: (r) => r.id, num: 1, g: "Run"},
+    {k: "status", label: "status", get: (r) => r.status, g: "Run"},
+    {k: "origin", label: "origin", get: (r) => r.origin, g: "Run"},
+    {k: "kind", label: "kind", get: (r) => kindName(r.kind), g: "Run"},
+    {k: "rating", label: "rating", get: (r) => r.rating || null, num: 1, g: "Run"},
+    {k: "seed", label: "seed", get: (r) => r.seed, num: 1, plain: 1, g: "Run"},
+    {k: "init", label: "start", get: (r) => r.init, g: "Run"},
+    {k: "food", label: "food", get: (r) => r.food, g: "Run"},
+    {k: "sources", label: "sources", get: (r) => r.sources.join(", "), g: "Run"},
+    {k: "cells", label: "cells", get: (r) => r.cells, num: 1, g: "Run"},
+    {k: "step", label: "steps", get: (r) => r.step, num: 1, g: "Run"},
+  ];
+  let base = BASE_PARAMS.filter((p) => D.params.includes(p));
+  if (!base.length) base = D.params.filter((p) => S.runs.every((r) => p in r.params));
+  for (const p of base) cols.push({k: "p:" + p, label: p, get: (r) => r.params[p], num: 1, g: "Base parameters"});
+  for (const mk of S.metricKeys) if (S.table.cols.includes(mk)) cols.push({k: "m:" + mk, label: mk, get: (r) => r.m[mk], num: 1, g: "Metrics", title: featureAbout(mk)});
+  return cols;
+}
+function renderTable(keep) {
+  const t = S.table, cols = tableColumns();
+  let sc = cols.find((c) => c.k === t.sort);
+  if (!sc) { sc = cols[0]; t.sort = sc.k; t.dir = 1; }
+  const list = sortBy(S.filtered, sc.get, t.dir, sc.num);
+  S.order = list.map((r) => r.id);
+  const pages = Math.max(1, Math.ceil(list.length / ROWS));
+  if (!keep) t.page = 0;
+  t.page = Math.min(t.page, pages - 1);
+  const groups = [];
+  for (const c of cols) { const g = groups[groups.length - 1]; if (g && g[0] === c.g) g[1]++; else groups.push([c.g, 1]); }
+  $("#db thead").replaceChildren(
+    h("tr", {class: "grp"}, groups.map(([g, n]) => h("th", {colspan: n, text: g}))),
+    h("tr", {class: "col"}, cols.map((c) => h("th", {class: (c.num ? "num" : "") + (c.k === "id" ? " c-id" : ""), scope: "col", "aria-sort": c.k === t.sort ? (t.dir > 0 ? "ascending" : "descending") : null, title: c.title},
+      h("button", {type: "button", "data-col": c.k}, c.label + (c.k === t.sort ? (t.dir > 0 ? " ▲" : " ▼") : ""))))));
+  const rows = [];
+  for (const r of list.slice(t.page * ROWS, (t.page + 1) * ROWS)) {
+    rows.push(h("tr", {"data-run": r.id, tabIndex: 0}, cols.map((c) => {
+      const v = c.get(r);
+      if (c.k === "status") return h("td", null, pill(v));
+      if (c.k === "rating") return h("td", {class: "num"}, h("span", {class: "stars", text: stars(r.rating)}));
+      return h("td", {class: (c.num ? "num" : "") + (c.k === "id" ? " c-id" : ""), text: c.num ? (v == null ? "" : c.plain ? String(v) : fmt(v)) : String(v == null ? "" : v)});
+    })));
+  }
+  $("#db tbody").replaceChildren(...rows);
+  $("#t-pos").textContent = list.length ? "Rows " + fmt(t.page * ROWS + 1) + " to " + fmt(Math.min(list.length, (t.page + 1) * ROWS)) + " of " + fmt(list.length) : "";
+  $("#t-prev").disabled = t.page === 0;
+  $("#t-next").disabled = t.page >= pages - 1;
+  $("#t-empty").hidden = list.length > 0;
+  $("#t-scroll").hidden = !list.length;
+  $("#t-pick-sum").textContent = "Metric columns (" + S.table.cols.length + ")";
+}
+
+// ---------------------------------------------------------------- kinds
+function featureLabel(k) {
+  const m = /^relief_s(\d+)$/.exec(k);
+  if (m) return "relief at " + m[1] + (m[1] === "1" ? " link" : " links");
+  return k === "relief_rest" ? "relief of the rest of the shape" : k;
+}
+// a few sentences lean on the metric listed before them; these stand alone
+const ABOUT_ALONE = {curvature_std: "spread of the curvature per link", skew_s8: "which way the heights lean at 8 links (+ peaks, - pits)", link_std: "spread of the link length (health)", lobe_3: "strength of a three-fold pattern", lobe_4: "strength of a four-fold pattern"};
+function featureAbout(k) {
+  if (ABOUT_ALONE[k]) return ABOUT_ALONE[k];
+  if (S.about[k]) return S.about[k];
+  if (/^relief_s\d+$/.test(k)) return "relief in the band around that smoothing length";
+  return k === "relief_rest" ? "what is left of the shape after the bands: lobes, the body" : "";
+}
+function divBar(z, scale) {
+  const w = Math.min(50, Math.abs(z) / scale * 50);
+  return h("div", {class: "dv", role: "img", "aria-label": fmt(z, 3)}, h("i", {class: z < 0 ? "neg" : null, style: "width:" + w.toFixed(1) + "%"}));
+}
+function strip(ids) {
+  return h("div", {class: "strip"}, ids.map((id) => S.byId.get(id)).filter(Boolean).map((r) => h("button", {type: "button", "data-run": r.id, title: "Run " + r.id}, thumb(r), String(r.id))));
+}
+function renderKinds() {
+  const host = $("#kinds"), rep = D.kinds_report || {};
+  const unsorted = S.runs.reduce((n, r) => n + (r.kind == null ? 1 : 0), 0);
+  $("#k-note").textContent = D.kinds.length
+    ? fmt(rep.forms || 0) + " forms were sorted into " + D.kinds.length + " kinds by how alike their features are. " + (unsorted ? fmt(unsorted) + " runs are not sorted yet. " : "") + "Give a kind your own name; the working name stays beside it."
+    : "";
+  if (!D.kinds.length) { host.replaceChildren(h("p", {class: "empty", text: "The forms have not been sorted into kinds yet. When they are, each kind appears here with its typical form, forms from its middle and its edge, and what sets it apart."})); return; }
+  host.replaceChildren(...D.kinds.map((k) => {
+    const now = S.runs.reduce((n, r) => n + (r.kind === k.id ? 1 : 0), 0), typical = S.byId.get(k.typical);
+    const top = Object.entries(k.profile || {}).filter(([, z]) => typeof z === "number").sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 4);
+    const scale = Math.max(2, ...top.map(([, z]) => Math.abs(z)));
+    const input = h("input", {class: "inp kind-name", type: "text", id: "kind-name-" + k.id, "data-kind": k.id, maxlength: 80, value: k.given || "", placeholder: "Name this kind", "aria-label": "Your name for the kind with the working name " + k.name, disabled: Store.readOnly});
+    return h("article", {class: "kind"},
+      h("div", {class: "kind-head"},
+        k._slot >= 0 ? shapeIcon({v: "--s" + (k._slot + 1), shape: SHAPES[k._slot]}) : shapeIcon({v: "--other", shape: 0}),
+        input,
+        h("span", {class: "work"}, "working name: ", h("b", {text: k.name || "–"})),
+        h("span", {class: "cnt", text: fmt(k.count) + " forms" + (now !== k.count ? " when sorted, " + fmt(now) + " runs now" : "")}),
+        h("span", {class: "sv", "data-kind": k.id}),
+        h("button", {class: "btn", type: "button", "data-show-kind": k.id}, "Show in gallery")),
+      h("div", {class: "kind-body"},
+        typical ? h("button", {class: "typ", type: "button", "data-run": typical.id}, thumb(typical, true), "Typical form: run " + typical.id) : h("p", {class: "muted", text: "No typical form recorded."}),
+        h("div", {class: "kind-side"},
+          h("div", null, h("h4", {class: "sub", text: "From the middle"}), strip(k.middle || [])),
+          h("div", null, h("h4", {class: "sub", text: "From the edge"}), strip(k.edge || [])),
+          h("div", null, h("h4", {class: "sub", text: "What sets it apart, in spreads from the median form"}),
+            h("div", {class: "apart"}, top.map(([f, z]) => h("div", {class: "frow"}, h("span", {text: featureLabel(f)}), divBar(z, scale), h("span", {class: "fv", text: (z > 0 ? "+" : "") + fmt(z, 3)}), h("span", {class: "fa", text: featureAbout(f)}))))))));
+  }));
+  updateSaveUi();
+}
+function refreshKindNames() {
+  if (!D) return;
+  fillKindSelect();
+  for (const inp of document.querySelectorAll(".kind-name")) {
+    const k = S.kindById.get(Number(inp.dataset.kind));
+    if (k && document.activeElement !== inp && !Store.edits.has("kind:" + k.id)) inp.value = k.given || "";
+  }
+  if (S.view === "map" && S.map.color === "kind") { MapV.col = colouring("kind"); renderLegend(); }
+}
+
+// ---------------------------------------------------------------- early stop
+function segBar(label, parts, total) {
+  const bar = h("div", {class: "seg", role: "img", "aria-label": label + ": " + parts.map((p) => p.label + " " + p.n).join(", ")});
+  for (const p of parts) {
+    if (!p.n) continue;
+    const share = p.n / total, e = h("span", {class: "sg " + p.cls, style: "flex:" + p.n + " 1 0", title: p.label + ": " + fmt(p.n) + " (" + pc(share) + ")"});
+    if (share > 0.1) e.textContent = fmt(p.n);
+    bar.append(e);
+  }
+  return h("div", {class: "segrow"}, h("span", {text: label}), bar);
+}
+function renderStop() {
+  const host = $("#stop"), rep = D.stop.report, stages = D.stop.decision_stages || [12, 14, 16];
+  const stopped = S.runs.filter((r) => r.status === "stopped-early");
+  const kids = [];
+  const cellsList = stages.map((s) => fmt(stageCells(s)));
+  kids.push(h("p", {class: "lead"}, "A run is looked at when it reaches " + cellsList.slice(0, -1).join(", ") + " and " + cellsList[cellsList.length - 1] + " cells (stages " + stages.join(", ") + "; a stage is 4 · log10 of the cells, rounded). " +
+    "At each of them a rule reads how the form has grown so far (its structure and relief, how fast they rise, how folded and compressed the sheet is, how fast it grows) and gives the chance that it will end with structure" +
+    (rep ? ", meaning a final structure of at least " + fmt(rep.structure_threshold, 3) : "") + ". " +
+    "A run is stopped when that chance is below a limit set so that only about " + (rep ? pc(rep.miss_asked, 0) : "2%") + " of the forms that do end with structure would be stopped."));
+  if (!rep) kids.push(h("p", {class: "empty", text: "The rule has not been fitted and tested yet. Its test numbers appear here once it has: how many dull and structured forms it stops at each stage, the work it saves, and the runs it would stop by mistake."}));
+  else {
+    const st = rep.stopped || {}, dullStopped = stages.reduce((n, s) => n + ((st[s] || {}).dull || 0), 0), strStopped = stages.reduce((n, s) => n + ((st[s] || {}).structured || 0), 0);
+    kids.push(h("div", null, h("h3", {text: "Test on " + fmt(rep.runs) + " runs the rule was not fitted on"}), h("div", {class: "tiles"},
+      h("div", {class: "tile"}, h("div", {class: "v", text: pc(rep.dull_stopped_share)}), h("div", {class: "l", text: "of the dull forms are stopped"}), h("div", {class: "s", text: fmt(dullStopped) + " of " + fmt(rep.dull)})),
+      h("div", {class: "tile"}, h("div", {class: "v", text: pc(rep.structured_stopped_share)}), h("div", {class: "l", text: "of the structured forms are stopped by mistake"}), h("div", {class: "s", text: fmt(strStopped) + " of " + fmt(rep.structured)})),
+      h("div", {class: "tile"}, h("div", {class: "v", text: pc(rep.work_saved_share)}), h("div", {class: "l", text: "of the simulation work is saved"}), h("div", {class: "s", text: "work counted in cells × steps"})))));
+    const parts = (kind, total) => stages.map((s, i) => ({label: "stopped at stage " + s, n: (st[s] || {})[kind] || 0, cls: "abc"[Math.min(i, 2)]})).concat([{label: "grown to the end", n: total - stages.reduce((n, s) => n + ((st[s] || {})[kind] || 0), 0), cls: "d"}]);
+    kids.push(h("div", {class: "panel"}, h("h3", {text: "Where it stops them"}),
+      h("div", {class: "segs"}, segBar(fmt(rep.dull) + " dull forms", parts("dull", rep.dull), rep.dull), segBar(fmt(rep.structured) + " structured forms", parts("structured", rep.structured), rep.structured)),
+      h("div", {class: "keys"}, stages.map((s, i) => h("span", {class: "key"}, h("i", {style: "background:var(--o" + [1, 3, 5][Math.min(i, 2)] + ")"}), "stopped at stage " + s + " (" + fmt(stageCells(s)) + " cells)")), h("span", {class: "key"}, h("i", {style: "background:var(--well)"}), "grown to the end")),
+      h("div", {class: "scroll-x", style: "margin-top:12px"}, h("table", {class: "plain"},
+        h("thead", null, h("tr", null, h("th", {text: "Decision"}), h("th", {class: "num", text: "Cells"}), h("th", {class: "num", text: "Dull stopped"}), h("th", {class: "num", text: "Structured stopped"}))),
+        h("tbody", null, stages.map((s) => h("tr", null, h("td", {text: "Stage " + s}), h("td", {class: "num", text: fmt(stageCells(s))}), h("td", {class: "num", text: fmt((st[s] || {}).dull || 0)}), h("td", {class: "num", text: fmt((st[s] || {}).structured || 0)}))),
+          h("tr", null, h("td", {text: "Not stopped"}), h("td", {class: "num", text: ""}), h("td", {class: "num", text: fmt(rep.dull - dullStopped)}), h("td", {class: "num", text: fmt(rep.structured - strStopped)})))))));
+    const W = rep.weights || {}, ws = stages.filter((s) => W[s]);
+    if (ws.length) {
+      const names = Object.keys(W[ws[0]]).filter((n) => n !== "constant");
+      const weight = (n) => Math.max(...ws.map((s) => Math.abs(W[s][n] || 0)));
+      const top = names.sort((a, b) => weight(b) - weight(a)).slice(0, 8), scale = Math.max(...top.map(weight)) || 1;
+      kids.push(h("div", {class: "panel"}, h("h3", {text: "The inputs that weigh most"}),
+        h("p", {class: "note", style: "margin-bottom:8px", text: "Weights of the rule on its inputs, each input on its own spread. To the right (blue): more of it raises the chance of structure. To the left (red): lowers it."}),
+        h("div", {class: "scroll-x"}, h("table", {class: "plain"},
+          h("thead", null, h("tr", null, h("th", {text: "Input"}), ws.map((s) => h("th", {class: "num", text: "Stage " + s + " · " + fmt(stageCells(s)) + " cells"})))),
+          h("tbody", null, top.map((n) => h("tr", null, h("td", {text: n}), ws.map((s) => h("td", null, h("div", {class: "wcell"}, divBar(W[s][n] || 0, scale), h("span", {text: (W[s][n] > 0 ? "+" : "") + fmt(W[s][n] || 0, 3)}))))))))),
+        names.length > top.length ? h("p", {class: "note", style: "margin-top:8px", text: "The other inputs weigh less: " + names.slice(8).join(", ") + "."}) : null));
+    }
+    const mistakes = (rep.mistakes || []).map((x) => [x, S.byId.get(x.run)]).filter((x) => x[1]);
+    kids.push(h("div", null, h("h3", {text: "Stopped by mistake in the test"}),
+      mistakes.length ? h("div", {class: "picks"}, mistakes.map(([x, r]) => runCard(r, h("span", {text: "stage " + x.stage + " · ended with structure " + fmt(x.final_structure, 3)}))))
+        : h("p", {class: "muted", text: "No form with structure was stopped in the test."}),
+      mistakes.length ? h("p", {class: "note", style: "margin-top:8px", text: "These were grown to the end; the test only replays where the rule would have cut them."}) : null));
+    const se = D.stop.settled;
+    if (se && se.settled) kids.push(h("p", {class: "note", text: "A second, simpler test asks whether a form has stopped changing in kind (its scale-free numbers change by less than a tenth per half decade of cells): " + stages.map((s) => fmt(se.settled[s] || 0) + " at stage " + s).join(", ") + ", of " + fmt(se.runs) + " runs."}));
+  }
+  kids.push(h("div", null, h("h3", {text: "Runs the rule has stopped"}),
+    stopped.length ? [h("div", {class: "tools", style: "padding-top:0"}, h("span", {text: fmt(stopped.length) + " runs have the status stopped early."}), h("button", {class: "btn", type: "button", id: "stop-show"}, "Show them in the gallery")),
+      h("div", {class: "picks"}, stopped.slice(0, 48).map((r) => runCard(r, h("span", {text: "at " + fmt(r.stopped_at || r.cells) + " cells" + (r.predicted != null ? " · chance " + pc(r.predicted) : "")}))))]
+      : h("p", {class: "muted", text: "No run in the database has been stopped early."})));
+  host.replaceChildren(...kids);
+}
+
+// ---------------------------------------------------------------- run record
+function similar(r, n) {
+  if (!r.z) return [];
+  const out = [];
+  for (const o of S.runs) {
+    if (o === r || !o.z) continue;
+    let d = 0;
+    for (let i = 0; i < r.z.length; i++) { const a = r.z[i], b = o.z[i]; if (a != null && b != null) d += (a - b) * (a - b); }
+    out.push([Math.sqrt(d), o]);
+  }
+  out.sort((a, b) => a[0] - b[0]);
+  return out.slice(0, n);
+}
+function growCommand(r) {
+  const target = r.target || r.cells, cap = Math.ceil(1.5 * target), out = "runs\\grown\\" + r.id;
+  const names = D.params.filter((k) => k in r.params).concat(Object.keys(r.params).filter((k) => !D.params.includes(k)));
+  const params = names.map((k) => "--param " + k + "=" + r.params[k]).join(" ");
+  const tail = "--capacity " + cap + " --until-cells " + target + " --out " + out + (params ? " " + params : "");
+  if (String(r.init).startsWith("icosphere:")) return {text: "build\\release\\bin\\cf_gpu.exe --new " + r.init + " --seed " + r.seed + " --init-food " + r.food + " " + tail, note: null};
+  return {
+    text: "build\\release\\bin\\cf_run.exe --new " + r.init + " --seed " + r.seed + " --init-food " + r.food + " --steps 0 --out " + out + "\\start" + (params ? " " + params : "") + "\n" +
+      "build\\release\\bin\\cf_gpu.exe --load " + out + "\\start\\latest.cfs " + tail,
+    note: "cf_gpu makes only icospheres itself. For this start shape, cf_run --new " + r.init + " --steps 0 makes the start state first (first line), and cf_gpu loads it.",
+  };
+}
+function metricRow(r, k) {
+  const v = r.m[k], p = percentile(k, v);
+  return h("div", {class: "mrow"}, h("span", {class: "mk", text: k}), h("span", {class: "mv", text: fmt(v)}),
+    p == null ? h("span") : h("span", {class: "pct", role: "img", title: "Higher than " + pc(p, 0) + " of the runs", "aria-label": "higher than " + pc(p, 0) + " of the runs"}, h("i", {style: "left:" + (p * 100).toFixed(1) + "%"})),
+    h("span", {class: "ma", text: S.about[k] || ""}));
+}
+function reliefChart(host, r) {
+  host.replaceChildren();
+  const R = r.relief, sig = [...new Set([1, 2, 4, 8, 16].concat(R.sigma || []))].sort((a, b) => a - b);
+  const bands = sig.map((s) => { const i = (R.sigma || []).indexOf(s); return {label: String(s), name: s + (s === 1 ? " link" : " links"), v: i >= 0 ? R.value[i] : null, skew: i >= 0 && R.skew ? R.skew[i] : null}; });
+  bands.push({label: "rest", name: "the rest of the shape", v: R.rest, skew: null});
+  const max = Math.max(0, ...bands.map((b) => b.v || 0));
+  if (!(max > 0)) { host.append(h("p", {class: "muted", text: "No relief was measured for this run."})); return; }
+  const W = Math.max(260, Math.min(520, Math.floor(host.clientWidth))), H = 210, mL = 48, mR = 8, mT = 18, mB = 42, pw = W - mL - mR, ph = H - mT - mB;
+  const tk = linTicks(0, max * 1.12, 4), top = Math.max(max * 1.12, tk[tk.length - 1]), Y = (v) => mT + ph - v / top * ph, band = pw / bands.length, bw = Math.min(24, band * 0.6);
+  const svg = sv("svg", {width: W, height: H, viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": "Relief of run " + r.id + " per scale band"});
+  for (const t of tk) svg.append(sv("line", {x1: mL, x2: W - mR, y1: Y(t) + 0.5, y2: Y(t) + 0.5, stroke: t === 0 ? "var(--axis)" : "var(--grid)", "stroke-width": 1}), sv("text", {x: mL - 6, y: Y(t) + 4, "text-anchor": "end"}, fmt(t, 2)));
+  bands.forEach((b, i) => {
+    const cx = mL + band * (i + 0.5);
+    svg.append(sv("text", {x: cx, y: H - mB + 15, "text-anchor": "middle", class: "lb"}, b.label));
+    if (b.v == null) { svg.append(sv("text", {x: cx, y: Y(0) - 6, "text-anchor": "middle"}, "–")); return; }
+    const y = Y(b.v), hgt = Math.max(1, Y(0) - y), rr = Math.min(4, hgt, bw / 2), x = cx - bw / 2;
+    const bar = sv("path", {d: "M" + x + " " + Y(0) + "V" + (y + rr) + "Q" + x + " " + y + " " + (x + rr) + " " + y + "H" + (x + bw - rr) + "Q" + (x + bw) + " " + y + " " + (x + bw) + " " + (y + rr) + "V" + Y(0) + "Z", fill: "var(--s1)"});
+    const hit = sv("rect", {x: cx - band / 2, y: mT, width: band, height: ph, fill: "transparent", tabindex: 0, role: "img", "aria-label": "Relief at " + b.name + ": " + fmt(b.v)});
+    const tipKids = () => [h("div", {class: "th", text: b.label === "rest" ? "The rest of the shape" : "Smoothing length " + b.name}), h("div", {class: "tr"}, h("b", {text: fmt(b.v)}), h("span", {text: "relief"})),
+      b.skew != null ? h("div", {class: "tr"}, h("b", {text: fmt(b.skew, 3)}), h("span", {text: "skew: " + (b.skew > 0.1 ? "peaks" : b.skew < -0.1 ? "pits" : "even")})) : null];
+    hit.addEventListener("pointermove", (e) => { bar.setAttribute("opacity", 0.8); showTip(tipKids(), e.clientX, e.clientY); });
+    hit.addEventListener("pointerleave", () => { bar.removeAttribute("opacity"); hideTip(); });
+    hit.addEventListener("focus", () => { const q = hit.getBoundingClientRect(); showTip(tipKids(), q.left + q.width / 2, q.top + 20); });
+    hit.addEventListener("blur", hideTip);
+    svg.append(bar, sv("text", {x: cx, y: y - 5, "text-anchor": "middle", class: "vl"}, fmt(b.v, 3)), hit);
+  });
+  svg.append(sv("text", {x: mL + pw / 2, y: H - 6, "text-anchor": "middle"}, "smoothing length, links"));
+  host.append(svg);
+}
+function growthChart(host, r) {
+  host.replaceChildren();
+  const T = r.traj, cells = T.cells || [], n = cells.length;
+  if (n < 2) { host.append(h("p", {class: "muted", text: "Fewer than two growth stages were recorded for this run, so there is no curve to draw."})); return; }
+  const top = [["structure", "structure", "--s1", 2.5], ["relief_micro", "relief micro", "--s2", 2], ["relief_meso", "relief meso", "--s3", 2], ["relief_macro", "relief macro", "--s4", 2]];
+  const low = [["area_ratio", "area ratio", "--s5", 2]];
+  const W = Math.max(260, Math.floor(host.clientWidth)), mL = 46, mR = W < 420 ? 12 : 62, mT = 42, h1 = 176, gap = 18, h2 = 70, mB = 36, H = mT + h1 + gap + h2 + mB, pw = W - mL - mR;
+  const l0 = Math.log10(cells[0]), l1 = Math.log10(cells[n - 1]), padx = Math.max(0.03, (l1 - l0) * 0.03), a = l0 - padx, b = l1 + padx;
+  const X = (c) => mL + (Math.log10(c) - a) / (b - a) * pw;
+  const dom = (keys, minRatio) => {
+    let lo = Infinity, hi = 0;
+    for (const [k] of keys) for (const v of T[k] || []) if (v > 0) { if (v < lo) lo = v; if (v > hi) hi = v; }
+    if (!(hi > 0)) return null;
+    if (hi / lo < minRatio) { const mid = Math.sqrt(lo * hi), f = Math.sqrt(minRatio); lo = mid / f; hi = mid * f; }
+    const p = Math.log10(hi / lo) * 0.08;
+    return [Math.log10(lo) - p, Math.log10(hi) + p];
+  };
+  const svg = sv("svg", {width: W, height: H, viewBox: "0 0 " + W + " " + H, role: "img", tabindex: 0, "aria-label": "Growth of run " + r.id + ": structure, relief and area ratio against the number of cells. Left and right arrows read the stages."});
+  const dots = [];
+  const panel = (y0, hgt, keys, d, title) => {
+    svg.append(sv("text", {x: mL, y: y0 - 5, class: "lb"}, title));
+    if (!d) { svg.append(sv("text", {x: mL + 6, y: y0 + hgt / 2}, "no values above zero")); return; }
+    const Y = (v) => y0 + hgt - (Math.log10(v) - d[0]) / (d[1] - d[0]) * hgt;
+    for (const t of logTicks(Math.pow(10, d[0]), Math.pow(10, d[1]))) svg.append(sv("line", {x1: mL, x2: mL + pw, y1: Math.round(Y(t)) + 0.5, y2: Math.round(Y(t)) + 0.5, stroke: "var(--grid)", "stroke-width": 1}), sv("text", {x: mL - 6, y: Y(t) + 4, "text-anchor": "end"}, fmt(t, 2)));
+    svg.append(sv("rect", {x: mL + 0.5, y: y0 + 0.5, width: pw, height: hgt, fill: "none", stroke: "var(--axis)", "stroke-width": 1}));
+    const ends = [];
+    for (const [k, name, color, width] of keys) {
+      const vals = T[k] || [];
+      let path = "", pen = false, last = null;
+      for (let i = 0; i < n; i++) {
+        const v = vals[i];
+        if (!(v > 0)) { pen = false; continue; }
+        path += (pen ? "L" : "M") + X(cells[i]).toFixed(1) + " " + Y(v).toFixed(1);
+        pen = true;
+        last = i;
+      }
+      if (last == null) continue;
+      svg.append(sv("path", {d: path, fill: "none", stroke: "var(" + color + ")", "stroke-width": width, "stroke-linejoin": "round", "stroke-linecap": "round"}),
+        sv("circle", {cx: X(cells[last]), cy: Y(vals[last]), r: 4, fill: "var(" + color + ")", stroke: "var(--surface)", "stroke-width": 2}));
+      ends.push([Y(vals[last]), name.replace("relief ", "")]);
+      const dot = sv("circle", {r: 4, fill: "var(" + color + ")", stroke: "var(--surface)", "stroke-width": 2, visibility: "hidden"});
+      dots.push({dot, vals, Y, name, color});
+    }
+    ends.sort((p, q) => p[0] - q[0]);
+    if (mR > 40 && ends.every((e, i) => i === 0 || e[0] - ends[i - 1][0] >= 12)) for (const [y, name] of ends) svg.append(sv("text", {x: mL + pw + 8, y: y + 4, class: "lb"}, name));
+  };
+  panel(mT, h1, top, dom(top, 10), "structure and relief");
+  panel(mT + h1 + gap, h2, low, dom(low, 1.5), "area ratio");
+  for (let e = Math.ceil(a); e <= Math.floor(b); e++) svg.append(sv("text", {x: X(Math.pow(10, e)), y: H - mB + 15, "text-anchor": "middle"}, fmt(Math.pow(10, e))));
+  svg.append(sv("text", {x: mL + pw, y: H - 6, "text-anchor": "end"}, "cells"));
+  const chance = T.chance || {};
+  for (const s of D.stop.decision_stages || []) {
+    const lc = s / 4;
+    if (lc < a || lc > b) continue;
+    const x = Math.round(X(Math.pow(10, lc))) + 0.5;
+    svg.append(sv("line", {x1: x, x2: x, y1: mT - 2, y2: mT + h1 + gap + h2, stroke: "var(--ink-2)", "stroke-width": 1, opacity: 0.55}),
+      sv("text", {x, y: 10, "text-anchor": "middle", class: "lb"}, "stage " + s), sv("text", {x, y: 22, "text-anchor": "middle"}, chance[s] != null ? pc(chance[s], chance[s] < 0.1 ? 1 : 0) : "–"));
+  }
+  const cross = sv("line", {y1: mT, y2: mT + h1 + gap + h2, stroke: "var(--ink)", "stroke-width": 1, visibility: "hidden"});
+  add(svg, cross, dots.map((d) => d.dot));
+  let cur = -1;
+  const at = (i, cx, cy) => {
+    cur = i;
+    const x = X(cells[i]);
+    cross.setAttribute("x1", x); cross.setAttribute("x2", x); cross.setAttribute("visibility", "visible");
+    for (const d of dots) {
+      const v = d.vals[i];
+      if (v > 0) { d.dot.setAttribute("cx", x); d.dot.setAttribute("cy", d.Y(v)); d.dot.setAttribute("visibility", "visible"); } else d.dot.setAttribute("visibility", "hidden");
+    }
+    const st = T.stage ? T.stage[i] : null, ch = st != null ? chance[st] : null;
+    const kids = [h("div", {class: "th", text: (st != null ? "Stage " + st + " · " : "") + fmt(cells[i]) + " cells" + (T.step ? " · step " + fmt(T.step[i]) : "")})];
+    for (const d of dots) kids.push(h("div", {class: "tr"}, h("i", {style: "background:var(" + d.color + ")"}), h("b", {text: fmt(d.vals[i])}), h("span", {text: d.name})));
+    if (T.buried_fraction) kids.push(h("div", {class: "tr"}, h("i"), h("b", {text: fmt(T.buried_fraction[i])}), h("span", {text: "buried fraction"})));
+    if (ch != null) kids.push(h("div", {class: "tr"}, h("i"), h("b", {text: pc(ch)}), h("span", {text: "chance of structure"})));
+    if (cx == null) { const q = svg.getBoundingClientRect(); cx = q.left + x; cy = q.top + mT + 30; }
+    showTip(kids, cx, cy);
+  };
+  const off = () => { cur = -1; cross.setAttribute("visibility", "hidden"); for (const d of dots) d.dot.setAttribute("visibility", "hidden"); hideTip(); };
+  const overlay = sv("rect", {x: mL, y: mT, width: pw, height: h1 + gap + h2, fill: "transparent"});
+  overlay.addEventListener("pointermove", (e) => {
+    const px = e.clientX - svg.getBoundingClientRect().left;
+    let best = 0, bd = Infinity;
+    for (let i = 0; i < n; i++) { const d = Math.abs(X(cells[i]) - px); if (d < bd) { bd = d; best = i; } }
+    at(best, e.clientX, e.clientY);
+  });
+  overlay.addEventListener("pointerleave", off);
+  svg.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    e.stopPropagation();
+    at(Math.max(0, Math.min(n - 1, cur < 0 ? (e.key === "ArrowRight" ? 0 : n - 1) : cur + (e.key === "ArrowRight" ? 1 : -1))));
+  });
+  svg.addEventListener("blur", off);
+  svg.append(overlay);
+  host.append(svg);
+}
+function growthTable(r) {
+  const T = r.traj, keys = ["structure", "relief_micro", "relief_meso", "relief_macro", "area_ratio", "buried_fraction"].filter((k) => T[k]);
+  return h("details", {class: "nums"}, h("summary", {text: "Show the numbers"}), h("div", {class: "scroll-x"}, h("table", {class: "plain"},
+    h("thead", null, h("tr", null, ["stage", "cells", "step"].concat(keys).map((k) => h("th", {class: "num", text: k})), h("th", {class: "num", text: "chance"}))),
+    h("tbody", null, (T.cells || []).map((c, i) => h("tr", null, h("td", {class: "num", text: T.stage ? String(T.stage[i]) : ""}), h("td", {class: "num", text: fmt(c)}), h("td", {class: "num", text: T.step ? fmt(T.step[i]) : ""}),
+      keys.map((k) => h("td", {class: "num", text: fmt(T[k][i])})), h("td", {class: "num", text: T.stage && T.chance && T.chance[T.stage[i]] != null ? pc(T.chance[T.stage[i]]) : ""})))))));
+}
+function drawCharts() {
+  const r = S.byId.get(S.detail), a = $("#c-relief"), b = $("#c-growth");
+  if (!r || !a || !b) return;
+  reliefChart(a, r);
+  growthChart(b, r);
+}
+function syncDetailLabel() {
+  const r = S.byId.get(S.detail);
+  if (!r || Store.edits.has("run:" + r.id)) return;
+  refreshRunUi(r.id);
+  const c = $("#d-category"), n = $("#d-note");
+  if (c && document.activeElement !== c) c.value = r.category;
+  if (n && document.activeElement !== n) n.value = r.note;
+}
+function showDetail(force) {
+  const box = $("#detail");
+  if (S.detail == null) {
+    if (box.hidden) return;
+    box.hidden = true;
+    document.documentElement.classList.remove("locked");
+    hideTip();
+    if (S.lastFocus && document.contains(S.lastFocus)) S.lastFocus.focus({preventScroll: true});
+    if (S.labelsChanged && D) applyFilters(true);
+    return;
+  }
+  if (!D) return;
+  if (box.hidden) {
+    S.lastFocus = document.activeElement;
+    box.hidden = false;
+    document.documentElement.classList.add("locked");
+  }
+  hideTip();
+  renderDetail(S.detail);
+  if (!force) { $("#sheet-body").scrollTop = 0; $("#sheet").focus({preventScroll: true}); }
+}
+function renderDetail(id) {
+  const r = S.byId.get(id), head = $("#sheet-head"), body = $("#sheet-body"), idx = S.order.indexOf(id);
+  const prev = idx > 0 ? S.order[idx - 1] : null, next = idx >= 0 && idx < S.order.length - 1 ? S.order[idx + 1] : null;
+  S.dPrev = prev;
+  S.dNext = next;
+  head.replaceChildren(
+    h("button", {class: "btn", type: "button", id: "d-prev", disabled: prev == null, title: "Previous run (left arrow)", onclick: () => prev != null && openRun(prev)}, "‹ Previous"),
+    h("button", {class: "btn", type: "button", id: "d-next", disabled: next == null, title: "Next run (right arrow)", onclick: () => next != null && openRun(next)}, "Next ›"),
+    h("span", {class: "d-pos", text: idx >= 0 ? fmt(idx + 1) + " of " + fmt(S.order.length) : "not among the matching runs"}),
+    h("button", {class: "btn quiet d-close", type: "button", id: "d-close", title: "Close (Esc)", onclick: closeDetail}, "Close ✕"));
+  $("#detail").setAttribute("aria-label", "Run " + id);
+  if (!r) { body.replaceChildren(h("p", {class: "empty", text: "Run " + id + " is not in the data. It may have been removed, or the data on this page is older than the link."})); return; }
+  const k = S.kindById.get(r.kind), ro = Store.readOnly;
+  const runLink = (pid) => pid == null ? null : S.byId.has(pid) ? h("button", {class: "linkb mono", type: "button", onclick: () => openRun(pid)}, "run " + pid) : h("span", {class: "mono", text: "run " + pid + " (not in the data)"});
+  // pictures
+  const pics = h("div", {class: "pics"});
+  const views = ["a", "b"].filter((v) => r.img[v]);
+  if (views.length) {
+    if (views.length === 1) pics.classList.add("one");
+    for (const v of views) pics.append(h("img", {src: encodeURI(r.img[v]), width: 320, height: 240, alt: "Run " + r.id + ", view " + v, onerror: (e) => { e.target.replaceWith(thumb(r, true, true)); }}));
+  } else {
+    pics.classList.add("one");
+    pics.append(thumb(r, true, true));
+    if (r.tile || r.thumb) pics.append(h("span", {class: "cap2", text: "From the contact sheet (" + (r.tile ? D.sheets.tile : D.thumbs.tile).join(" × ") + " px)."}));
+  }
+  // rating, category, note
+  const cats = [...new Set(S.runs.map((x) => x.category).filter(Boolean))].sort((x, y) => x.localeCompare(y));
+  const rate = h("div", {class: "rate", role: "group", "aria-label": "Rating"},
+    [1, 2, 3, 4, 5].map((n) => h("button", {class: "starb" + (n <= r.rating ? " on" : ""), type: "button", "data-star": n, "aria-pressed": String(n === r.rating), "aria-label": n + (n === 1 ? " star" : " stars"), title: n + (n === 1 ? " star" : " stars") + " (key " + n + ")", disabled: ro, text: "★"})),
+    h("button", {class: "btn quiet", type: "button", "data-star": 0, title: "Clear the rating (key 0)", disabled: ro}, "Clear"));
+  const cat = h("input", {class: "inp", type: "text", id: "d-category", list: "d-cats", maxlength: 80, value: r.category, placeholder: "for example: coral, brain, dull", autocomplete: "off", disabled: ro});
+  const note = h("textarea", {class: "inp", id: "d-note", rows: 3, maxlength: 2000, placeholder: "What you see in this form", disabled: ro});
+  note.value = r.note;
+  cat.addEventListener("input", () => editLabel(r.id, {category: cat.value}, 900));
+  cat.addEventListener("change", () => editLabel(r.id, {category: cat.value.trim()}, 0));
+  note.addEventListener("input", () => editLabel(r.id, {note: note.value}, 900));
+  note.addEventListener("change", () => editLabel(r.id, {note: note.value}, 0));
+  rate.addEventListener("click", (e) => { const b = e.target.closest("[data-star]"); if (b && !ro) editLabel(r.id, {rating: Number(b.dataset.star)}, 0); });
+  const rateBox = h("div", {class: "rate-box"}, rate,
+    h("label", {class: "field"}, h("span", {text: "Category"}), cat), h("datalist", {id: "d-cats"}, cats.map((c) => h("option", {value: c}))),
+    h("label", {class: "field"}, h("span", {text: "Note"}), note), h("div", {class: "d-save", id: "d-save", role: "status"}));
+  // facts
+  const fact = (dt, dd) => dd == null || dd === "" ? null : h("div", null, h("dt", {text: dt}), h("dd", null, dd));
+  const facts = h("dl", {class: "facts"},
+    fact("Seed", h("span", {class: "mono", text: String(r.seed)})), fact("Start shape", h("span", {class: "mono", text: r.init})), fact("Initial food", r.food),
+    fact("Sources on", r.sources.length ? r.sources.join(", ") : "none"),
+    fact("Cells", fmt(r.cells) + (r.target ? " of " + fmt(r.target) + " asked" : "")), fact("Steps", fmt(r.step)), fact("Wall time", r.wall != null ? fmt(r.wall, 3) + " s" : null),
+    fact("Stopped early", r.stopped_at != null ? "at " + fmt(r.stopped_at) + " cells" : null),
+    fact("Chance of structure at its last decision", r.predicted != null ? pc(r.predicted) : null),
+    fact("Parents", r.parent != null || r.parent2 != null ? [runLink(r.parent), r.parent != null && r.parent2 != null ? " and " : null, runLink(r.parent2)] : null));
+  const pnames = D.params.filter((p) => p in r.params).concat(Object.keys(r.params).filter((p) => !D.params.includes(p)));
+  const sim = similar(r, 6), cmd = growCommand(r), known = new Set(GROUPS.flatMap((g) => g[1]));
+  const rest = S.metricKeys.filter((m) => !known.has(m));
+  // one unbreakable piece per argument, so a line never breaks inside "--param name=value"
+  const cmdBox = h("pre", {class: "cmd", id: "d-cmd"}, cmd.text.split("\n").map((line, i) => [i ? "\n" : null, line.split(" ").map((word, j) => [j ? " " : null, h("span", {text: word})])]));
+  const copied = h("span", {class: "muted", role: "status"});
+  const copy = h("button", {class: "btn", type: "button", id: "d-copy", onclick: () => {
+    const fallback = () => { const range = document.createRange(); range.selectNodeContents(cmdBox); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range); copied.textContent = "Selected. Press Ctrl+C to copy."; };
+    try { navigator.clipboard.writeText(cmd.text).then(() => { copied.textContent = "Copied."; }, fallback); } catch (e) { fallback(); }
+  }}, "Copy command");
+  body.replaceChildren(
+    h("div", {class: "d-title"}, h("h2", null, "Run ", h("span", {text: String(r.id)})), pill(r.status), h("span", {class: "muted", text: "origin: " + r.origin}),
+      k ? h("button", {class: "linkb", type: "button", title: "Show this kind in the gallery", onclick: () => { S.filters = Object.assign(BLANK(), {kind: String(k.id)}); syncFilterUi(); S.shown = null; go("gallery", true); }}, "kind: " + kindLabel(k)) : h("span", {class: "muted", text: "no kind yet"})),
+    h("div", {class: "d-top"}, pics, rateBox),
+    h("section", {class: "sec"}, h("h3", {text: "Run"}), facts),
+    h("section", {class: "sec"}, h("h3", {text: "Parameters"}), h("div", {class: "params"}, pnames.map((p) => h("div", {class: "prow"}, h("span", {text: p}), h("b", {text: String(r.params[p]).replace(/-/g, "−")})))), pnames.length ? null : h("p", {class: "muted", text: "No parameters recorded."})),
+    h("section", {class: "sec"}, h("h3", {text: "Relief and growth"}), h("div", {class: "charts"},
+      h("div", {class: "chart"}, h("h4", {text: "Relief per scale band"}), h("p", {class: "cs", text: "Relief left in each band of smoothing length (in links, the rest length of a link between two cells), over the form's radius. The rest is the shape of the body itself."}), h("div", {id: "c-relief"})),
+      h("div", {class: "chart"}, h("h4", {text: "Growth"}), h("p", {class: "cs", text: "Against the number of cells, on log axes. The marked stages are where the early-stop rule decides; under each is the chance it gave this run of ending with structure."}),
+        h("div", {class: "keys", style: "margin:0 0 6px"}, [["--s1", "structure"], ["--s2", "relief micro"], ["--s3", "relief meso"], ["--s4", "relief macro"], ["--s5", "area ratio"]].map(([c, name]) => h("span", {class: "key"}, h("i", {class: "ln", style: "background:var(" + c + ")"}), name))),
+        h("div", {id: "c-growth"}), growthTable(r)))),
+    h("section", {class: "sec"}, h("h3", {text: "Metrics"}),
+      h("p", {class: "note", style: "margin-bottom:10px", text: "The mark on each strip shows where this run stands among all " + fmt(S.runs.length) + " runs, from lowest (left) to highest."}),
+      GROUPS.map(([title, keys]) => { const have = keys.filter((m) => S.metricKeys.includes(m)); return have.length ? h("div", {class: "mgroup"}, h("h4", {class: "sub", text: title}), have.map((m) => metricRow(r, m))) : null; }),
+      rest.length ? h("div", {class: "mgroup"}, h("h4", {class: "sub", text: "Other"}), rest.map((m) => metricRow(r, m))) : null),
+    h("section", {class: "sec"}, h("h3", {text: "Most similar forms"}),
+      sim.length ? h("div", {class: "picks six"}, sim.map(([d, o]) => runCard(o, h("span", {text: "distance " + fmt(d, 3)})))) : h("p", {class: "muted", text: "This run has no features to compare yet."}),
+      sim.length ? h("p", {class: "note", style: "margin-top:8px", text: "Distance between the standardised features of two forms; 0 is the same form."}) : null),
+    h("section", {class: "sec"}, h("h3", {text: "Grow it again"}), cmdBox, h("div", {class: "cmd-row"}, copy, copied),
+      cmd.note ? h("p", {class: "note", style: "margin-top:8px", text: cmd.note}) : null,
+      h("p", {class: "note", style: "margin-top:6px", text: "Run it from the repository folder. The capacity is 1.5 × the target cells. Parameters are listed here to six digits."})));
+  updateSaveUi();
+  drawCharts();
+}
+
+// ---------------------------------------------------------------- events
+function bind() {
+  window.addEventListener("hashchange", () => applyRoute(location.hash));
+  $("#reload").addEventListener("click", () => load(true));
+  $("#save-retry").addEventListener("click", flushAll);
+  // filters
+  const text = debounce(() => { S.filters.q = $("#f-q").value.trim(); applyFilters(false); }, 160);
+  $("#f-q").addEventListener("input", text);
+  for (const [id, key] of [["f-status", "status"], ["f-origin", "origin"], ["f-kind", "kind"], ["f-rating", "rating"]]) $("#" + id).addEventListener("change", (e) => { S.filters[key] = e.target.value; applyFilters(false); });
+  $("#f-metric").addEventListener("change", (e) => { S.filters.metric = e.target.value; S.filters.min = S.filters.max = ""; syncFilterUi(); applyFilters(false); });
+  const range = debounce(() => { S.filters.min = $("#f-min").value; S.filters.max = $("#f-max").value; applyFilters(false); }, 200);
+  $("#f-min").addEventListener("input", range);
+  $("#f-max").addEventListener("input", range);
+  $("#f-sources").addEventListener("click", (e) => {
+    const b = e.target.closest(".chip");
+    if (!b) return;
+    const s = b.dataset.source, on = S.filters.sources.includes(s);
+    S.filters.sources = on ? S.filters.sources.filter((x) => x !== s) : S.filters.sources.concat(s);
+    b.setAttribute("aria-pressed", String(!on));
+    applyFilters(false);
+  });
+  $("#f-clear").addEventListener("click", () => setFilters({}));
+  $("#f-toggle").addEventListener("click", () => { const open = $("#f-more").classList.toggle("open"); $("#f-toggle").setAttribute("aria-expanded", String(open)); });
+  // gallery
+  $("#g-sort").addEventListener("change", (e) => { S.gallery.sort = e.target.value; S.gallery.dir = e.target.value === "id" ? 1 : -1; applyFilters(false); });
+  $("#g-dir").addEventListener("click", () => { S.gallery.dir = -S.gallery.dir; applyFilters(false); });
+  $("#g-more").addEventListener("click", () => appendCards(PAGE));
+  if (moreIO) moreIO.observe($("#g-more"));
+  // anything that shows a run opens its record
+  $("#main").addEventListener("click", (e) => {
+    const k = e.target.closest("[data-show-kind]");
+    if (k) { setFilters({kind: k.dataset.showKind}, "gallery"); return; }
+    if (e.target.closest("#stop-show")) { setFilters({status: "stopped-early"}, "gallery"); return; }
+    const c = e.target.closest("[data-run]");
+    if (c && !e.target.closest("input, select, textarea, a")) openRun(Number(c.dataset.run));
+  });
+  $("#sheet-body").addEventListener("click", (e) => { const c = e.target.closest(".card[data-run]"); if (c) openRun(Number(c.dataset.run)); });
+  // map
+  for (const a of ["x", "y"]) {
+    $("#m-" + a).addEventListener("change", (e) => { S.map[a] = e.target.value; renderMap(); saveUi(); });
+    $("#m-l" + a).addEventListener("change", (e) => { S.map["l" + a] = e.target.checked; renderMap(); saveUi(); });
+  }
+  $("#m-color").addEventListener("change", (e) => { S.map.color = e.target.value; S.map.hl = null; renderMap(); saveUi(); });
+  $("#m-fit").addEventListener("change", (e) => { S.map.fit = e.target.checked; renderMap(); saveUi(); });
+  bindMap();
+  // table
+  $("#db thead").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-col]");
+    if (!b) return;
+    const t = S.table;
+    if (t.sort === b.dataset.col) t.dir = -t.dir; else { t.sort = b.dataset.col; t.dir = 1; }
+    renderTable(false);
+  });
+  $("#db tbody").addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.dataset.run) openRun(Number(e.target.dataset.run)); });
+  $("#t-prev").addEventListener("click", () => { S.table.page--; renderTable(true); $("#t-scroll").scrollTop = 0; });
+  $("#t-next").addEventListener("click", () => { S.table.page++; renderTable(true); $("#t-scroll").scrollTop = 0; });
+  $("#t-pick-list").addEventListener("change", () => {
+    S.table.cols = [...document.querySelectorAll("#t-pick-list input:checked")].map((i) => i.value);
+    saveUi();
+    renderTable(true);
+  });
+  document.addEventListener("click", (e) => { const p = $("#t-pick"); if (p.open && !p.contains(e.target)) p.open = false; });
+  // kinds: names
+  $("#kinds").addEventListener("input", (e) => { const i = e.target.closest(".kind-name"); if (i) { markKind(i); editKind(Number(i.dataset.kind), i.value, 900); } });
+  $("#kinds").addEventListener("change", (e) => { const i = e.target.closest(".kind-name"); if (i) { markKind(i); editKind(Number(i.dataset.kind), i.value.trim(), 0); } });
+  $("#kinds").addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.closest(".kind-name")) e.target.blur(); });
+  // record
+  $("#scrim").addEventListener("click", closeDetail);
+  document.addEventListener("keydown", (e) => {
+    if (S.detail == null || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === "Escape") { closeDetail(); return; }
+    if (e.target.closest && e.target.closest("input, textarea, select")) return;
+    if (e.key === "ArrowLeft" && S.dPrev != null) openRun(S.dPrev);
+    else if (e.key === "ArrowRight" && S.dNext != null) openRun(S.dNext);
+    else if (/^[0-5]$/.test(e.key) && S.byId.has(S.detail)) editLabel(S.detail, {rating: Number(e.key)}, 0);
+  });
+  window.addEventListener("resize", debounce(() => { if (S.detail != null && D) drawCharts(); }, 160));
+  // the canvas takes its colours from the theme
+  const themed = () => { if (D && S.view === "map") drawMap(); };
+  try { matchMedia("(prefers-color-scheme: dark)").addEventListener("change", themed); } catch (e) { /* older browsers */ }
+  new MutationObserver(themed).observe(document.documentElement, {attributes: true, attributeFilter: ["data-theme"]});
+}
+function markKind(input) { const e = $('.kind .sv[data-kind="' + input.dataset.kind + '"]'); if (e) e.dataset.touched = "1"; }
+
+// ---------------------------------------------------------------- start
+loadUi();
+bind();
+applyRoute(location.hash);
+showView();
+updateSaveUi();
+connectStore();
+load(false);
+})();
+</script>

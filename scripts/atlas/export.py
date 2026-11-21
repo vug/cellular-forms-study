@@ -33,7 +33,17 @@ def build(store):
     labels = store.labels()
     kinds = store.meta("kinds", [])
     kind_names = store.meta("kind_names", {})
-    sheets, sheet_index = [], {}
+    sheets = {"tile": [], "thumb": []}
+    sheet_index = {"tile": {}, "thumb": {}}
+
+    def place(kind, entry):
+        path, where = entry.split("#")
+        if path not in sheet_index[kind]:
+            sheet_index[kind][path] = len(sheets[kind])
+            sheets[kind].append(path)
+        col, row = (int(v) for v in where.split(","))
+        return [sheet_index[kind][path], col, row]
+
     runs, parameter_names = [], []
     for r in store.runs("ORDER BY id"):
         s = stages.get(r["id"], [])
@@ -43,14 +53,8 @@ def build(store):
             if name not in parameter_names:
                 parameter_names.append(name)
         img = images.get(r["id"], {})
-        tile = None
-        if "tile" in img:
-            path, where = img["tile"].split("#")
-            if path not in sheet_index:
-                sheet_index[path] = len(sheets)
-                sheets.append(path)
-            col, row = (int(v) for v in where.split(","))
-            tile = [sheet_index[path], col, row]
+        tile = place("tile", img["tile"]) if "tile" in img else None
+        thumb = place("thumb", img["thumb"]) if "thumb" in img else None
         chance = {}
         if rule is not None:
             for stage in rule.decision_stages():
@@ -62,7 +66,7 @@ def build(store):
         runs.append({
             "id": r["id"], "status": r["status"], "origin": r["origin"], "parent": r["parent"], "parent2": r["parent2"], "seed": r["seed"],
             "init": r["init"]["shape"], "food": r["init"].get("food", "random"), "sources": sorted((genome.get("sources") or {}).keys()),
-            "params": {k: _round(v, 6) for k, v in r["params"].items()},
+            "params": {k: _round(v, 9) for k, v in r["params"].items()},  # nine digits, as they are passed to the tools
             "cells": r["cells"], "step": r["step"], "target": r["target_cells"], "wall": _round(r["wall_s"], 3), "stopped_at": r["stopped_at"],
             "predicted": _round(r["predicted"], 3), "kind": r["cluster"], "x": _round(r["map_x"], 4), "y": _round(r["map_y"], 4),
             "m": {name: _round(features.raw(final, name)) for name, _about in features.METRICS},
@@ -72,7 +76,7 @@ def build(store):
             "lobes": [_round(v, 3) for v in final.get("lobes", [])],
             "traj": dict({"cells": [d["cells"] for d in s], "step": [d["step"] for d in s], "stage": [d["stage"] for d in s], "chance": chance},
                          **{name: [_round(d.get(name)) for d in s] for name in TRAJECTORY}),
-            "img": {v: img[v] for v in ("a", "b") if v in img}, "tile": tile,
+            "img": {v: img[v] for v in ("a", "b") if v in img}, "tile": tile, "thumb": thumb,
             "rating": label.get("rating"), "category": label.get("category"), "note": label.get("note"),
         })
     for kind in kinds:
@@ -80,7 +84,8 @@ def build(store):
     return {
         "generated": time.strftime("%Y-%m-%d %H:%M"), "metrics": [{"key": k, "about": about} for k, about in features.METRICS], "features": features.NAMES,
         "params": parameter_names, "trajectory": list(TRAJECTORY), "runs": runs, "kinds": kinds,
-        "sheets": {"files": sheets, "tile": [240, 180], "columns": 8},
+        "sheets": {"files": sheets["tile"], "tile": [240, 180], "columns": 8},
+        "thumbs": {"files": sheets["thumb"], "tile": [120, 90], "columns": 8},
         "stop": {"report": store.meta("stop_report"), "settled": store.meta("settled_report"), "decision_stages": list(stop.DECISION_STAGES)},
         "scales": store.meta("feature_scales"), "distance": store.meta("distance_scale"), "kinds_report": store.meta("kinds_report"),
     }
@@ -98,12 +103,12 @@ def cmd_export(args):
     with open(os.path.join(out, "data.json"), "w", encoding="utf-8") as f:
         json.dump(data, f, separators=(",", ":"))
     total = os.path.getsize(os.path.join(out, "data.json"))
-    for path in data["sheets"]["files"]:
+    for path in data["sheets"]["files"] + data["thumbs"]["files"]:
         shutil.copy(os.path.join(store.root, path), os.path.join(out, path))
         total += os.path.getsize(os.path.join(out, path))
     if os.path.exists(PAGE):
         shutil.copy(PAGE, os.path.join(out, "index.html"))
-    print(f"{out}: {len(data['runs'])} runs, {len(data['sheets']['files'])} contact sheets, {total / 1e6:.1f} MB")
+    print(f"{out}: {len(data['runs'])} runs, {len(data['sheets']['files'])} + {len(data['thumbs']['files'])} contact sheets, {total / 1e6:.1f} MB")
 
 
 def register(sub):

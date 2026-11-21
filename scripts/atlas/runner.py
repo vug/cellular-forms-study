@@ -31,6 +31,8 @@ THUMB = "320x240"
 # the page that is published shows those, since it cannot carry a file per run.
 TILE = "240x180"
 SHEET_COLUMNS = 8
+# ... and a smaller tile in a second set of sheets, for long lists on a phone.
+SHEETS = {"tile": TILE, "thumb": "120x90"}
 LOOK = ["--mode", "mesh", "--color", "uniform", "--set", "shadows=on"]
 
 
@@ -252,20 +254,21 @@ class Runner:
                     name = f"{run:06d}_{view}.png"
                     shutil.move(made, os.path.join(self.store.root, "img", name))
                     self.store.set_image(run, view, "img/" + name)
-        # The contact sheets, 48 tiles each.
+        # The contact sheets, 48 tiles each, in two sizes.
         for first in range(0, len(states), 6 * SHEET_COLUMNS):
             part = states[first:first + 6 * SHEET_COLUMNS]
-            cmd = [explore.tool("cf_view")]
-            for run, run_dir in part:
-                cmd += ["--snapshot", os.path.join(run_dir, "latest.cfs")]
-            name = f"sheet_{part[0][0]:06d}.png"
-            cmd += ["--frame", "all", "--sheet", "--sheet-columns", str(SHEET_COLUMNS), "--size", TILE, "--screenshot", os.path.join(self.store.root, "img", name)] + LOOK
-            proc = subprocess.run(cmd, capture_output=True, text=True)
-            if proc.returncode != 0:
-                print("atlas: cf_view failed:", (proc.stderr or proc.stdout)[-300:], flush=True)
-                continue
-            for k, (run, run_dir) in enumerate(part):
-                self.store.set_image(run, "tile", f"img/{name}#{k % SHEET_COLUMNS},{k // SHEET_COLUMNS}")
+            for kind, size in SHEETS.items():
+                cmd = [explore.tool("cf_view")]
+                for run, run_dir in part:
+                    cmd += ["--snapshot", os.path.join(run_dir, "latest.cfs")]
+                name = f"{'sheet' if kind == 'tile' else 'thumbs'}_{part[0][0]:06d}.png"
+                cmd += ["--frame", "all", "--sheet", "--sheet-columns", str(SHEET_COLUMNS), "--size", size, "--screenshot", os.path.join(self.store.root, "img", name)] + LOOK
+                proc = subprocess.run(cmd, capture_output=True, text=True)
+                if proc.returncode != 0:
+                    print("atlas: cf_view failed:", (proc.stderr or proc.stdout)[-300:], flush=True)
+                    continue
+                for k, (run, run_dir) in enumerate(part):
+                    self.store.set_image(run, kind, f"img/{name}#{k % SHEET_COLUMNS},{k // SHEET_COLUMNS}")
         shutil.rmtree(out_dir, ignore_errors=True)
 
     def retake(self, runs, batch=48):

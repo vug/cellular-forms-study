@@ -105,7 +105,150 @@ def cmd_kinds(args):
         print(f"  kind {kind['id']:2d}: {kind['count']:5d} forms, typical run {kind['typical']:5d}: {kind['name']}")
 
 
+def cmd_long_check(args):
+    """Do dull forms stay dull when they are grown ten times larger? Picks forms of the survey
+    across the whole range of structure, two thirds of them below the threshold, grows each to
+    --target and compares the structure at both sizes."""
+    from .runner import Job, Runner
+    store = Store(args.root)
+    rule = store.meta("stop_rule")
+    if not rule:
+        raise SystemExit("atlas: run 'stop-fit' first")
+    threshold = rule["structure_threshold"]
+    runs = sorted(((s[-1]["structure"], r) for r, s in grown(store, {"survey"}) if r["seed"] == 1), key=lambda x: x[0])
+    dull = [x for x in runs if x[0] < threshold]
+    structured = [x for x in runs if x[0] >= threshold]
+
+    def spread(items, count):
+        return [items[int(k * (len(items) - 1) / max(count - 1, 1))] for k in range(min(count, len(items)))]
+
+    picked = spread(dull, args.count * 2 // 3) + spread(structured, args.count - args.count * 2 // 3)
+    jobs = []
+    for _structure, r in picked:
+        job = Job(r["genome"], seed=r["seed"], origin="long", parent=r["id"], target=args.target)
+        jobs.append(job)
+    runner = Runner(store, max_steps=250000, max_seconds=900.0)
+    ids = runner.run_many(jobs)
+    rows = []
+    for (small, r), run in zip(picked, ids):
+        if run is None:
+            continue
+        big = store.runs("WHERE id = ?", (run,))[0]
+        stages = store.stages(run)
+        reached = stages and stages[-1]["cells"] >= 0.9 * args.target
+        rows.append({"run": r["id"], "long_run": run, "structure_small": small, "structure_large": stages[-1]["structure"] if reached else None,
+                     "status": big["status"], "cells": big["cells"]})
+    done = [x for x in rows if x["structure_large"] is not None]
+    was_dull = [x for x in done if x["structure_small"] < threshold]
+    bloomed = [x for x in was_dull if x["structure_large"] >= threshold]
+    was_structured = [x for x in done if x["structure_small"] >= threshold]
+    faded = [x for x in was_structured if x["structure_large"] < threshold]
+    factors = sorted(x["structure_large"] / max(x["structure_small"], 1e-4) for x in done)
+    report = {"target": args.target, "threshold": threshold, "picked": len(rows), "reached": len(done), "dull": len(was_dull), "bloomed": len(bloomed),
+              "structured": len(was_structured), "faded": len(faded), "median_factor": factors[len(factors) // 2] if factors else None, "rows": rows}
+    store.set_meta("long_check", report)
+    print(f"{len(rows)} forms grown on to {args.target} cells, {len(done)} reached it (the others: " +
+          ", ".join(sorted({x['status'] for x in rows if x['structure_large'] is None})) + ")" if len(done) < len(rows) else f"{len(rows)} forms grown on to {args.target} cells, all reached it")
+    print(f"  dull at the small size (structure below {threshold:.4f}): {len(was_dull)}; of those, with structure at the large size: {len(bloomed)}")
+    for x in sorted(bloomed, key=lambda x: -x["structure_large"]):
+        print(f"    run {x['run']} -> {x['long_run']}: structure {x['structure_small']:.4f} -> {x['structure_large']:.4f}")
+    print(f"  with structure at the small size: {len(was_structured)}; of those, dull at the large size: {len(faded)}")
+    if factors:
+        print(f"  structure at the large size over structure at the small size: median {factors[len(factors) // 2]:.2f}, from {factors[0]:.2f} to {factors[-1]:.2f}")
+
+
+def cmd_inits(args):
+    """Does the start shape matter? Grows parameter sets of the survey again from each of the
+    other start shapes and measures how far the form ends up from the one grown from the usual
+    icosphere, against how far two seeds end up from each other."""
+    import random
+    from . import space
+    from .runner import Job, Runner
+    store = Store(args.root)
+    scales = features.Scales.load(store)
+    if scales is None:
+        raise SystemExit("atlas: run 'features' first")
+    rng = random.Random(args.seed)
+    usual = [(r, s) for r, s in grown(store, {"survey"}) if r["init"] == space.DEFAULT_INIT and r["seed"] == 1]
+    picked = rng.sample(usual, min(args.sets, len(usual)))
+    jobs, meaning = [], []
+    for r, _s in picked:
+        for init in space.OTHER_INITS:
+            genome = dict(r["genome"], init=dict(init))
+            jobs.append(Job(genome, seed=1, origin="inits", parent=r["id"], target=r["target_cells"]))
+            meaning.append((r["id"], init))
+        jobs.append(Job(r["genome"], seed=2, origin="inits", parent=r["id"], target=r["target_cells"]))  # the yardstick: another seed
+        meaning.append((r["id"], "seed"))
+    ids = Runner(store).run_many(jobs)
+    final = {r["id"]: features.vector(s[-1]) for r, s in picked}
+    by_init = {}
+    for (parent, init), run in zip(meaning, ids):
+        stages = store.stages(run) if run is not None else []
+        r = store.runs("WHERE id = ?", (run,))[0] if run is not None else None
+        if not r or r["status"] != "ok" or not stages:
+            by_init.setdefault("did not finish", []).append(None)
+            continue
+        name = "another seed" if init == "seed" else init["shape"] + ("" if init.get("food", "random") == "random" else ", no food at the start")
+        by_init.setdefault(name, []).append(scales.distance(final[parent], features.vector(stages[-1])))
+    print(f"{len(picked)} parameter sets; distance of the form from the one grown from icosphere:2 with seed 1 (median, 90 % below)")
+    report = {}
+    for name, d in sorted(by_init.items(), key=lambda x: x[0] != "another seed"):
+        d = sorted(x for x in d if x is not None)
+        if d:
+            report[name] = {"runs": len(d), "median": d[len(d) // 2], "p90": d[int(0.9 * (len(d) - 1))]}
+            print(f"  {name:36s} {len(d):3d} runs  median {d[len(d) // 2]:5.2f}   90 % below {d[int(0.9 * (len(d) - 1))]:5.2f}")
+    store.set_meta("inits_report", report)
+
+
+def cmd_import_labels(args):
+    """Takes ratings, categories, notes and kind names that were entered on the published page
+    into the database. --dir is a folder with labels/<run id>.json and kinds/<kind id>.json, as
+    a read of the page's store saves them."""
+    store = Store(args.root)
+
+    def fields(path):
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+        for key in ("data", "fields", "value"):  # the document itself, or wrapped
+            if isinstance(doc.get(key), dict) and not any(k in doc for k in ("rating", "category", "note", "name")):
+                doc = doc[key]
+        return doc
+
+    labels = names = 0
+    folder = os.path.join(args.dir, "labels")
+    for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+        if name.endswith(".json") and name[:-5].isdigit():
+            doc = fields(os.path.join(folder, name))
+            rating = doc.get("rating")
+            store.set_label(int(name[:-5]), rating=None if rating is None else int(rating), category=doc.get("category"), note=doc.get("note"))
+            labels += 1
+    folder = os.path.join(args.dir, "kinds")
+    given = store.meta("kind_names", {})
+    for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+        if name.endswith(".json") and name[:-5].isdigit():
+            doc = fields(os.path.join(folder, name))
+            if doc.get("name") is not None:
+                given[name[:-5]] = str(doc["name"])[:80]
+                names += 1
+    store.set_meta("kind_names", given)
+    print(f"{labels} ratings and {names} kind names taken into {store.root}")
+
+
 def register(sub):
+    p = sub.add_parser("import-labels", help="take ratings and kind names entered on the published page into the database")
+    p.add_argument("--dir", required=True)
+    p.set_defaults(run=cmd_import_labels)
+
+    p = sub.add_parser("inits", help="grow parameter sets of the survey from other start shapes: does the start matter?")
+    p.add_argument("--sets", type=int, default=24)
+    p.add_argument("--seed", type=int, default=1)
+    p.set_defaults(run=cmd_inits)
+
+    p = sub.add_parser("long-check", help="grow forms of the survey ten times larger: do dull forms stay dull?")
+    p.add_argument("--count", type=int, default=60)
+    p.add_argument("--target", type=int, default=316228)
+    p.set_defaults(run=cmd_long_check)
+
     p = sub.add_parser("features", help="measure the spread between seeds and between forms of every feature")
     p.set_defaults(run=cmd_features)
 

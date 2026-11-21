@@ -64,7 +64,7 @@ def cmd_photos(args):
     """Takes the screenshots that are missing (or, with --all, every one again)."""
     store = Store(args.root)
     have = store.images()
-    runs = [r for r in store.runs("ORDER BY id") if args.all or not all(v in have.get(r["id"], {}) for v in ("a", "b", "tile"))]
+    runs = [r for r in store.runs("ORDER BY id") if args.all or not all(v in have.get(r["id"], {}) for v in ("a", "b", "tile", "thumb"))]
     print(f"{len(runs)} runs to photograph")
     t0 = time.time()
     Runner(store).retake(runs)

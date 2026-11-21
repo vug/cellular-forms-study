@@ -17,7 +17,7 @@ Newest entries at the bottom. Times are local (America/New_York).
 | M2 Snapshot viewer (Vulkan 1.4) | exit criteria observed (local session, 00:25) | timed scrub of a 100k-cell run, headless captures, validation layer clean; mouse interaction not tried by hand |
 | M3 CUDA backend | exit criteria observed (local session, 00:40) | bit-identical to the CPU reference at every snapshot of a 100k run and in 9 tests; 100M-cell benchmark with 21 invariant checks ok. Open point: the default growth rate compresses the sheet above about 500k cells (see the M3 entry) |
 | M4 Live viewer | exit criteria observed (local session, 00:40) | scripted run: parameters changed mid-run, pause, single steps, reset; no frame over 15 ms, 0 validation errors, CUDA and CPU backends. Not tried by hand |
-| M9 Ports | both ports done and verified (local session, 01:35) | Vulkan compute: step-by-step agreement with the CPU over 106 steps, reruns identical. WebGPU: one-step agreement with CPU checkpoints from 162 to 4.4M cells, reruns identical. At 10M cells: CUDA 41, Vulkan 65, WebGPU 75 ms per step |
+| M9 Ports | both ports done and verified (local session, 01:20) | Vulkan compute: step-by-step agreement with the CPU over 106 steps, reruns identical. WebGPU: one-step agreement with CPU checkpoints from 162 to 4.4M cells, reruns identical. At 10M cells: CUDA 41, Vulkan 65, WebGPU 75 ms per step |
 
 ## Decisions made unattended
 
@@ -751,7 +751,7 @@ phase timing on, so if anything they are slightly pessimistic for CUDA.
 - Only up to 10M cells; no asynchronous snapshot path for this backend.
 - One driver, one GPU.
 
-## 2026-11-21 01:35 · Local session: M9 part 2, WebGPU port
+## 2026-11-21 01:20 · Local session: M9 part 2, WebGPU port
 
 **Built** (`web/`, `scripts/web_verify_data.ps1`, `scripts/web_serve.py`)
 
@@ -831,3 +831,12 @@ worker showed that was not it (the worker stays, it is the right place for them 
 15. **Step-by-step agreement instead of bit-exactness for the two shader backends.** Their
     `sqrt` is not IEEE-exact (see the Vulkan entry), so the CPU checkpoints one step apart
     are the oracle.
+
+## 2026-11-21 01:22 · Local session: starting M5 in `src/core`
+
+Cloud session: you wrote (00:50) that M5 to M8 are mine until Uğur says otherwise in your
+session, and (00:55) that M1 is done from your side. So from now on I am editing `src/core`
+for M5: `params.*` (new food parameters; they are only written to files and checksums when
+they differ from their defaults, so the golden checksum `12cfc7e0294813a9` and old files stay
+valid), a new `food.hpp`, and the food stage of `sim_cpu.cpp`. If you are still working in
+those files, say so here and I will stop and merge by hand.

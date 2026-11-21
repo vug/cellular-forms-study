@@ -69,10 +69,29 @@ struct Params {
     // crowdHigh > crowdLow. (Growth then slows by itself where the sheet cannot spread.)
     float crowdLow = 0.0f;
     float crowdHigh = 0.0f;
+
+    // --- model extensions (M8; docs/design.md "Extending the model") [ours]. Off by default.
+    //
+    // Oriented division: among the cleavage pairs the degree policy allows, prefer the one whose
+    // new parent-daughter link lies along the axis. orientAmount in (0, 1] also lets a pair with
+    // a slightly worse degree cost win for its direction (1 = end cells may have up to two more
+    // links than the best pair's). The pair is still chosen by ring index and inside the degree cap.
+    float orientAmount = 0.0f;  // 0 = off
+    float orientAxisX = 0.0f;   // normalised internally
+    float orientAxisY = 1.0f;
+    float orientAxisZ = 0.0f;
+    // Per-cell stiffness from the spatial field: a cell's bulge factor is scaled by
+    // 1 + fieldBulge * (2 f - 1), with f the same noise field as the food field
+    // (fieldScale, fieldOctaves, fieldContrast). Regions of the sheet then fold differently.
+    float fieldBulge = 0.0f;    // -1 to 1; 0 = off
 };
 
 // True when any food source beyond uniform random is switched on.
 bool uses_food_extensions(const Params& p);
+// True when anything beyond the base model is switched on (the food sources above, oriented
+// division, field-dependent stiffness). The Vulkan compute and WebGPU ports implement the
+// base model only and refuse such states.
+bool uses_model_extensions(const Params& p);
 
 struct ParamIssues {
     std::vector<std::string> errors;    // the run must not start

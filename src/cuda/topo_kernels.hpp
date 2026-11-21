@@ -62,17 +62,20 @@ CF_FN bool tv_can_split(const TopoView& s, std::uint32_t v, std::uint32_t i, std
 // Cleavage pair packed as (i << 4) | j; kNoPair when no pair respects the degree cap.
 inline constexpr std::uint8_t kNoPair = 0xFFu;
 
-// Ties between equally good pairs: with `pos` given, the pair with the shortest cleavage links
-// |a - v| + |b - v| (walking the tied pairs from the hashed choice, strictly shorter only);
-// without it, the hashed choice.
-CF_FN std::uint8_t tv_choose_cleavage_pair(const TopoView& s, std::uint32_t v, std::uint64_t tieHash, const Vec3* pos) {
+// Same as cf::choose_cleavage_pair (core/topology.cpp), including oriented division (M8): with
+// orient.amount > 0 the candidates are the pairs within amount * 200 of the best degree cost,
+// and the one whose new parent-daughter link is most aligned with orient.axis wins; otherwise
+// the pairs with the best cost, and among them the shortest cleavage links (when `pos` is given).
+CF_FN std::uint8_t tv_choose_cleavage_pair(const TopoView& s, std::uint32_t v, std::uint64_t tieHash, const Vec3* pos,
+                                           const Vec3* normal, Orientation orient) {
     const std::uint32_t d = s.deg[v];
     const std::uint32_t* r = tv_ring(s, v);
     const std::uint32_t offs[2] = {d / 2, (d + 1) / 2};
     const std::uint32_t nOffs = offs[0] == offs[1] ? 1u : 2u;
 
-    std::uint8_t tiesI[2 * kMaxDeg], tiesJ[2 * kMaxDeg];
-    std::uint32_t nTies = 0;
+    std::uint8_t allI[2 * kMaxDeg], allJ[2 * kMaxDeg];
+    std::uint32_t allCost[2 * kMaxDeg];
+    std::uint32_t nAll = 0;
     std::uint32_t best = 0xFFFFFFFFu;
     for (std::uint32_t i = 0; i < d; ++i) {
         for (std::uint32_t o = 0; o < nOffs; ++o) {
@@ -80,20 +83,41 @@ CF_FN std::uint8_t tv_choose_cleavage_pair(const TopoView& s, std::uint32_t v, s
             if (!tv_can_split(s, v, i, j)) continue;
             const std::uint32_t da = s.deg[r[i]], db = s.deg[r[j]];
             const std::uint32_t cost = (da > db ? da : db) * 100u + da + db;
-            if (cost < best) {
-                best = cost;
-                nTies = 0;
-            }
-            if (cost == best) {
-                tiesI[nTies] = static_cast<std::uint8_t>(i);
-                tiesJ[nTies] = static_cast<std::uint8_t>(j);
-                ++nTies;
-            }
+            allI[nAll] = static_cast<std::uint8_t>(i);
+            allJ[nAll] = static_cast<std::uint8_t>(j);
+            allCost[nAll] = cost;
+            ++nAll;
+            if (cost < best) best = cost;
         }
     }
-    if (nTies == 0) return kNoPair;
+    if (nAll == 0) return kNoPair;
+
+    const bool oriented = orient.amount > 0.0f && pos != nullptr && normal != nullptr;
+    const std::uint32_t margin = oriented ? static_cast<std::uint32_t>(orient.amount * 200.0f + 0.5f) : 0u;
+    std::uint8_t tiesI[2 * kMaxDeg], tiesJ[2 * kMaxDeg];
+    std::uint32_t nTies = 0;
+    for (std::uint32_t k = 0; k < nAll; ++k) {
+        if (allCost[k] <= best + margin) {
+            tiesI[nTies] = allI[k];
+            tiesJ[nTies] = allJ[k];
+            ++nTies;
+        }
+    }
+
     std::uint32_t pick = static_cast<std::uint32_t>(tieHash % nTies);
-    if (pos != nullptr && nTies > 1) {
+    if (oriented && nTies > 1) {
+        const Vec3 N = normal[v];
+        const std::uint32_t start = pick;
+        float bestAlign = std::fabs(dot(unit_or_zero(cross(N, pos[r[tiesJ[pick]]] - pos[r[tiesI[pick]]])), orient.axis));
+        for (std::uint32_t k = 1; k < nTies; ++k) {
+            const std::uint32_t q = (start + k) % nTies;
+            const float align = std::fabs(dot(unit_or_zero(cross(N, pos[r[tiesJ[q]]] - pos[r[tiesI[q]]])), orient.axis));
+            if (align > bestAlign) {
+                bestAlign = align;
+                pick = q;
+            }
+        }
+    } else if (pos != nullptr && nTies > 1) {
         const Vec3 P = pos[v];
         float bestLen = length(pos[r[tiesI[pick]]] - P) + length(pos[r[tiesJ[pick]]] - P);
         const std::uint32_t start = pick;

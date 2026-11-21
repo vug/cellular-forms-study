@@ -73,8 +73,14 @@ CF_TEST(cuda_topo_kernels_match_the_core_functions) {
         const std::uint64_t tie = rng.next();
         // Alternate between the hashed tie-break and the geometric one (positions given).
         const bool geometric = (k % 2) == 1;
-        const CleavagePair ca = choose_cleavage_pair(a, v, tie, geometric ? a.pos.data() : nullptr);
-        const std::uint8_t cb = tv_choose_cleavage_pair(view_of(b), v, tie, geometric ? b.pos.data() : nullptr);
+        // ... and every third time with oriented division (M8).
+        Orientation orient;
+        if (k % 3 == 0) {
+            orient.amount = 0.25f * static_cast<float>(1 + k % 4);
+            orient.axis = unit_or_zero(Vec3{0.3f, 1.0f, -0.2f});
+        }
+        const CleavagePair ca = choose_cleavage_pair(a, v, tie, geometric ? a.pos.data() : nullptr, a.normal.data(), &orient);
+        const std::uint8_t cb = tv_choose_cleavage_pair(view_of(b), v, tie, geometric ? b.pos.data() : nullptr, b.normal.data(), orient);
         CF_CHECK_EQ(ca.valid, cb != kNoPair);
         // Every (i, j) must be judged the same way.
         for (std::uint32_t i = 0; i < a.deg[v]; ++i)

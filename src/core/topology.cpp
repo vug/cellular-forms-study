@@ -397,14 +397,17 @@ void split_rings(State& s, std::uint32_t v, std::uint32_t i, std::uint32_t j, st
     insert_at(b, static_cast<std::uint32_t>(ring_index(s, b, v)));
 }
 
-CleavagePair choose_cleavage_pair(const State& s, std::uint32_t v, std::uint64_t tieHash, const Vec3* pos) {
+CleavagePair choose_cleavage_pair(const State& s, std::uint32_t v, std::uint64_t tieHash, const Vec3* pos, const Vec3* normal,
+                                  const Orientation* orient) {
     const std::uint32_t d = s.deg[v];
     const std::uint32_t* r = s.ring(v);
     const std::uint32_t offs[2] = {d / 2, (d + 1) / 2};
     const std::uint32_t nOffs = offs[0] == offs[1] ? 1u : 2u;
 
-    std::uint8_t tiesI[2 * kMaxDeg], tiesJ[2 * kMaxDeg];
-    std::uint32_t nTies = 0;
+    // Every near-opposite pair inside the degree cap, with its degree cost.
+    std::uint8_t allI[2 * kMaxDeg], allJ[2 * kMaxDeg];
+    std::uint32_t allCost[2 * kMaxDeg];
+    std::uint32_t nAll = 0;
     std::uint32_t best = 0xFFFFFFFFu;
     for (std::uint32_t i = 0; i < d; ++i) {
         for (std::uint32_t o = 0; o < nOffs; ++o) {
@@ -412,23 +415,47 @@ CleavagePair choose_cleavage_pair(const State& s, std::uint32_t v, std::uint64_t
             if (!can_split(s, v, i, j)) continue;
             const std::uint32_t da = s.deg[r[i]], db = s.deg[r[j]];
             const std::uint32_t cost = (da > db ? da : db) * 100u + da + db;
-            if (cost < best) {
-                best = cost;
-                nTies = 0;
-            }
-            if (cost == best) {
-                tiesI[nTies] = static_cast<std::uint8_t>(i);
-                tiesJ[nTies] = static_cast<std::uint8_t>(j);
-                ++nTies;
-            }
+            allI[nAll] = static_cast<std::uint8_t>(i);
+            allJ[nAll] = static_cast<std::uint8_t>(j);
+            allCost[nAll] = cost;
+            ++nAll;
+            if (cost < best) best = cost;
         }
     }
     CleavagePair p;
-    if (nTies == 0) return p;
-    // Start from the hashed choice; with positions, walk the tied pairs from there and keep the
-    // one with the shortest cleavage links (strictly shorter only, so exact ties stay hashed).
+    if (nAll == 0) return p;
+
+    // The pairs to choose among: the best degree cost, or (oriented division) close to it.
+    const bool oriented = orient != nullptr && orient->amount > 0.0f && pos != nullptr && normal != nullptr;
+    const std::uint32_t margin = oriented ? static_cast<std::uint32_t>(orient->amount * 200.0f + 0.5f) : 0u;
+    std::uint8_t tiesI[2 * kMaxDeg], tiesJ[2 * kMaxDeg];
+    std::uint32_t nTies = 0;
+    for (std::uint32_t k = 0; k < nAll; ++k) {
+        if (allCost[k] <= best + margin) {
+            tiesI[nTies] = allI[k];
+            tiesJ[nTies] = allJ[k];
+            ++nTies;
+        }
+    }
+
+    // Start from the hashed choice and walk the candidates from there, keeping a strictly better
+    // one only (so exact ties stay hashed).
     std::uint32_t pick = static_cast<std::uint32_t>(tieHash % nTies);
-    if (pos != nullptr && nTies > 1) {
+    if (oriented && nTies > 1) {
+        // The daughter is placed across the line a-b, in the surface: steer that along the axis.
+        const Vec3 N = normal[v];
+        const std::uint32_t start = pick;
+        float bestAlign = std::fabs(dot(unit_or_zero(cross(N, pos[r[tiesJ[pick]]] - pos[r[tiesI[pick]]])), orient->axis));
+        for (std::uint32_t k = 1; k < nTies; ++k) {
+            const std::uint32_t q = (start + k) % nTies;
+            const float align = std::fabs(dot(unit_or_zero(cross(N, pos[r[tiesJ[q]]] - pos[r[tiesI[q]]])), orient->axis));
+            if (align > bestAlign) {
+                bestAlign = align;
+                pick = q;
+            }
+        }
+    } else if (pos != nullptr && nTies > 1) {
+        // The pair with the shortest cleavage links.
         const Vec3 P = pos[v];
         float bestLen = length(pos[r[tiesI[pick]]] - P) + length(pos[r[tiesJ[pick]]] - P);
         const std::uint32_t start = pick;

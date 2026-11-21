@@ -88,6 +88,11 @@ struct CleavagePair {
 //      the daughter is inserted along the direction in which v's neighbourhood is most
 //      stretched; remaining ties (and all ties when pos == nullptr) by `tieHash`.
 // Returns valid=false when no pair respects the cap (the division is postponed).
-CleavagePair choose_cleavage_pair(const State& s, std::uint32_t v, std::uint64_t tieHash, const Vec3* pos = nullptr);
+//   4. oriented division (M8): with `orient` (amount > 0), `pos` and `normal` given, step 3 is
+//      replaced: among the pairs whose degree cost is within amount * 200 of the best, the one
+//      whose new parent-daughter link (in the surface, perpendicular to the line a-b) is most
+//      aligned with orient->axis.
+CleavagePair choose_cleavage_pair(const State& s, std::uint32_t v, std::uint64_t tieHash, const Vec3* pos = nullptr,
+                                  const Vec3* normal = nullptr, const Orientation* orient = nullptr);
 
 }  // namespace cf

@@ -107,3 +107,22 @@ CF_TEST(cuda_food_everything_at_once_matches_cpu) {
     p.crowdHigh = 0.95f;
     compare(p, 4, 200, "all sources together");
 }
+
+// M8 model extensions.
+CF_TEST(cuda_oriented_division_matches_cpu) {
+    Params p = base();
+    p.orientAmount = 1.0f;
+    p.orientAxisX = 0.2f;
+    p.orientAxisY = 1.0f;
+    p.orientAxisZ = -0.3f;
+    compare(p, 3, 160, "oriented division");
+}
+
+CF_TEST(cuda_field_bulge_matches_cpu) {
+    Params p = base();
+    p.fieldBulge = 0.9f;
+    p.fieldScale = 6.0f;
+    p.fieldContrast = 2.0f;
+    p.fieldOctaves = 2.0f;
+    compare(p, 3, 160, "field-dependent bulge");
+}

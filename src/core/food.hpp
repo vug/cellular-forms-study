@@ -34,6 +34,7 @@ struct FoodParams {
     float fieldInvScale;
     float fieldContrast;
     std::uint32_t fieldOctaves;
+    float fieldBulge;        // M8: field-dependent bulge factor (0 = off); uses the field settings above
     // light and its shadow map (orthographic, seen from the light)
     float lightAmount;
     float lightAmbient;
@@ -82,8 +83,8 @@ CF_FN float value_noise3(Vec3 p, std::uint64_t seed) {
     return lerp1(lerp1(x00, x10, sy), lerp1(x01, x11, sy), sz);
 }
 
-// Scale from the spatial field: 1 + amount * (2 f - 1), f the (contrast-shaped) noise in [0, 1].
-CF_FN float field_factor(const FoodParams& fp, Vec3 P) {
+// The spatial field at P: (contrast-shaped) value noise in [0, 1].
+CF_FN float field_value(const FoodParams& fp, Vec3 P) {
     Vec3 q = P * fp.fieldInvScale;
     float sum = 0.0f, norm = 0.0f, amp = 0.5f;
     for (std::uint32_t o = 0; o < fp.fieldOctaves; ++o) {
@@ -94,9 +95,14 @@ CF_FN float field_factor(const FoodParams& fp, Vec3 P) {
     }
     float f = sum / norm;
     f = (f - 0.5f) * fp.fieldContrast + 0.5f;
-    f = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
-    return 1.0f + fp.fieldAmount * (2.0f * f - 1.0f);
+    return f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
 }
+
+// Scale of the food increment from the field: 1 + amount * (2 f - 1).
+CF_FN float field_factor(const FoodParams& fp, Vec3 P) { return 1.0f + fp.fieldAmount * (2.0f * field_value(fp, P) - 1.0f); }
+
+// Scale of a cell's bulge factor from the field (M8, per-cell stiffness): 1 + fieldBulge * (2 f - 1).
+CF_FN float bulge_scale(const FoodParams& fp, Vec3 P) { return 1.0f + fp.fieldBulge * (2.0f * field_value(fp, P) - 1.0f); }
 
 // ---------------------------------------------------------------- light
 // Floats as ints that sort the same way, so an integer max is a float max (and atomic on a GPU).

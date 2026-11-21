@@ -20,13 +20,17 @@ FoodParams make_food_params(const Params& p, std::uint64_t seed, std::uint64_t s
         fp.flags |= kFoodPulse;
     }
 
+    // The field's shape is needed by the food source and by the field-dependent stiffness (M8).
+    fp.fieldInvScale = 1.0f / p.fieldScale;
+    fp.fieldContrast = p.fieldContrast;
+    {
+        const float o = std::floor(p.fieldOctaves + 0.5f);
+        fp.fieldOctaves = o < 1.0f ? 1u : (o > 6.0f ? 6u : static_cast<std::uint32_t>(o));
+    }
+    fp.fieldBulge = p.fieldBulge;
     if (p.fieldAmount > 0.0f) {
         fp.flags |= kFoodField;
         fp.fieldAmount = p.fieldAmount;
-        fp.fieldInvScale = 1.0f / p.fieldScale;
-        fp.fieldContrast = p.fieldContrast;
-        const float o = std::floor(p.fieldOctaves + 0.5f);
-        fp.fieldOctaves = o < 1.0f ? 1u : (o > 6.0f ? 6u : static_cast<std::uint32_t>(o));
     }
 
     if (p.lightAmount > 0.0f) {

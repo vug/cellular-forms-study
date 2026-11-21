@@ -19,7 +19,9 @@ Newest entries at the bottom. Times are local (America/New_York).
 | M4 Live viewer | exit criteria observed (local session, 00:40) | scripted run: parameters changed mid-run, pause, single steps, reset; no frame over 15 ms, 0 validation errors, CUDA and CPU backends. Not tried by hand |
 | M9 Ports | both ports done and verified (local session, 01:20) | Vulkan compute: step-by-step agreement with the CPU over 106 steps, reruns identical. WebGPU: one-step agreement with CPU checkpoints from 162 to 4.4M cells, reruns identical. At 10M cells: CUDA 41, Vulkan 65, WebGPU 75 ms per step |
 | M5 Food sources | exit criterion observed (local session, 01:30) | uniform versus light contrast at 600k cells; CUDA equals CPU with every source on; reaction-diffusion and inherited coordinates not built |
-| M7 Rendering modes | done except viewer subsurface scattering (local session, 01:50) | PLY export tested; imported and rendered in Blender 5.2; viewer x-ray and membrane modes render with validation clean |
+| M7 Rendering modes | done except viewer subsurface scattering (local session, 01:38) | PLY export tested; imported and rendered in Blender 5.2; viewer x-ray and membrane modes render with validation clean |
+| M6 Exploration tools | built and run once (local session, 01:55) | descriptors tested against known shapes; a 320-run MAP-Elites search filled 27 of 48 bins; one form promoted to 1M cells. Picker is a static HTML page |
+| M8 Model extensions | two of the listed extensions (local session, 01:58) | oriented division and field-dependent bulge: CUDA equals CPU bit for bit, default model unchanged. Per-cell inherited parameters, differentiation, morphogens not built |
 
 ## Decisions made unattended
 
@@ -925,7 +927,7 @@ The light run at 8k, 32k, 128k and 600k cells: it grows towards the light.
   compared bit for bit between CPU and GPU for two directions).
 - Nobody has moved the new sliders by hand.
 
-## 2026-11-21 01:50 · Local session: M7 Blender export and viewer modes
+## 2026-11-21 01:38 · Local session: M7 Blender export and viewer modes
 
 **Built**
 
@@ -992,3 +994,99 @@ Viewer, membrane mode (100k cells).
 ![viewer xray](img/m7_viewer_xray_600k.png)
 
 Viewer, x-ray mode (the 600k-cell light run).
+
+## 2026-11-21 01:55 · Local session: M6 exploration tools
+
+**Built**
+
+- Shape descriptors (`src/core/descriptors.*`, `cf_describe <checkpoint.cfs>` prints them as one
+  JSON line): surface area and enclosed volume from the membrane mesh, area ratio (area over
+  the area of the sphere with the same volume: 1 for a sphere, 10+ for a deeply folded form),
+  principal axes with elongation and flatness, mean-curvature mean, spread and histogram, the
+  fraction of concave cells, a box-counting dimension, link-length statistics, and two health
+  measures (how many links are folded back, how many non-neighbour cells sit closer than half
+  a rest length).
+- `scripts/explore.py` (Python standard library only): the search loop of design.md. Short GPU
+  runs to a small cell count; failed or stalled runs are logged and dropped; every survivor is
+  described; a MAP-Elites archive over area ratio by elongation (8 by 6 bins) keeps the
+  healthiest form per bin; after a random start, new runs are mutations of archive members.
+  It varies the seven base parameters and switches the M5 food sources on with probability
+  0.25 each. Every run is one line of `log.jsonl` (parameters, seed, git commit, outcome,
+  descriptors). It writes a thumbnail per kept form, `atlas.png` laid out like the archive, and
+  `atlas.html` with each form's parameters and the command to grow it larger.
+  `--promote <id> --cells N` grows a chosen form at full size.
+
+**Verified**
+
+- `cf_tests`: 45 of 45 (3 new). An icosphere's area and volume match the sphere's to the
+  expected accuracy and its area ratio is 1; a stretched sphere reports the stretch as its
+  elongation; a grown form has a larger area ratio than the sphere it started from.
+- One search, `runs\explore\night1`: 320 runs to 30,000 cells in 358 s (1.1 s per run including
+  start-up, description and thumbnail). 319 finished with invariants ok, 1 stalled (food too
+  low for its time budget) and was dropped. 27 of the 48 archive bins are filled; area ratio
+  ranges from 1.01 to 11.5 and elongation up to 1.68.
+- Promotion: run 304 (the most folded) regrown to 1,000,005 cells in 16 s, 14 invariant checks
+  ok, area ratio 34.7, mean link 0.97 rest lengths. Image below.
+
+**Not verified / not done**
+
+- design.md lists a convex-hull fill ratio; I report an ellipsoid fill (volume over the volume
+  of the ellipsoid with the same principal axes) instead, which needs no hull code. It is not
+  the same number.
+- The picker is a static HTML page, not a tool inside the viewer.
+- The quality measure (link health) is my choice; nobody has judged whether it prefers the
+  forms Uğur would prefer. The archive's two axes are also my choice.
+- Empty bins at high elongation: with these parameter ranges nothing longer than 1.7:1 turned
+  up. Oriented division (M8, next entry) reaches it but was not part of this search.
+- The search was run once, with one seed.
+
+![atlas](img/m6_atlas_320_runs.png)
+
+The archive after 320 runs: more folded downwards, more elongated to the right.
+
+![promoted](img/m6_promoted_304_1m.png)
+
+Run 304 promoted to 1M cells, coloured by age.
+
+## 2026-11-21 01:58 · Local session: M8 model extensions (two of them)
+
+**Built**
+
+- Oriented division (`orientAmount`, `orientAxisX/Y/Z`). The cleavage pair is still chosen by
+  ring index, and the degree guard still decides which pairs are allowed; among the pairs
+  whose degree cost is within a tolerance of the best (the tolerance grows with
+  `orientAmount`), the one whose cleavage plane is most perpendicular to the axis wins, so daughters separate along the axis. With `orientAmount = 0`
+  the choice is exactly the old one.
+- Field-dependent stiffness (`fieldBulge`): each cell's bulge factor is scaled by the same
+  noise field the food can use, so some regions bulge and others stay flat. This is a
+  parameter that varies per cell by position, not a stored per-cell parameter.
+- Both are in the CPU reference and the CUDA backend, as sliders in the live viewer ("Model
+  extensions"), and in the `.cfs` parameter block only when non-default, so old files and
+  checksums are unchanged. The Vulkan compute and WebGPU ports refuse to start with either
+  switched on, and say so.
+
+**Verified**
+
+- `cf_tests`: 49 of 49 (4 new); the golden checksum of the default model is unchanged
+  (`38d1abeb51663ef6`). With orientation off, a run is identical position for position to one
+  before the change. With it on, a 6,000-cell form's extent along the axis over its extent
+  across is 1.66, against 1.02 without, and no cell exceeds 12 neighbours.
+- `cf_cuda_tests`: 17 of 17 (2 new): CUDA equals the CPU bit for bit with oriented division
+  and with field-dependent bulge.
+- Three GPU runs to 400k cells, all invariants ok: oriented division (elongation 1.60, mean
+  link 1.04), oriented division across a light (1.28, 1.12), field-dependent bulge (1.06,
+  1.00). Image below.
+
+**Not done (the rest of M8 in design.md)**
+
+- Stored per-cell parameters that daughters inherit, lineage and differentiation, morphogens
+  that diffuse and switch behaviour, reaction-diffusion on the surface. None of these exist.
+  The state already carries generation and birth step, which is the start of lineage, but
+  nothing reads them except colouring.
+- The orientation axis is one global direction, not a field or something a cell inherits.
+- Nobody has moved the new sliders by hand.
+
+![extensions](img/m8_extensions_400k.png)
+
+400k cells each. Left: oriented division along the vertical axis. Middle: oriented division
+along x with light from above. Right: field-dependent bulge.

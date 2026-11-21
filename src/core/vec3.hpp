@@ -45,4 +45,11 @@ CF_FN Vec3 unit_or_zero(Vec3 v) {
     return {v.x * inv, v.y * inv, v.z * inv};
 }
 
+// Oriented division (M8): which way cells prefer to divide. `axis` is a unit vector; the new
+// parent-daughter link is steered along it. amount = 0 switches it off.
+struct Orientation {
+    float amount = 0.0f;
+    Vec3 axis{0.0f, 1.0f, 0.0f};
+};
+
 }  // namespace cf

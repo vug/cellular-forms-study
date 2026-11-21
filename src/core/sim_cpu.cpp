@@ -105,8 +105,8 @@ StepReport CpuSim::step() {
     // ---- 1. Food (core/food.hpp). It reads only old values, so its place in the pipeline does
     // not change the result; it sits here because the light source needs this step's normals
     // and the bounding box the grid has just computed.
+    const FoodParams fp = make_food_params(p, seed, step, grid_.bounds_lo(), grid_.bounds_hi());
     {
-        const FoodParams fp = make_food_params(p, seed, step, grid_.bounds_lo(), grid_.bounds_hi());
         const State& s = s_;
         if (fp.flags & kFoodLight) {
             // Shadow map: per texel, the depth of the cell nearest to the light.
@@ -135,13 +135,15 @@ StepReport CpuSim::step() {
         std::uint32_t clamped[kMaxThreads] = {};
         std::uint32_t firstBad[kMaxThreads];
         for (unsigned t = 0; t < kMaxThreads; ++t) firstBad[t] = kInvalid;
-        parallel_for(n, threads_, [&, grid, kp, out, nrm](std::uint32_t b, std::uint32_t e, unsigned t) {
+        parallel_for(n, threads_, [&, grid, kp, fp, out, nrm](std::uint32_t b, std::uint32_t e, unsigned t) {
             std::uint32_t localClamped = 0, localBad = kInvalid;
             for (std::uint32_t v = b; v < e; ++v) {
                 const Vec3 P = s.pos[v];
                 const std::uint32_t* ring = s.ring(v);
                 const std::uint32_t d = s.deg[v];
-                const LinkTerms lt = link_terms(s.pos.data(), ring, d, P, nrm[v], kp);
+                KernelParams kpc = kp;  // per-cell stiffness from the field (M8)
+                if (fp.fieldBulge != 0.0f) kpc.bulge = kp.bulge * bulge_scale(fp, P);
+                const LinkTerms lt = link_terms(s.pos.data(), ring, d, P, nrm[v], kpc);
                 const Vec3 rep3 = repulsion_offset(grid, v, P, ring, d, kp);
                 // P_new = P' + collisionOffset, both from the old positions.
                 Vec3 delta = ((lt.spring + lt.planar) + lt.bulge) + rep3;
@@ -161,7 +163,9 @@ StepReport CpuSim::step() {
         if (bad != kInvalid) {
             // Slow path: recompute the offending cell to name the term that broke.
             const Vec3 P = s.pos[bad];
-            const LinkTerms lt = link_terms(s.pos.data(), s.ring(bad), s.deg[bad], P, nrm[bad], kp);
+            KernelParams kpc = kp;
+            if (fp.fieldBulge != 0.0f) kpc.bulge = kp.bulge * bulge_scale(fp, P);
+            const LinkTerms lt = link_terms(s.pos.data(), s.ring(bad), s.deg[bad], P, nrm[bad], kpc);
             const Vec3 rep3 = repulsion_offset(grid, bad, P, s.ring(bad), s.deg[bad], kp);
             rep.status = StepStatus::Failed;
             rep.cell = bad;
@@ -184,13 +188,17 @@ StepReport CpuSim::step() {
         std::uint8_t* pi = pairI_.data();
         std::uint8_t* pj = pairJ_.data();
         const Vec3* newPos = posNew_.data();
-        parallel_for(n, threads_, [&, food, threshold, prio, pi, pj, newPos](std::uint32_t b, std::uint32_t e, unsigned t) {
+        const Vec3* newNormal = normalNew_.data();
+        Orientation orient;  // oriented division (M8)
+        orient.amount = p.orientAmount;
+        orient.axis = unit_or_zero(Vec3{p.orientAxisX, p.orientAxisY, p.orientAxisZ});
+        parallel_for(n, threads_, [&, food, threshold, prio, pi, pj, newPos, newNormal, orient](std::uint32_t b, std::uint32_t e, unsigned t) {
             std::uint32_t localReady = 0, localPostponed = 0;
             for (std::uint32_t v = b; v < e; ++v) {
                 if (!(food[v] > threshold)) continue;
                 ++localReady;
                 // Geometry for the tie-break comes from the positions just computed.
-                const CleavagePair c = choose_cleavage_pair(s, v, hash_u64(seed, step, v, Stream::Pair), newPos);
+                const CleavagePair c = choose_cleavage_pair(s, v, hash_u64(seed, step, v, Stream::Pair), newPos, newNormal, &orient);
                 if (!c.valid) {
                     ++localPostponed;  // degree cap: wait for a later step
                     continue;

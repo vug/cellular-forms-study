@@ -33,6 +33,8 @@ constexpr FloatField kExtraFields[] = {
     {"lightDirY", &Params::lightDirY},         {"lightDirZ", &Params::lightDirZ},         {"lightAmbient", &Params::lightAmbient},
     {"lightBias", &Params::lightBias},         {"lightPixel", &Params::lightPixel},       {"foodDiffusion", &Params::foodDiffusion},
     {"foodDecay", &Params::foodDecay},         {"crowdLow", &Params::crowdLow},           {"crowdHigh", &Params::crowdHigh},
+    {"orientAmount", &Params::orientAmount},   {"orientAxisX", &Params::orientAxisX},     {"orientAxisY", &Params::orientAxisY},
+    {"orientAxisZ", &Params::orientAxisZ},     {"fieldBulge", &Params::fieldBulge},
 };
 
 std::string_view trim(std::string_view s) {
@@ -117,8 +119,16 @@ ParamIssues validate(const Params& p) {
     if (p.foodDiffusion < 0.0f || p.foodDiffusion >= 1.0f) r.errors.push_back("foodDiffusion must be in [0, 1)");
     if (p.foodDecay < 0.0f || p.foodDecay >= 1.0f) r.errors.push_back("foodDecay must be in [0, 1)");
     if (p.crowdLow < 0.0f || p.crowdHigh < 0.0f) r.errors.push_back("crowdLow and crowdHigh must be >= 0");
+
+    // Model extensions (M8).
+    if (p.orientAmount < 0.0f || p.orientAmount > 1.0f) r.errors.push_back("orientAmount must be in [0, 1]");
+    if (p.orientAmount > 0.0f && !(p.orientAxisX * p.orientAxisX + p.orientAxisY * p.orientAxisY + p.orientAxisZ * p.orientAxisZ > 1.0e-12f))
+        r.errors.push_back("the orientation axis must not be zero");
+    if (p.fieldBulge < -1.0f || p.fieldBulge > 1.0f) r.errors.push_back("fieldBulge must be in [-1, 1]");
     return r;
 }
+
+bool uses_model_extensions(const Params& p) { return uses_food_extensions(p) || p.orientAmount > 0.0f || p.fieldBulge != 0.0f; }
 
 bool uses_food_extensions(const Params& p) {
     return p.fieldAmount > 0.0f || p.pulsePeriod > 0.0f || p.lightAmount > 0.0f || p.foodDiffusion > 0.0f || p.foodDecay > 0.0f ||

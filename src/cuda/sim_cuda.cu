@@ -184,7 +184,7 @@ __global__ void k_gather(const Vec3* pos, const std::uint32_t* sortedId, Vec3* s
 
 // Move (Jacobi: reads the old positions, writes the new buffer) and clamp.
 __global__ void k_move(const Vec3* pos, const Vec3* nrm, const std::uint32_t* nbr, const std::uint8_t* deg, Vec3* out,
-                       std::uint32_t n, GridView grid, KernelParams kp, Counters* c) {
+                       std::uint32_t n, GridView grid, KernelParams kp, FoodParams fp, Counters* c) {
     // Threads walk the cells in grid order, not id order: neighbouring threads then search the
     // same grid cells, so the neighbour search reads memory that is already in cache. Each cell
     // is still computed exactly as in id order, so the result does not change.
@@ -194,6 +194,7 @@ __global__ void k_move(const Vec3* pos, const Vec3* nrm, const std::uint32_t* nb
     const Vec3 P = pos[v];
     const std::uint32_t* ring = nbr + static_cast<std::size_t>(v) * kMaxDeg;
     const std::uint32_t d = deg[v];
+    if (fp.fieldBulge != 0.0f) kp.bulge = kp.bulge * bulge_scale(fp, P);  // per-cell stiffness from the field (M8)
     const LinkTerms lt = link_terms(pos, ring, d, P, nrm[v], kp);
     const Vec3 rep3 = repulsion_offset(grid, v, P, ring, d, kp);
     // P_new = P' + collisionOffset, both from the old positions (same expression as the CPU).
@@ -206,10 +207,11 @@ __global__ void k_move(const Vec3* pos, const Vec3* nrm, const std::uint32_t* nb
 
 // Which term of one cell is not finite: bit 0 spring, 1 planar, 2 bulge, 3 repulsion.
 __global__ void k_diagnose(const Vec3* pos, const Vec3* nrm, const std::uint32_t* nbr, const std::uint8_t* deg,
-                           std::uint32_t v, GridView grid, KernelParams kp, std::uint32_t* out) {
+                           std::uint32_t v, GridView grid, KernelParams kp, FoodParams fp, std::uint32_t* out) {
     const Vec3 P = pos[v];
     const std::uint32_t* ring = nbr + static_cast<std::size_t>(v) * kMaxDeg;
     const std::uint32_t d = deg[v];
+    if (fp.fieldBulge != 0.0f) kp.bulge = kp.bulge * bulge_scale(fp, P);
     const LinkTerms lt = link_terms(pos, ring, d, P, nrm[v], kp);
     const Vec3 rep3 = repulsion_offset(grid, v, P, ring, d, kp);
     *out = (dev_finite(lt.spring) ? 0u : 1u) | (dev_finite(lt.planar) ? 0u : 2u) | (dev_finite(lt.bulge) ? 0u : 4u) |
@@ -218,7 +220,7 @@ __global__ void k_diagnose(const Vec3* pos, const Vec3* nrm, const std::uint32_t
 
 // Division candidates: cells with food above the threshold and a cleavage pair inside the cap.
 __global__ void k_candidates(TopoView s, const float* food, float threshold, std::uint64_t* prio, std::uint8_t* pair,
-                             std::uint32_t n, std::uint64_t seed, std::uint64_t step, Counters* c) {
+                             std::uint32_t n, std::uint64_t seed, std::uint64_t step, Orientation orient, Counters* c) {
     const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
     if (v >= n) return;
     std::uint64_t p = 0;
@@ -226,7 +228,7 @@ __global__ void k_candidates(TopoView s, const float* food, float threshold, std
     if (food[v] > threshold) {
         atomicAdd(&c->ready, 1u);
         // Geometry for the tie-break comes from the positions just computed (s.pos is the new buffer).
-        pr = tv_choose_cleavage_pair(s, v, hash_u64(seed, step, v, Stream::Pair), s.pos);
+        pr = tv_choose_cleavage_pair(s, v, hash_u64(seed, step, v, Stream::Pair), s.pos, s.normal, orient);
         if (pr == kNoPair) atomicAdd(&c->postponed, 1u);
         else p = tv_division_priority(seed, step, v);
     }
@@ -722,8 +724,8 @@ StepReport CudaSim::step() {
     const std::uint32_t nx = static_cast<std::uint32_t>(dx), ny = static_cast<std::uint32_t>(dy), nz = static_cast<std::uint32_t>(dz);
 
     // ---- 1. Food (core/food.hpp). After the bounds, which the light's shadow map needs.
+    const FoodParams fp = make_food_params(p, seed, step, box.lo, box.hi);
     {
-        const FoodParams fp = make_food_params(p, seed, step, box.lo, box.hi);
         if (fp.flags & kFoodLight) {
             if (!m.shadow) m.shadow = m.alloc<std::int32_t>(kShadowMaxTexels, "the shadow map");
             const std::uint32_t texels = fp.lightNu * fp.lightNv;
@@ -760,7 +762,7 @@ StepReport CudaSim::step() {
     m.phase(m.times.grid, t0);
 
     // ---- 4 + 5. Move and clamp.
-    k_move<<<gb, kBlock, 0, st>>>(m.pos[cur], m.normal[nxt], m.nbr, m.deg, m.pos[nxt], n, grid, kp, m.counters);
+    k_move<<<gb, kBlock, 0, st>>>(m.pos[cur], m.normal[nxt], m.nbr, m.deg, m.pos[nxt], n, grid, kp, fp, m.counters);
     if (m.timing) {
         m.phase(m.times.move, t0);
     }
@@ -775,7 +777,7 @@ StepReport CudaSim::step() {
     if (host.firstBadMove != kInvalid) {
         const std::uint32_t bad = host.firstBadMove;
         std::uint32_t bits = 0;
-        k_diagnose<<<1, 1, 0, st>>>(m.pos[cur], m.normal[nxt], m.nbr, m.deg, bad, grid, kp, m.diagOut);
+        k_diagnose<<<1, 1, 0, st>>>(m.pos[cur], m.normal[nxt], m.nbr, m.deg, bad, grid, kp, fp, m.diagOut);
         CF_CUDA(cudaStreamSynchronize(st));
         CF_CUDA(cudaMemcpy(&bits, m.diagOut, sizeof bits, cudaMemcpyDeviceToHost));
         rep.status = StepStatus::Failed;
@@ -801,7 +803,10 @@ StepReport CudaSim::step() {
     tv.linkRestLength = p.linkRestLength;
     tv.daughterOffset = p.daughterOffset;
 
-    k_candidates<<<gb, kBlock, 0, st>>>(tv, m.food[nxt], p.foodThreshold, prio, m.pair, n, seed, step, m.counters);
+    Orientation orient;  // oriented division (M8)
+    orient.amount = p.orientAmount;
+    orient.axis = unit_or_zero(Vec3{p.orientAxisX, p.orientAxisY, p.orientAxisZ});
+    k_candidates<<<gb, kBlock, 0, st>>>(tv, m.food[nxt], p.foodThreshold, prio, m.pair, n, seed, step, orient, m.counters);
     k_max_ring<<<gb, kBlock, 0, st>>>(prio, m.nbr, m.deg, m1, n);
     k_max_ring<<<gb, kBlock, 0, st>>>(m1, m.nbr, m.deg, m2, n);
     {

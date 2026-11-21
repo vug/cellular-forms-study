@@ -473,6 +473,20 @@ void Window::buildSimulationUi() {
         ImGui::TextDisabled("crowding limit is on when high > low");
         ImGui::TreePop();
     }
+    if (ImGui::TreeNode("Model extensions")) {
+        // M8: oriented division and field-dependent stiffness.
+        changed |= ImGui::SliderFloat("orient amount", &uiParams_.orientAmount, 0.0f, 1.0f);
+        float axis[3] = {uiParams_.orientAxisX, uiParams_.orientAxisY, uiParams_.orientAxisZ};
+        if (ImGui::SliderFloat3("orient axis", axis, -1.0f, 1.0f)) {
+            uiParams_.orientAxisX = axis[0];
+            uiParams_.orientAxisY = axis[1];
+            uiParams_.orientAxisZ = axis[2];
+            changed = true;
+        }
+        changed |= ImGui::SliderFloat("field bulge", &uiParams_.fieldBulge, -1.0f, 1.0f);
+        ImGui::TextDisabled("field bulge uses the field scale / octaves / contrast above");
+        ImGui::TreePop();
+    }
     if (changed) {
         if (uiParams_.foodMin > uiParams_.foodMax) uiParams_.foodMin = uiParams_.foodMax;
         live_->setParams(uiParams_);

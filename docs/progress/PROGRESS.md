@@ -72,3 +72,63 @@ support in CUDA 13.5, `--std=c++23` in nvcc, driver support for Vulkan 1.4) has 
   20,000 + 5,000 random splits, parallel selection).
 - Read: CLAUDE.md, HANDOFF.md, model.md, design.md, both reference scripts, deck slides 05, 06,
   07, 11, 12, 13, and the paper's sections 4 and 5 (through web fetch).
+
+## 2026-11-20 23:50 · Local session (Windows shell): toolchain verified, and who does what
+
+Written by the local Claude Code session that Uğur started in this folder with the whole
+assignment (M1 to M4 and M9). It found the cloud session above already writing M1 into
+`src/core`, and it cannot message that session (Remote Control is off). Two writers in the same
+files would overwrite each other, so this is the split until Uğur says otherwise:
+
+| Who | Owns |
+| --- | --- |
+| Cloud session | `src/core`, `apps/cf_run`, `apps/cf_render`, `tests/` (M1, as it announced) |
+| Local session | `CMakeLists.txt`, `CMakePresets.json`, `cmake/`, `scripts/`, `external/` (submodules), `src/viewer`, `src/cuda`, `src/vkcompute`, `apps/cf_view`, `shaders/`, `web/`; the MSVC build of M1 and the M1 exit runs on this PC; M2, M3, M4, M9 |
+
+Rules both sessions need, because we share one working tree and one git index:
+
+- Commit only your own paths: `git add <paths>` then `git commit -m "..." -- <paths>`. Never
+  `git add -A` or `git commit -a`: it would commit the other session's half-written files.
+- This log is append-only at the bottom (plus small edits to the status table). Re-read it right
+  before editing.
+- If the local session has to touch a cloud-session file (for example an MSVC compile fix), it
+  makes the smallest edit and lists it here. Cloud session: if you add a top-level
+  `CMakeLists.txt` of your own, the local one already exists; add a `CMakeLists.txt` inside your
+  folders instead, or tell me here what you need.
+- M1 is not marked done until its exit criteria are observed on this PC with the MSVC build.
+
+**Toolchain on this PC (each item run and observed from a Windows shell)**
+
+| Item | Found |
+| --- | --- |
+| Visual Studio | Only VS 2026 Community 18.10 is installed (the `2022` folder is empty). MSVC toolset 14.51.36231, `cl` 19.51.36260 |
+| CMake, Ninja | CMake 4.4.3; Ninja 1.13.2 (the copy bundled with Visual Studio; none on PATH) |
+| CUDA toolkits | v12.2, v12.6, v13.5. Machine `CUDA_PATH` is v13.5, but shells opened before the install still have v12.6 first on PATH. `scripts/vsenv.ps1` sets MSVC, Ninja, CUDA 13.5 and the newest Vulkan SDK for the current shell only |
+| nvcc | 13.5.37, with CCCL 3.5.0 (CUB, Thrust) |
+| nvcc with MSVC 14.51, C++20 | Works. CCCL needs `/Zc:preprocessor` passed to `cl` |
+| nvcc with MSVC 14.51, C++23 | **Does not work.** `--std=c++23` prints "The -std=c++23 flag is not supported with the configured host compiler. Flag will be ignored". Forcing `/std:c++23preview` or `/std:c++latest` through `-Xcompiler` crashes `cudafe++` (status 0xC0000409) even on a file that only includes `<cstdio>` |
+| GPU, driver | RTX 4090, 24 GB, driver 610.88. The driver's CUDA level is 13.3, older than the 13.5 toolkit |
+| CUDA 13.5 on this driver | Default build fails at run time: "the provided PTX was compiled with an unsupported toolchain" (the driver cannot JIT 13.5 PTX). Building native code with `-arch=sm_89` works: a test kernel and a CUB radix sort both ran correctly |
+| GPU memory | `nvidia-smi` shows about 9 GB already in use by desktop apps (Steam, Spotify, browsers, ...); `cudaMemGetInfo` reports 22.5 GB free of 24.0 GB. What a run can really allocate is measured in M3 |
+| Vulkan | SDK 1.4.357.0 (newest of four installed), instance 1.4.357; device API 1.4.341, conformance 1.4.3.3; `glslc` and `slangc` in the SDK |
+| CPU, RAM, disk | i9-13900K (24 cores, 32 threads), 64 GB RAM, 300 GB free on C: |
+| Python | `python` on PATH is the Microsoft Store stub; a real one is `~\miniconda3\python.exe` (3.11.5) |
+| git | 2.45.1; identity `Ugur Guney` is configured, so local-session commits use it |
+
+**Decisions made unattended (local session)**
+
+5. **CUDA sources are C++20, host code is C++23.** nvcc 13.5 cannot do C++23 with this MSVC
+   (table above). Headers shared with device code (`config.hpp`, `vec3.hpp`, `hash.hpp`, the
+   kernels) must stay C++20-clean. This is the fallback HANDOFF.md allowed for.
+6. **Build CUDA code for `sm_89` only** (`CMAKE_CUDA_ARCHITECTURES=89`). The driver is older
+   than the toolkit and cannot JIT its PTX; native code avoids the JIT. Updating the driver
+   would fix it properly, but that is system software, so it is left for Uğur.
+7. **Did not duplicate M1.** The assignment given to the local session includes M1, but the
+   cloud session was already writing it. The local session builds and verifies that M1 with
+   MSVC and runs the exit criteria here; it takes M1 over only if the cloud session stops.
+
+**Verified**
+
+- `docs/reference/split_check.py` and `degree_policy.py` pass with Python 3.11 here.
+- Paper saved to `docs/paper/andylomas_paper_cellular_forms_aisb50.pdf` (4.2 MB, from
+  andylomas.com).

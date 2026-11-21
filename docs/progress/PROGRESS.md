@@ -17,7 +17,7 @@ Newest entries at the bottom. Times are local (America/New_York).
 | M2 Snapshot viewer (Vulkan 1.4) | exit criteria observed (local session, 00:25) | timed scrub of a 100k-cell run, headless captures, validation layer clean; mouse interaction not tried by hand |
 | M3 CUDA backend | exit criteria observed (local session, 00:40) | bit-identical to the CPU reference at every snapshot of a 100k run and in 9 tests; 100M-cell benchmark with 21 invariant checks ok. Open point: the default growth rate compresses the sheet above about 500k cells (see the M3 entry) |
 | M4 Live viewer | exit criteria observed (local session, 00:40) | scripted run: parameters changed mid-run, pause, single steps, reset; no frame over 15 ms, 0 validation errors, CUDA and CPU backends. Not tried by hand |
-| M9 Ports | Vulkan compute done and verified (local session, 01:00); WebGPU in progress | step-by-step agreement with the CPU over 106 steps, reruns identical; 1.3 to 1.6 times slower than CUDA up to 10M cells |
+| M9 Ports | both ports done and verified (local session, 01:35) | Vulkan compute: step-by-step agreement with the CPU over 106 steps, reruns identical. WebGPU: one-step agreement with CPU checkpoints from 162 to 4.4M cells, reruns identical. At 10M cells: CUDA 41, Vulkan 65, WebGPU 75 ms per step |
 
 ## Decisions made unattended
 
@@ -750,3 +750,84 @@ phase timing on, so if anything they are slightly pessimistic for CUDA.
   interop at all).
 - Only up to 10M cells; no asynchronous snapshot path for this backend.
 - One driver, one GPU.
+
+## 2026-11-21 01:35 · Local session: M9 part 2, WebGPU port
+
+**Built** (`web/`, `scripts/web_verify_data.ps1`, `scripts/web_serve.py`)
+
+- The step as WGSL compute shaders driven from a browser page (`web/shaders.js`, `web/sim.js`).
+  Same pipeline as the Vulkan compute backend; what WebGPU made different:
+  - **No 64-bit integers.** The counter-based hashes run on (lo, hi) pairs of `u32`; the
+    division priority is compared as a pair.
+  - **8 storage buffers per shader and no push constants.** Everything global is one buffer;
+    per-cell data is packed (position + food in one `vec4`, 16 `u32` of topology per cell).
+  - **Reading back is slow and asynchronous**, so the cell count, the step counter, failure
+    flags and all dispatch sizes stay on the GPU: a one-invocation "prepare" pass sizes the
+    step's indirect dispatches, a "commit" pass advances the counters. Many steps go out in one
+    submit; the page reads the counters about every 100 ms.
+  - **No doubles**: grid dimensions are computed in single precision (can differ from the CPU
+    by one cell at the far edge of the grid; only a different place for the last grid cell).
+- `web/cfs.js`: reads CPU checkpoints in the page and has the invariant checker in JavaScript.
+- The page renders the cells (sphere impostors) and has run / pause / reset and parameter
+  sliders that apply while it runs. Scripted tasks run in a worker: `?task=verify`,
+  `?task=rerun`, `?task=bench`.
+- To run: `scripts\web_verify_data.ps1`, then `python scripts\web_serve.py` and open
+  `http://localhost:8123/web/` (the server binds to 127.0.0.1 only).
+
+**Verified** (built-in Chromium browser of the Claude app, WebGPU adapter "nvidia lovelace")
+
+- `?task=verify`: one step from a CPU checkpoint, compared with the CPU checkpoint one step
+  later, at 162, 1,004, 20k, 5k, 61k and 254k cells (two parameter sets): same cell count,
+  0 ring slots differing, 0 food / birth / generation values differing, largest position
+  difference 3.8e-6, JavaScript checker ok. Identical food and identical winners mean the
+  64-bit hash emulation is exact.
+- The same at 4.4M cells (checkpoint pair from the CUDA backend, which equals the CPU):
+  4,404,877 -> 4,412,373 cells on both, 0 differences, positions within 7.6e-6.
+- `?task=rerun&cells=200000`: three runs to step 5,326 give the same fingerprint (200,955 cells),
+  although the batches the steps were submitted in differ between runs.
+- Checker ok at the end of the 1M benchmark run.
+
+**A bug found by the benchmark, fixed.** The first 10M run slowed to more than a second per
+step past 4.2M cells. Passes with 64-wide workgroups computed their invocation index with
+the row length of the 256-wide passes, which only matters once a dispatch needs a second row
+of workgroups (more than 2,097,152 buckets, so above about 4.2M cells): half the grid buckets
+were then neither cleared nor sorted. Fixed (`blockIndex` in `web/shaders.js`); the 4.4M-cell
+comparison above was added because of it, and it would have caught it. Before blaming the
+shaders I had suspected the hidden browser pane throttling the page; moving the tasks into a
+worker showed that was not it (the worker stays, it is the right place for them anyway).
+
+**Benchmark** (default parameters, `icosphere:2`, seed 1; wall time from the start; same PC)
+
+| Cells | CUDA | Vulkan compute | WebGPU (browser) | ms/step: CUDA / Vulkan / WebGPU |
+| --- | --- | --- | --- | --- |
+| 100k | 1.8 s | 1.5 s | 4.3 s | 0.37 / 0.50 / 1.26 |
+| 1M | 3.2 s | 4.2 s | 8.4 s | 2.6 / 4.0 / 5.1 |
+| 4M | 9.8 s | 15.7 s | 20.9 s | 13.2 / 21.1 / 24.4 |
+| 10M | 25.3 s | 42.3 s | 49.5 s | 41 / 65 / 75 |
+
+- WebGPU at 10M cells is 1.15 times slower than Vulkan compute and 1.8 times slower than CUDA.
+  Below 100k cells it is dominated by per-step overhead (33 passes per step): 0.9 ms per step
+  at 10k cells.
+- 10M cells need 1.9 GB of buffers (179 bytes per cell). The adapter's 2 GB limit per buffer
+  caps a run at about 33M cells (the 64-byte topology record).
+- The Vulkan and WebGPU runs passed exactly the same cell counts at the same steps (4,002,369
+  at step 7,516; 10,009,432 at step 8,156), different from the CPU/CUDA trajectory
+  (4,002,658 and 10,009,644). The two shader backends seem to round alike on this GPU; not
+  investigated further, and not something to rely on.
+
+**Not verified / not done**
+
+- Only this one browser and GPU. No other vendor, no mobile, no Firefox or Safari.
+- The interactive page (sliders, pause, reset) was loaded and renders, but nobody has operated
+  it; in a hidden pane its animation loop is throttled by the browser.
+- No snapshots or checkpoints are written from the page.
+
+![WebGPU page](img/m9_webgpu_page.jpg)
+
+**Decisions made unattended (local session)**
+
+14. **WebGPU in the browser, not native Dawn.** design.md says "WebGPU for the web"; a page
+    needs no build and no extra submodule, and the built-in browser could run and measure it.
+15. **Step-by-step agreement instead of bit-exactness for the two shader backends.** Their
+    `sqrt` is not IEEE-exact (see the Vulkan entry), so the CPU checkpoints one step apart
+    are the oracle.

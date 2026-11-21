@@ -301,6 +301,15 @@ VkComputeSim::VkComputeSim(Context& ctx, State initial, std::uint32_t capacity) 
     m.capacity = static_cast<std::uint32_t>(cap);
     m.tableCapacity = table_size_for(m.capacity);
     m.scanEntries = std::max(m.tableCapacity + 1u, m.capacity) + 16u;
+    {
+        // Dispatches are one-dimensional: refuse a capacity the device cannot dispatch in one row
+        // (2^31 - 1 workgroups on the development GPU; the guaranteed minimum is only 65535).
+        const std::uint64_t groups = std::max<std::uint64_t>((cap + 255u) / 256u, (static_cast<std::uint64_t>(m.tableCapacity) + 64u) / 64u);
+        const std::uint64_t allowed = ctx.gpuProperties.limits.maxComputeWorkGroupCount[0];
+        if (groups > allowed)
+            throw std::runtime_error("Vulkan compute: " + std::to_string(m.capacity) + " cells need " + std::to_string(groups) +
+                                     " workgroups in one dispatch, but this device allows " + std::to_string(allowed));
+    }
 
     m.dedicatedQueue = ctx.computeQueue != VK_NULL_HANDLE;
     m.queue = m.dedicatedQueue ? ctx.computeQueue : ctx.queue;

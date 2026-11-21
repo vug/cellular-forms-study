@@ -10,9 +10,10 @@
 
 namespace cfv {
 
-// Renders the cells at (width * ssaa) x (height * ssaa) and box-filters down to width x height.
+// Renders the cells at (width * ssaa) x (height * ssaa), scaled down to width x height.
 // Returns width * height * 4 bytes (RGBA, top row first). No frame may be in flight on ctx.
-// In the path traced mode it renders as many frames as the tracer needs for its samples.
+// It renders as many frames as the image needs to build up: the samples of the path tracer, or
+// in the raster modes the frames that are averaged for anti-aliasing (settings.aaFrames).
 std::vector<std::uint8_t> renderOffscreen(Context& ctx, const PointBuffers& points, const OrbitCamera& camera,
                                           const RenderSettings& settings, Vec3 sceneCentre, float sceneRadius, float currentStep,
                                           int width, int height, int ssaa);

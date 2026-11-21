@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace cfv {
@@ -69,7 +70,14 @@ Context::Context(const ContextDesc& desc) : desc_(desc) {
     ci.ppEnabledExtensionNames = extensions.data();
     ci.enabledLayerCount = static_cast<uint32_t>(layers.size());
     ci.ppEnabledLayerNames = layers.data();
-    if (desc.validation) ci.pNext = &dbg;
+    // With the environment variable CF_VK_SYNC set, the layer also checks that passes do not
+    // race on images and buffers (slow; for hunting missing barriers).
+    const VkValidationFeatureEnableEXT syncChecks[] = {VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT};
+    VkValidationFeaturesEXT features{VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT};
+    features.enabledValidationFeatureCount = 1;
+    features.pEnabledValidationFeatures = syncChecks;
+    features.pNext = &dbg;
+    if (desc.validation) ci.pNext = std::getenv("CF_VK_SYNC") != nullptr ? static_cast<const void*>(&features) : static_cast<const void*>(&dbg);
     vk_check(vkCreateInstance(&ci, nullptr, &instance), "vkCreateInstance");
 
     if (desc.validation) {

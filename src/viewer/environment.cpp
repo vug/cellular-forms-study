@@ -1,7 +1,10 @@
 #include "environment.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
+#include <system_error>
 
 #ifdef _MSC_VER
 #pragma warning(push, 0)
@@ -104,6 +107,113 @@ bool loadEnvironmentImage(const std::string& file, std::vector<float>& rgb, int&
         }
     stbi_image_free(data);
     return true;
+}
+
+EnvironmentTable environmentTable(const float* rgb, int width, int height) {
+    EnvironmentTable t;
+    while ((width >> (t.level + 1)) >= 256) ++t.level;
+    t.width = std::max(width >> t.level, 1);
+    t.height = std::max(height >> t.level, 1);
+    const std::size_t texels = static_cast<std::size_t>(t.width) * t.height;
+    // The light of every texel of the reduced map (a box filter), then times the sine of the
+    // angle from the vertical: texels near the poles cover little of the sphere.
+    std::vector<double> light(texels, 0.0);
+    double meanLight = 0.0;
+    for (int y = 0; y < t.height; ++y) {
+        const int y0 = y * height / t.height, y1 = std::max((y + 1) * height / t.height, y0 + 1);
+        for (int x = 0; x < t.width; ++x) {
+            const int x0 = x * width / t.width, x1 = std::max((x + 1) * width / t.width, x0 + 1);
+            double sum = 0.0;
+            for (int sy = y0; sy < y1; ++sy)
+                for (int sx = x0; sx < x1; ++sx) {
+                    const float* p = rgb + (static_cast<std::size_t>(sy) * width + sx) * 3;
+                    sum += 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+                }
+            light[static_cast<std::size_t>(y) * t.width + x] = sum / static_cast<double>((y1 - y0) * (x1 - x0));
+            meanLight += light[static_cast<std::size_t>(y) * t.width + x];
+        }
+    }
+    meanLight /= static_cast<double>(texels);
+    // No texel is left with no chance at all: a dark texel next to a bright one still holds some
+    // of its light once the map is read with a filter.
+    const double floor = 1.0e-3 * meanLight + 1.0e-9;
+    t.table.assign(texels * 2, 0.0f);
+    t.rows.assign(static_cast<std::size_t>(t.height), 0.0f);
+    std::vector<double> rowSum(static_cast<std::size_t>(t.height), 0.0);
+    double total = 0.0;
+    for (int y = 0; y < t.height; ++y) {
+        const double sine = std::sin((static_cast<double>(y) + 0.5) / static_cast<double>(t.height) * 3.14159265358979);
+        for (int x = 0; x < t.width; ++x) {
+            const std::size_t i = static_cast<std::size_t>(y) * t.width + x;
+            light[i] = (light[i] + floor) * sine;
+            rowSum[static_cast<std::size_t>(y)] += light[i];
+        }
+        total += rowSum[static_cast<std::size_t>(y)];
+    }
+    double runningRows = 0.0;
+    for (int y = 0; y < t.height; ++y) {
+        double running = 0.0;
+        for (int x = 0; x < t.width; ++x) {
+            const std::size_t i = static_cast<std::size_t>(y) * t.width + x;
+            running += light[i];
+            t.table[i * 2] = x + 1 == t.width ? 1.0f : static_cast<float>(running / rowSum[static_cast<std::size_t>(y)]);
+            t.table[i * 2 + 1] = static_cast<float>(light[i]);
+        }
+        runningRows += rowSum[static_cast<std::size_t>(y)];
+        t.rows[static_cast<std::size_t>(y)] = y + 1 == t.height ? 1.0f : static_cast<float>(runningRows / total);
+    }
+    t.mean = static_cast<float>(total / static_cast<double>(texels));
+    return t;
+}
+
+namespace {
+
+bool isImageFile(const std::filesystem::path& p) {
+    std::string ext = p.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return ext == ".hdr" || ext == ".png" || ext == ".jpg" || ext == ".jpeg";
+}
+
+}  // namespace
+
+std::filesystem::path environmentFolder() {
+    std::error_code ec;
+    std::vector<std::filesystem::path> starts = {std::filesystem::current_path(ec)};
+#ifdef _MSC_VER
+    char* program = nullptr;
+    if (_get_pgmptr(&program) == 0 && program != nullptr) starts.push_back(std::filesystem::path(program).parent_path());
+#endif
+    for (std::filesystem::path dir : starts) {
+        for (int up = 0; up < 6 && !dir.empty(); ++up) {
+            const std::filesystem::path candidate = dir / "assets" / "hdri";
+            if (std::filesystem::is_directory(candidate, ec)) return candidate;
+            if (dir == dir.parent_path()) break;
+            dir = dir.parent_path();
+        }
+    }
+    return {};
+}
+
+std::vector<std::string> listEnvironments() {
+    std::vector<std::string> names;
+    const std::filesystem::path folder = environmentFolder();
+    if (folder.empty()) return names;
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator(folder, ec))
+        if (e.is_regular_file(ec) && isImageFile(e.path())) names.push_back(e.path().filename().string());
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+std::string resolveEnvironment(const std::string& name) {
+    std::error_code ec;
+    if (name.empty() || std::filesystem::exists(name, ec)) return name;
+    const std::filesystem::path folder = environmentFolder();
+    if (folder.empty()) return name;
+    if (std::filesystem::exists(folder / name, ec)) return (folder / name).string();
+    for (const std::string& file : listEnvironments())
+        if (file.rfind(name, 0) == 0) return (folder / file).string();  // the start of a name is enough
+    return name;
 }
 
 }  // namespace cfv

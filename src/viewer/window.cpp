@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -21,8 +22,10 @@
 
 #include "capture.hpp"
 #include "cloud.hpp"
+#include "environment.hpp"
 #include "frame_source.hpp"
 #include "live.hpp"
+#include "materials.hpp"
 
 namespace cfv {
 
@@ -110,6 +113,10 @@ private:
     OrbitCamera camera_;
     RenderSettings settings_;
     char envFileInput_[512] = {};  // the text box of the environment image file
+    std::vector<std::string> envFiles_;  // the images in assets/hdri
+    bool envFilesListed_ = false;
+    int materialIndex_ = 0;            // the material picked in the library
+    bool materialWithColor_ = true;    // applying it also sets the colour that goes with it
     std::uint64_t frameCounter_ = 0;
     bool saveRequested_ = false;
     std::string status_;
@@ -350,7 +357,7 @@ void Window::showFrame(int index) {
     if (index == frameIndex_ && cloud_) return;
     try {
         const Cloud& c = source_->get(index);
-        gpu_->upload(c, extraKindFor(settings_.colorMode));
+        gpu_->upload(c);
         cloud_ = &c;
         frameIndex_ = index;
         ++snapshotSwitches_;
@@ -387,41 +394,22 @@ RenderSettings Window::shadingFor(const Scene& sc) const {
         applyAutoRange(s, *cloud_);
         return s;
     }
+    // A running simulation changes the picture with every step it publishes. Averaging the
+    // frames in between would make the image sharpen and snap back in that rhythm.
+    if (liveStatus_.running) s.aaAccumulate = false;
     if (!s.autoRange) return s;
     const cf::Params& p = liveStatus_.params;
-    switch (s.colorMode) {
-        case ColorMode::Age: {
-            // About the time a newborn cell needs to divide again.
-            const float meanFood = std::max(0.5f * (p.foodMin + p.foodMax), 1.0e-9f);
-            s.scalarMin = 0.0f;
-            s.scalarMax = std::clamp(0.5f * p.foodThreshold / meanFood, 1.0f, 1.0e7f);
-            break;
-        }
-        case ColorMode::Food:
-            s.scalarMin = 0.0f;
-            s.scalarMax = p.foodThreshold;
-            break;
-        case ColorMode::Birth:
-            s.scalarMin = 0.0f;
-            s.scalarMax = std::max(static_cast<float>(sc.step), 1.0f);
-            break;
-        case ColorMode::Generation:
-            // Every division adds a generation: about log2 of the growth, and some more for the
-            // cells that divide most often.
-            s.scalarMin = 0.0f;
-            s.scalarMax = std::max(4.0f, std::log2(std::max(static_cast<float>(sc.count), 162.0f) / 162.0f) + 6.0f);
-            break;
-        case ColorMode::Curvature:
-            s.scalarMin = -0.6f;
-            s.scalarMax = 0.6f;
-            break;
-        case ColorMode::Activator:
-            s.scalarMin = 0.0f;
-            s.scalarMax = 1.0f;
-            break;
-        case ColorMode::Uniform:
-            break;
-    }
+    // Age: about the time a newborn cell needs to divide again. Generation: every division adds
+    // one, so about log2 of the growth, and some more for the cells that divide most often.
+    const float meanFood = std::max(0.5f * (p.foodMin + p.foodMax), 1.0e-9f);
+    const float lo[kCellProperties] = {0.0f, 0.0f, 0.0f, 0.0f, -0.6f, 0.0f};
+    const float hi[kCellProperties] = {std::clamp(0.5f * p.foodThreshold / meanFood, 1.0f, 1.0e7f),
+                                       p.foodThreshold,
+                                       std::max(static_cast<float>(sc.step), 1.0f),
+                                       std::max(4.0f, std::log2(std::max(static_cast<float>(sc.count), 162.0f) / 162.0f) + 6.0f),
+                                       0.6f,
+                                       1.0f};
+    setPropertyRanges(s, lo, hi);
     return s;
 }
 
@@ -586,19 +574,35 @@ void Window::buildUi() {
     }
 
     const bool canTrace = renderer_->rayTracing();
-    const bool membraneMode = settings_.drawMode == kDrawMembrane || settings_.drawMode == kDrawMembraneSss;
+    const bool membraneMode = settings_.drawMode == kDrawMembrane;
+    const bool pathMode = settings_.drawMode == kDrawPathTraced || settings_.drawMode == kDrawMembranePathTraced;
+    const char* propertyNames[] = {"nothing", "age", "food", "birth step", "generation", "curvature", "morphogen activator"};
+    // Says so when the data has no values for a cell property that is in use.
+    auto missingNote = [&](int property) {
+        const int bit = extraBitFor(property);
+        if (bit != 0 && (sc.buffers.extraMask & bit) == 0)
+            ImGui::TextDisabled(property == 6 ? "no morphogens in this data" : "not in this data (curvature needs a checkpoint)");
+    };
     if (ImGui::CollapsingHeader("Draw", ImGuiTreeNodeFlags_DefaultOpen)) {
-        const char* drawModes[] = {"cells", "x-ray", "membrane", "membrane, subsurface scattering", "cells, path traced", "membrane, path traced"};
-        ImGui::Combo("draw as", &settings_.drawMode, drawModes, 6);
-        if ((membraneMode || settings_.drawMode == kDrawMembranePathTraced) && !sc.buffers.index)
-            ImGui::TextDisabled("no membrane in this data (needs a checkpoint): cells are drawn");
-        if (settings_.drawMode == kDrawPathTraced || settings_.drawMode == kDrawMembranePathTraced) {
+        const char* drawModes[] = {"cells", "x-ray", "membrane", "cells, path traced", "membrane, path traced"};
+        const int drawModeIds[] = {kDrawCells, kDrawXray, kDrawMembrane, kDrawPathTraced, kDrawMembranePathTraced};
+        int drawIndex = 0;
+        for (int i = 0; i < 5; ++i)
+            if (settings_.drawMode == drawModeIds[i]) drawIndex = i;
+        if (ImGui::Combo("draw as", &drawIndex, drawModes, 5)) settings_.drawMode = drawModeIds[drawIndex];
+        const bool meshMode = membraneMode || settings_.drawMode == kDrawMembranePathTraced;
+        if (meshMode && !sc.buffers.index) ImGui::TextDisabled("no membrane in this data (needs a checkpoint): cells are drawn");
+        if (pathMode) {
             if (!canTrace) ImGui::TextDisabled("this GPU has no ray tracing: drawn without it");
             else ImGui::Text("%u of %d samples per pixel", renderer_->accumulatedSamples(), settings_.ptMaxSamples);
         }
         ImGui::SliderFloat("cell radius", &settings_.sphereRadius, 0.1f, 1.5f);
         ImGui::SliderFloat("smallest cell", &settings_.minPixelRadius, 0.2f, 3.0f, "%.1f px");
-        if (settings_.drawMode == kDrawMembraneSss) ImGui::SliderFloat("scatter radius", &settings_.sssRadius, 0.2f, 8.0f, "%.2f");
+        if (meshMode) {
+            ImGui::SliderInt("membrane smoothing", &settings_.meshSmooth, 1, 6, settings_.meshSmooth == 1 ? "off (flat triangles)" : "%d segments per edge");
+            if (sc.buffers.index && renderer_->membraneSegments() < std::clamp(settings_.meshSmooth, 1, 8))
+                ImGui::TextDisabled("this form is large: %d used", renderer_->membraneSegments());
+        }
         if (settings_.drawMode == kDrawXray) ImGui::SliderFloat("x-ray density", &settings_.xrayDensity, 0.002f, 0.5f, "%.3f", ImGuiSliderFlags_Logarithmic);
         float fov = camera_.fovy * 57.29578f;
         if (ImGui::SliderFloat("field of view", &fov, 10.0f, 90.0f, "%.0f deg")) camera_.fovy = fov / 57.29578f;
@@ -612,9 +616,7 @@ void Window::buildUi() {
             // Curvature is signed: the blue, white, red palette shows which way the sheet bends.
             if (settings_.colorMode == ColorMode::Curvature && settings_.palette == 0) settings_.palette = 3;
         }
-        const int needs = extraKindFor(settings_.colorMode);
-        if (needs != 0 && sc.buffers.extraKind != needs)
-            ImGui::TextDisabled(needs == 3 ? "no morphogens in this data" : "not in this data (curvature needs a checkpoint)");
+        missingNote(mode);
         ImGui::Checkbox("auto range", &settings_.autoRange);
         if (!settings_.autoRange) {
             const float speed = std::max(std::fabs(settings_.scalarMax - settings_.scalarMin) * 0.01f, 0.001f);
@@ -625,6 +627,95 @@ void Window::buildUi() {
         ImGui::Combo("palette", &settings_.palette, palettes, 5);
         ImGui::Checkbox("reverse the palette", &settings_.paletteReverse);
         if (settings_.colorMode == ColorMode::Uniform) ImGui::ColorEdit3("cell colour", settings_.baseColor);
+    }
+
+    if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // The library: pick one, apply it, then change any part of it below.
+        const std::vector<Material>& library = materials();
+        materialIndex_ = std::clamp(materialIndex_, 0, static_cast<int>(library.size()) - 1);
+        if (ImGui::BeginCombo("library", library[static_cast<size_t>(materialIndex_)].name)) {
+            for (int i = 0; i < static_cast<int>(library.size()); ++i) {
+                if (ImGui::Selectable(library[static_cast<size_t>(i)].name, i == materialIndex_)) {
+                    materialIndex_ = i;
+                    applyMaterial(settings_, library[static_cast<size_t>(i)], materialWithColor_);
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", library[static_cast<size_t>(i)].note);
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::TextDisabled("%s", library[static_cast<size_t>(materialIndex_)].note);
+        ImGui::Checkbox("with its colour", &materialWithColor_);
+        ImGui::SameLine();
+        if (ImGui::Button("Apply")) applyMaterial(settings_, library[static_cast<size_t>(materialIndex_)], materialWithColor_);
+
+        ImGui::SeparatorText("surface");
+        ImGui::SliderFloat("roughness", &settings_.roughness, 0.03f, 1.0f);
+        ImGui::SliderFloat("metal", &settings_.metalness, 0.0f, 1.0f);
+        ImGui::SliderFloat("highlight", &settings_.specular, 0.0f, 1.0f);
+        ImGui::SliderFloat("sheen", &settings_.sheen, 0.0f, 1.0f);
+        if (settings_.metalness > 0.5f && !settings_.envLight) ImGui::TextDisabled("a metal shows what is around it: turn the environment light on");
+
+        ImGui::SeparatorText("light under the surface");
+        ImGui::SliderFloat("subsurface", &settings_.subsurface, 0.0f, 1.0f);
+        ImGui::SliderFloat("scatter radius", &settings_.sssRadius, 0.0f, 8.0f, "%.2f");
+        ImGui::ColorEdit3("reach of red, green, blue", settings_.sssColor);
+        ImGui::SliderFloat("light through the sheet", &settings_.translucency, 0.0f, 0.95f);
+        ImGui::SliderFloat("depth it gets through", &settings_.transDepth, 0.2f, 20.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+
+        ImGui::SeparatorText("glow");
+        ImGui::SliderFloat("emission", &settings_.emission, 0.0f, 12.0f, "%.2f");
+        ImGui::ColorEdit3("glow colour", settings_.emissionColor);
+        ImGui::SliderFloat("own colour .. glow colour", &settings_.emissionTint, 0.0f, 1.0f);
+        ImGui::Checkbox("glowing cells light their neighbours", &settings_.emissionLights);
+        if (settings_.emissionLights && settings_.emission > 0.0f && !canTrace && !pathMode) ImGui::TextDisabled("needs ray tracing, which this GPU does not have");
+
+        // Any of four parts of the material can follow a property of the cells.
+        ImGui::SeparatorText("driven by the cells");
+        const char* channelNames[kMaterialChannels] = {"emission", "roughness", "subsurface", "light through"};
+        for (int c = 0; c < kMaterialChannels; ++c) {
+            ImGui::PushID(c);
+            ImGui::SetNextItemWidth(150 * ImGui::GetStyle().FontScaleDpi);
+            ImGui::Combo(channelNames[c], &settings_.modSource[c], propertyNames, kCellProperties + 1);
+            if (settings_.modSource[c] != 0) {
+                ImGui::SetNextItemWidth(150 * ImGui::GetStyle().FontScaleDpi);
+                float range[2] = {settings_.modLo[c], settings_.modHi[c]};
+                if (ImGui::SliderFloat2(settings_.modSource[c] == 1 ? "oldest .. youngest" : "lowest .. highest", range, 0.0f, 1.0f, "%.2f")) {
+                    settings_.modLo[c] = range[0];
+                    settings_.modHi[c] = range[1];
+                }
+                ImGui::SetNextItemWidth(150 * ImGui::GetStyle().FontScaleDpi);
+                float window[2] = {settings_.modFrom[c], settings_.modTo[c]};
+                if (ImGui::SliderFloat2("over this part of its range", window, 0.0f, 1.0f, "%.2f")) {
+                    settings_.modFrom[c] = window[0];
+                    settings_.modTo[c] = window[1];
+                }
+                missingNote(settings_.modSource[c]);
+            }
+            ImGui::PopID();
+        }
+        if (settings_.modSource[kMatEmission] != 0 && settings_.emission <= 0.0f) ImGui::TextDisabled("emission is 0: raise it to see the glow");
+    }
+
+    if (ImGui::CollapsingHeader("Lens")) {
+        ImGui::SliderFloat("opening", &settings_.lensAperture, 0.0f, 4.0f, settings_.lensAperture <= 0.0f ? "closed: all sharp" : "%.2f");
+        bool manual = settings_.lensFocus > 0.0f;
+        if (ImGui::Checkbox("set the focus distance by hand", &manual)) settings_.lensFocus = manual ? std::max(camera_.distance + settings_.lensFocusShift * sc.radius, 0.1f) : 0.0f;
+        if (manual) ImGui::SliderFloat("focus distance", &settings_.lensFocus, 0.1f, std::max(2.0f * camera_.distance, 1.0f), "%.1f");
+        else ImGui::SliderFloat("focus", &settings_.lensFocusShift, -1.2f, 1.2f, "%.2f (near side -1, far side 1)");
+        if (!pathMode) ImGui::SliderFloat("largest blur", &settings_.dofMaxBlur, 4.0f, 64.0f, "%.0f px");
+        ImGui::TextDisabled("the same lens in the raster modes and the path tracer");
+    }
+
+    if (ImGui::CollapsingHeader("Anti-aliasing")) {
+        ImGui::Checkbox("smooth edges (fast)", &settings_.fxaa);
+        ImGui::Checkbox("refine while the view stands still", &settings_.aaAccumulate);
+        if (settings_.aaAccumulate) {
+            ImGui::SliderInt("frames to average", &settings_.aaFrames, 2, 256, "%d", ImGuiSliderFlags_Logarithmic);
+            if (!pathMode) ImGui::Text("%u averaged", renderer_->accumulatedSamples());
+            if (live_ && liveStatus_.running) ImGui::TextDisabled("waits while the simulation runs");
+        }
+        ImGui::SliderFloat("render scale", &settings_.renderScale, 0.5f, 2.0f, "%.2f x");
+        ImGui::TextDisabled("above 1: supersampling (2 x costs four times the pixels)");
     }
 
     if (ImGui::CollapsingHeader("Light")) {
@@ -645,8 +736,6 @@ void Window::buildUi() {
         ImGui::SliderFloat("share from the surroundings", &settings_.ambient, 0.0f, 1.0f);
         ImGui::ColorEdit3("sky colour", settings_.skyColor);
         ImGui::ColorEdit3("ground colour", settings_.groundColor);
-        ImGui::SliderFloat("specular", &settings_.specular, 0.0f, 1.0f);
-        ImGui::SliderFloat("shininess", &settings_.shininess, 2.0f, 256.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
     }
 
     if (ImGui::CollapsingHeader("Shadows")) {
@@ -660,8 +749,7 @@ void Window::buildUi() {
         for (int i = 0; i < 4; ++i)
             if (settings_.shadowMapSize == sizes[i]) sizeIndex = i;
         if (ImGui::Combo("map size", &sizeIndex, sizeNames, 4)) settings_.shadowMapSize = sizes[sizeIndex];
-        if (settings_.drawMode == kDrawXray || settings_.drawMode >= kDrawPathTraced)
-            ImGui::TextDisabled("not used by this draw mode (the path tracer casts its own)");
+        if (settings_.drawMode == kDrawXray || pathMode) ImGui::TextDisabled("not used by this draw mode (the path tracer casts its own)");
     }
 
     if (ImGui::CollapsingHeader("Environment")) {
@@ -669,6 +757,23 @@ void Window::buildUi() {
         ImGui::Checkbox("show it behind the form", &settings_.envBackground);
         ImGui::SliderFloat("environment intensity", &settings_.envIntensity, 0.0f, 4.0f);
         ImGui::SliderFloat("rotation", &settings_.envRotation, 0.0f, 360.0f, "%.0f deg");
+        // The maps that come with the repository (assets/hdri), or any image file.
+        if (!envFilesListed_) {
+            envFiles_ = listEnvironments();
+            envFilesListed_ = true;
+        }
+        if (!envFiles_.empty()) {
+            const std::string current = settings_.envFile.empty() ? std::string("built-in studio") : std::filesystem::path(settings_.envFile).filename().string();
+            if (ImGui::BeginCombo("map", current.c_str())) {
+                if (ImGui::Selectable("built-in studio", settings_.envFile.empty())) settings_.envFile.clear();
+                for (const std::string& name : envFiles_)
+                    if (ImGui::Selectable(name.c_str(), current == name)) {
+                        settings_.envFile = name;
+                        settings_.envLight = true;
+                    }
+                ImGui::EndCombo();
+            }
+        }
         ImGui::InputText("image file", envFileInput_, sizeof envFileInput_);
         if (ImGui::Button("Load image")) settings_.envFile = envFileInput_;
         ImGui::SameLine();
@@ -698,7 +803,6 @@ void Window::buildUi() {
 
     if (ImGui::CollapsingHeader("Cell walls and outlines")) {
         ImGui::Checkbox("cell walls", &settings_.walls);
-        if (membraneMode && !renderer_->cellWallsOnMembrane()) ImGui::TextDisabled("this GPU cannot draw walls on the membrane");
         ImGui::SliderFloat("wall width", &settings_.wallWidth, 0.5f, 4.0f, "%.1f px");
         ImGui::SliderFloat("wall strength", &settings_.wallStrength, 0.0f, 1.0f);
         ImGui::ColorEdit3("wall colour", settings_.wallColor);
@@ -719,13 +823,11 @@ void Window::buildUi() {
         ImGui::SliderFloat("sun size", &settings_.ptSunSize, 0.0f, 20.0f, "%.1f deg");
         ImGui::SliderFloat("sun intensity", &settings_.ptSunIntensity, 0.0f, 8.0f);
         ImGui::SliderFloat("sky intensity", &settings_.ptSkyIntensity, 0.0f, 4.0f);
-        ImGui::SliderFloat("lens radius", &settings_.ptAperture, 0.0f, 3.0f);
-        ImGui::SliderFloat("focus distance", &settings_.ptFocus, 0.0f, std::max(2.0f * camera_.distance, 1.0f), settings_.ptFocus <= 0.0f ? "orbit point" : "%.1f");
-        ImGui::SliderFloat("light through the membrane", &settings_.ptTranslucency, 0.0f, 0.9f);
+        ImGui::SliderFloat("cap on bounced light", &settings_.ptClamp, 0.0f, 100.0f, settings_.ptClamp <= 0.0f ? "none" : "%.1f");
         ImGui::Checkbox("denoise", &settings_.ptDenoise);
         ImGui::SliderFloat("denoise strength", &settings_.ptDenoiseStrength, 0.0f, 2.0f);
         ImGui::EndDisabled();
-        ImGui::TextDisabled("lit by the key light and the sky and ground colours");
+        ImGui::TextDisabled("the material, the lens and the environment are the ones above");
     }
 
     if (ImGui::CollapsingHeader("Stereo")) {
@@ -737,13 +839,15 @@ void Window::buildUi() {
 
     if (ImGui::CollapsingHeader("Output", live_ ? 0 : ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::SliderFloat("exposure", &settings_.exposure, 0.2f, 3.0f);
-        const char* toneMaps[] = {"none", "Reinhard", "filmic"};
-        ImGui::Combo("tone map", &settings_.toneMap, toneMaps, 3);
+        const char* toneMaps[] = {"none", "Reinhard", "filmic", "soft"};
+        ImGui::Combo("tone map", &settings_.toneMap, toneMaps, 4);
+        ImGui::SliderFloat("bloom", &settings_.bloom, 0.0f, 2.0f, settings_.bloom <= 0.0f ? "off" : "%.2f");
+        ImGui::SliderFloat("bloom starts at", &settings_.bloomThreshold, 0.0f, 4.0f, "%.2f");
         ImGui::ColorEdit3("background", settings_.background);
         ImGui::SliderFloat("gradient", &settings_.backgroundGradient, 0.0f, 1.0f);
         ImGui::SliderFloat("vignette", &settings_.vignette, 0.0f, 2.0f);
-        const char* views[] = {"final", "occlusion", "normals", "albedo", "key light", "cell ids"};
-        ImGui::Combo("view", &settings_.debugView, views, 6);
+        const char* views[] = {"final", "occlusion", "normals", "albedo", "key light", "cell ids", "material", "matt light"};
+        ImGui::Combo("view", &settings_.debugView, views, 8);
         if (ImGui::Button("Reset the look")) {
             const int keepMode = settings_.drawMode;
             const std::string keepFile = settings_.envFile;
@@ -845,10 +949,8 @@ void Window::drawFrame() {
                 status_ = e.what();
             }
         }
-        // What the simulation has to publish besides positions, age and food.
-        live_->setRenderNeeds(extraKindFor(settings_.colorMode), settings_.drawMode == kDrawMembrane || settings_.drawMode == kDrawMembraneSss ||
-                                                                      settings_.drawMode == kDrawMembranePathTraced,
-                              settings_.simLight);
+        // What the simulation has to publish besides the cells: the membrane, its light map.
+        live_->setRenderNeeds(settings_.drawMode == kDrawMembrane || settings_.drawMode == kDrawMembranePathTraced, settings_.simLight);
         // Switch to the newest frame the simulation has published; never waits for a step.
         liveFrame_ = live_->acquire();
         liveStatus_ = live_->status();
@@ -874,9 +976,6 @@ void Window::drawFrame() {
             }
         }
         showFrame(wantedIndex_);
-        // The colour mode decides which extra per-cell value is on the GPU.
-        const int needs = extraKindFor(settings_.colorMode);
-        if (cloud_ && gpu_->extraKind() != needs && cloud_->extra(needs) != nullptr) gpu_->setExtra(*cloud_, needs);
     }
 
     const Scene sc = scene();

@@ -5,7 +5,7 @@ layout(set = 1, binding = 0) uniform accelerationStructureEXT cellTree;
 layout(set = 1, binding = 1, std430) readonly buffer CellPos { float cellPos[]; };      // 3 per cell
 layout(set = 1, binding = 2, std430) readonly buffer CellBirth { uint cellBirth[]; };
 layout(set = 1, binding = 3, std430) readonly buffer CellFood { float cellFood[]; };
-layout(set = 1, binding = 4, std430) readonly buffer CellExtra { float cellExtra[]; };
+layout(set = 1, binding = 4, std430) readonly buffer CellExtra { float cellExtra[]; };  // 3 per cell: generation, curvature, activator
 
 vec3 cellCentre(int i) { return vec3(cellPos[3 * i], cellPos[3 * i + 1], cellPos[3 * i + 2]); }
 
@@ -28,19 +28,20 @@ bool occluded(vec3 o, vec3 d, float tmin, float tmax) {
     while (rayQueryProceedEXT(rq)) {
         if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
             float t = sphereEntry(o, d, cellCentre(rayQueryGetIntersectionPrimitiveIndexEXT(rq, false)), F.sphere.x);
-            if (t > tmin && t < tmax) rayQueryGenerateIntersectionEXT(rq, t);
+            if (t > tmin && t < tmax) rayQueryGenerateIntersectionEXT(rq, t);  // the first hit ends the traversal
         }
     }
     return rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT;
 }
 
-// Random numbers: one stream per pixel and frame (PCG).
+// Random numbers in [0, 1): one stream per pixel and frame (PCG). The top 24 bits are used: a
+// float holds them exactly, so the result is never rounded up to 1.
 uint rngState;
 void rngInit(uvec2 pixel, uint salt) { rngState = pixel.x * 1973u + pixel.y * 9277u + salt * 26699u + 1u; }
 float rnd() {
     rngState = rngState * 747796405u + 2891336453u;
     uint w = ((rngState >> ((rngState >> 28u) + 4u)) ^ rngState) * 277803737u;
-    return float((w >> 22u) ^ w) * (1.0 / 4294967296.0);
+    return float(((w >> 22u) ^ w) >> 8u) * (1.0 / 16777216.0);
 }
 
 void basis(vec3 n, out vec3 t, out vec3 b) {

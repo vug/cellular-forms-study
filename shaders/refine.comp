@@ -1,0 +1,122 @@
+#version 460
+// Smooths the membrane. The mesh of the simulation has one vertex per cell, which looks
+// faceted up close. Here every triangle becomes a curved patch through its three cells that
+// meets their normals (a cubic "point-normal" triangle), sampled on a lattice of n segments per
+// edge; the normals of the patch vary smoothly too. Points on an edge are computed from the two
+// cells of that edge alone, always in the same order, so neighbouring patches meet exactly.
+// Mode 0 writes the lattice points (one invocation each), mode 1 the triangle indices that the
+// ray tracing structure is built from (one invocation per small triangle).
+layout(local_size_x = 256) in;
+#include "patch.glsl"
+
+layout(set = 1, binding = 1, std430) readonly buffer CellPos { float cellPos[]; };        // 3 per cell
+layout(set = 1, binding = 6, std430) readonly buffer CellNormal { float cellNormal[]; };  // 3 per cell
+layout(set = 1, binding = 7, std430) readonly buffer MeshIndex { uint meshIndex[]; };     // 3 per triangle
+layout(set = 1, binding = 8, std430) writeonly buffer FinePos { float finePos[]; };       // 3 per lattice point
+layout(set = 1, binding = 9, std430) writeonly buffer FineNormal { float fineNormal[]; };
+layout(set = 1, binding = 10, std430) writeonly buffer FineIndex { uint fineIndex[]; };   // 3 per small triangle
+
+layout(push_constant) uniform Push {
+    uint count;     // (the cell count of aabb.comp; not used here)
+    float radius;
+    uint triangles; // triangles of the membrane
+    uint segments;  // n
+    uint mode;
+    uint base;      // number of the first invocation of this dispatch (large meshes take several)
+} P;
+
+vec3 cellP(uint i) { return vec3(cellPos[3u * i], cellPos[3u * i + 1u], cellPos[3u * i + 2u]); }
+vec3 cellN(uint i) { return vec3(cellNormal[3u * i], cellNormal[3u * i + 1u], cellNormal[3u * i + 2u]); }
+
+// The curve of the patch along the edge from cell a to cell b, at k of n steps, and its normal.
+void edgePoint(uint a, uint b, int k, int n, out vec3 p, out vec3 nrm) {
+    if (a > b) {  // always from the lower cell to the higher: both patches at the edge agree to the bit
+        uint s = a;
+        a = b;
+        b = s;
+        k = n - k;
+    }
+    vec3 pa = cellP(a), pb = cellP(b), na = cellN(a), nb = cellN(b);
+    float t = float(k) / float(n), s = 1.0 - t;
+    vec3 d = pb - pa;
+    vec3 c1 = (2.0 * pa + pb - dot(d, na) * na) / 3.0;
+    vec3 c2 = (2.0 * pb + pa + dot(d, nb) * nb) / 3.0;
+    p = s * s * s * pa + 3.0 * s * s * t * c1 + 3.0 * s * t * t * c2 + t * t * t * pb;
+    vec3 mid = normalize(na + nb - (2.0 * dot(d, na + nb) / max(dot(d, d), 1e-20)) * d);
+    nrm = normalize(s * s * na + 2.0 * s * t * mid + t * t * nb);
+}
+
+void main() {
+    int n = int(P.segments);
+    int perPatch = (n + 1) * (n + 2) / 2;
+    if (P.mode == 1u) {
+        uint id = gl_GlobalInvocationID.x + P.base;
+        uint tri = id / uint(n * n);
+        if (tri >= P.triangles) return;
+        ivec2 a, b, c;
+        patchTriangle(int(id % uint(n * n)), n, a, b, c);
+        uint base = tri * uint(perPatch);
+        fineIndex[3u * id] = base + uint(patchVertex(a.x, a.y, n));
+        fineIndex[3u * id + 1u] = base + uint(patchVertex(b.x, b.y, n));
+        fineIndex[3u * id + 2u] = base + uint(patchVertex(c.x, c.y, n));
+        return;
+    }
+
+    uint id = gl_GlobalInvocationID.x + P.base;
+    uint tri = id / uint(perPatch);
+    if (tri >= P.triangles) return;
+    // The lattice point this invocation computes.
+    int local = int(id % uint(perPatch));
+    int r = 0, row = n + 1;
+    while (local >= row) {
+        local -= row;
+        row -= 1;
+        r += 1;
+    }
+    int c = local;
+    int w1 = n - r - c, w2 = c, w3 = r;  // weights of the three cells, in steps of 1 / n
+    uint i1 = meshIndex[3u * tri], i2 = meshIndex[3u * tri + 1u], i3 = meshIndex[3u * tri + 2u];
+
+    vec3 p, nrm;
+    if (w1 == n) {
+        p = cellP(i1);
+        nrm = cellN(i1);
+    } else if (w2 == n) {
+        p = cellP(i2);
+        nrm = cellN(i2);
+    } else if (w3 == n) {
+        p = cellP(i3);
+        nrm = cellN(i3);
+    } else if (w3 == 0) {
+        edgePoint(i1, i2, w2, n, p, nrm);
+    } else if (w2 == 0) {
+        edgePoint(i1, i3, w3, n, p, nrm);
+    } else if (w1 == 0) {
+        edgePoint(i2, i3, w3, n, p, nrm);
+    } else {
+        // Inside the patch: the full cubic through the three cells and their normals.
+        vec3 p1 = cellP(i1), p2 = cellP(i2), p3 = cellP(i3), n1 = cellN(i1), n2 = cellN(i2), n3 = cellN(i3);
+        vec3 b210 = (2.0 * p1 + p2 - dot(p2 - p1, n1) * n1) / 3.0;
+        vec3 b120 = (2.0 * p2 + p1 - dot(p1 - p2, n2) * n2) / 3.0;
+        vec3 b021 = (2.0 * p2 + p3 - dot(p3 - p2, n2) * n2) / 3.0;
+        vec3 b012 = (2.0 * p3 + p2 - dot(p2 - p3, n3) * n3) / 3.0;
+        vec3 b102 = (2.0 * p3 + p1 - dot(p1 - p3, n3) * n3) / 3.0;
+        vec3 b201 = (2.0 * p1 + p3 - dot(p3 - p1, n1) * n1) / 3.0;
+        vec3 e = (b210 + b120 + b021 + b012 + b102 + b201) / 6.0;
+        vec3 b111 = e + (e - (p1 + p2 + p3) / 3.0) * 0.5;
+        float w = float(w1) / float(n), u = float(w2) / float(n), v = float(w3) / float(n);
+        p = p1 * (w * w * w) + p2 * (u * u * u) + p3 * (v * v * v) + 3.0 * (b210 * (w * w * u) + b120 * (w * u * u) + b201 * (w * w * v) +
+            b021 * (u * u * v) + b102 * (w * v * v) + b012 * (u * v * v)) + 6.0 * b111 * (w * u * v);
+        vec3 d12 = p2 - p1, d23 = p3 - p2, d31 = p1 - p3;
+        vec3 n110 = normalize(n1 + n2 - (2.0 * dot(d12, n1 + n2) / max(dot(d12, d12), 1e-20)) * d12);
+        vec3 n011 = normalize(n2 + n3 - (2.0 * dot(d23, n2 + n3) / max(dot(d23, d23), 1e-20)) * d23);
+        vec3 n101 = normalize(n3 + n1 - (2.0 * dot(d31, n3 + n1) / max(dot(d31, d31), 1e-20)) * d31);
+        nrm = normalize(n1 * (w * w) + n2 * (u * u) + n3 * (v * v) + 2.0 * (n110 * (w * u) + n011 * (u * v) + n101 * (w * v)));
+    }
+    finePos[3u * id] = p.x;
+    finePos[3u * id + 1u] = p.y;
+    finePos[3u * id + 2u] = p.z;
+    fineNormal[3u * id] = nrm.x;
+    fineNormal[3u * id + 1u] = nrm.y;
+    fineNormal[3u * id + 2u] = nrm.z;
+}

@@ -67,7 +67,7 @@ LiveSim::LiveSim(Context& ctx, const LiveConfig& config) : ctx_(ctx), config_(co
                 shareBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(cf::Vec3), usage, slot.pos, slot.cudaPos);
                 shareBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(std::uint32_t), usage, slot.birth, slot.cudaBirth);
                 shareBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(float), usage, slot.food, slot.cudaFood);
-                shareBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(float), usage, slot.extra, slot.cudaExtra);
+                shareBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(cf::Vec3), usage, slot.extra, slot.cudaExtra);
             }
         } catch (...) {
             releaseSlots();
@@ -183,11 +183,10 @@ void LiveSim::ensureMeshBuffers() {
     }
 }
 
-void LiveSim::setRenderNeeds(int extraKind, bool mesh, bool lightMap) {
-    bool changed = wantExtra_.exchange(extraKind) != extraKind;
+void LiveSim::setRenderNeeds(bool mesh, bool lightMap) {
     if (mesh && config_.backend == LiveBackend::Cuda && !meshReady_) ensureMeshBuffers();
     if (lightMap && config_.backend == LiveBackend::Cuda && !lightMapReady_) ensureLightMapBuffers();
-    changed = (wantMesh_.exchange(mesh) != mesh) || changed;
+    bool changed = wantMesh_.exchange(mesh) != mesh;
     changed = (wantLightMap_.exchange(lightMap) != lightMap) || changed;
     if (changed) {
         // Show it at once, also while the simulation is paused.
@@ -284,9 +283,13 @@ LiveStatus LiveSim::status() const {
 
 void LiveSim::publish() {
     Slot& slot = slots_[back_];  // only this thread touches the back slot
-    const int kind = wantExtra_.load();
     const bool mesh = wantMesh_.load();
-    slot.extraKind = 0;
+    bool morphogens = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        morphogens = status_.params.morphogens != 0.0f;
+    }
+    slot.extraMask = morphogens ? 7 : 3;
     slot.hasMesh = false;
     slot.indexCount = 0;
     slot.light = cf::LightMapInfo{};
@@ -300,10 +303,7 @@ void LiveSim::publish() {
         t.pos = slot.cudaPos->device_ptr();
         t.birth = slot.cudaBirth->device_ptr();
         t.food = slot.cudaFood->device_ptr();
-        if (kind != 0) {
-            t.extra = slot.cudaExtra->device_ptr();
-            t.extraKind = static_cast<cf::RenderScalar>(kind);
-        }
+        t.extra = slot.cudaExtra->device_ptr();
         const bool withMesh = mesh && meshReady_;
         if (withMesh) {
             t.normal = slot.cudaNormal->device_ptr();
@@ -317,7 +317,6 @@ void LiveSim::publish() {
         const cf::RenderCounts counts = cuda->copy_render_data(t, capacity_);
         slot.light = counts.light;
         slot.count = counts.cells;
-        slot.extraKind = kind;
         slot.indexCount = counts.indices;
         slot.hasMesh = withMesh && counts.indices > 0;
         cuda->bounds(slot.lo, slot.hi);
@@ -338,23 +337,23 @@ void LiveSim::publish() {
         slot.hostPos.assign(s.pos.begin(), s.pos.begin() + s.n);
         slot.hostBirth.assign(s.birth.begin(), s.birth.begin() + s.n);
         slot.hostFood.assign(s.food.begin(), s.food.begin() + s.n);
-        slot.hostExtra.clear();
-        if (kind != 0) {
-            slot.hostExtra.resize(s.n);
-            const bool morph = s.morphB.size() >= s.n;
-            for (std::uint32_t v = 0; v < s.n; ++v) {
-                float x = 0.0f;
-                if (kind == 1) x = static_cast<float>(s.gen[v]);
-                else if (kind == 2) x = cf::cell_curvature(s.pos.data(), s.ring(v), s.deg[v], s.pos[v], s.normal[v], s.params.linkRestLength);
-                else if (kind == 3 && morph) x = cf::morph_signal(s.morphB[v]);
-                slot.hostExtra[v] = x;
-            }
-            slot.extraKind = kind;
+        // The normals from the positions as they are (the stored ones are from before the last
+        // move), and with them generation, curvature and activator.
+        const bool morph = s.morphB.size() >= s.n;
+        slot.extraMask = morph ? 7 : 3;
+        slot.hostNormal.resize(s.n);
+        slot.hostGeneration.resize(s.n);
+        slot.hostCurvature.resize(s.n);
+        slot.hostActivator.assign(morph ? s.n : 0u, 0.0f);
+        const float eps2 = cf::normal_eps2(s.params.linkRestLength);
+        for (std::uint32_t v = 0; v < s.n; ++v) {
+            cf::ring_normal(s.pos.data(), s.ring(v), s.deg[v], s.pos[v], s.normal[v], eps2, slot.hostNormal[v]);
+            slot.hostGeneration[v] = static_cast<float>(s.gen[v]);
+            slot.hostCurvature[v] = cf::cell_curvature(s.pos.data(), s.ring(v), s.deg[v], s.pos[v], slot.hostNormal[v], s.params.linkRestLength);
+            if (morph) slot.hostActivator[v] = cf::morph_signal(s.morphB[v]);
         }
-        slot.hostNormal.clear();
         slot.hostIndex.clear();
         if (mesh) {
-            slot.hostNormal.assign(s.normal.begin(), s.normal.begin() + s.n);
             for (const auto& f : cf::mesh_faces(s)) slot.hostIndex.insert(slot.hostIndex.end(), f.begin(), f.end());
             slot.hasMesh = !slot.hostIndex.empty();
             slot.indexCount = static_cast<std::uint32_t>(slot.hostIndex.size());
@@ -396,20 +395,19 @@ LiveFrame LiveSim::acquire() {
         if (config_.backend == LiveBackend::Cpu) {
             // Lend the storage of the slot to a Cloud for the upload, then give it back.
             Cloud c;
-            std::vector<float>* extra = slot.extraKind == 1 ? &c.generation : slot.extraKind == 2 ? &c.curvature : slot.extraKind == 3 ? &c.activator : nullptr;
-            c.pos.swap(slot.hostPos);
-            c.birth.swap(slot.hostBirth);
-            c.food.swap(slot.hostFood);
-            c.normal.swap(slot.hostNormal);
-            c.indices.swap(slot.hostIndex);
-            if (extra != nullptr) extra->swap(slot.hostExtra);
-            frontGpu_->upload(c, slot.extraKind);
-            c.pos.swap(slot.hostPos);
-            c.birth.swap(slot.hostBirth);
-            c.food.swap(slot.hostFood);
-            c.normal.swap(slot.hostNormal);
-            c.indices.swap(slot.hostIndex);
-            if (extra != nullptr) extra->swap(slot.hostExtra);
+            auto lend = [&] {
+                c.pos.swap(slot.hostPos);
+                c.birth.swap(slot.hostBirth);
+                c.food.swap(slot.hostFood);
+                c.normal.swap(slot.hostNormal);
+                c.indices.swap(slot.hostIndex);
+                c.generation.swap(slot.hostGeneration);
+                c.curvature.swap(slot.hostCurvature);
+                c.activator.swap(slot.hostActivator);
+            };
+            lend();
+            frontGpu_->upload(c);
+            lend();
             if (slot.light.valid && !slot.hostLightMap.empty()) {
                 const VkDeviceSize bytes = slot.hostLightMap.size() * sizeof(std::int32_t);
                 if (bytes > frontLightMapBytes_) {
@@ -430,10 +428,8 @@ LiveFrame LiveSim::acquire() {
     f.radius = std::max(0.5f * cf::length(slot.hi - slot.lo), 1.0f);
     if (config_.backend == LiveBackend::Cuda) {
         f.buffers = PointBuffers{slot.pos.buffer, slot.birth.buffer, slot.food.buffer, slot.count};
-        if (slot.extraKind != 0) {
-            f.buffers.extra = slot.extra.buffer;
-            f.buffers.extraKind = slot.extraKind;
-        }
+        f.buffers.extra = slot.extra.buffer;
+        f.buffers.extraMask = slot.extraMask;
         if (slot.hasMesh) {
             f.buffers.normal = slot.normal.buffer;
             f.buffers.index = slot.index.buffer;

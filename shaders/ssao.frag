@@ -1,25 +1,16 @@
 #version 460
 // Screen-space ambient occlusion at two scales: a small radius for contact between
-// neighbouring cells and a large one that darkens the insides of folds.
+// neighbouring cells and a large one that darkens the insides of folds. Output: a = how open
+// the point is (rgb, light gathered from emissive cells, is only filled by the ray-traced pass).
 #include "frame.glsl"
+#include "screen.glsl"
 
 layout(set = 0, binding = 1) uniform sampler2D texNormalDepth;
 
 layout(location = 0) in vec2 vUV;
-layout(location = 0) out float outAO;
+layout(location = 0) out vec4 outGather;
 
 const int kSamples = 12;  // per scale
-
-float hash12(vec2 p) {
-    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
-}
-
-vec3 viewPos(vec2 uv, float depth) {
-    vec2 ndc = uv * 2.0 - 1.0;  // (the third column of the projection is not zero for a stereo eye)
-    return vec3((ndc.x + F.proj[2][0]) * depth / F.proj[0][0], (ndc.y + F.proj[2][1]) * depth / F.proj[1][1], -depth);
-}
 
 float occlusionAt(vec3 p, vec3 n, mat3 tbn, float radius, float seed) {
     float occ = 0.0;
@@ -48,14 +39,14 @@ float occlusionAt(vec3 p, vec3 n, mat3 tbn, float radius, float seed) {
 void main() {
     vec4 nd = textureLod(texNormalDepth, vUV, 0.0);
     if (nd.w <= 0.0 || F.ao.w < 0.5) {
-        outAO = 1.0;
+        outGather = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
     vec3 n = normalize(nd.xyz);
     vec3 p = viewPos(vUV, nd.w);
 
-    float seed = hash12(gl_FragCoord.xy + 17.0 * fract(F.misc.x * 0.0));
-    float a = 6.2831853 * hash12(gl_FragCoord.xy * 1.37 + 3.1);
+    float seed = pixelNoise(1.0);
+    float a = 6.2831853 * pixelNoise(2.0);
     vec3 rnd = vec3(cos(a), sin(a), 0.0);
     vec3 t = normalize(rnd - n * dot(rnd, n));
     mat3 tbn = mat3(t, cross(n, t), n);
@@ -63,5 +54,5 @@ void main() {
     float occSmall = occlusionAt(p, n, tbn, F.ao.x, seed);
     float occLarge = occlusionAt(p, n, tbn, F.ao.y, fract(seed + 0.5));
     float occ = 0.5 * occSmall + 0.8 * occLarge;
-    outAO = clamp(1.0 - F.ao.z * occ, 0.0, 1.0);
+    outGather = vec4(0.0, 0.0, 0.0, clamp(1.0 - F.ao.z * occ, 0.0, 1.0));
 }

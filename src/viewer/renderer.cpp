@@ -20,32 +20,14 @@ const uint32_t kImpostorVert[] = {
 const uint32_t kImpostorFrag[] = {
 #include "impostor.frag.inc"
 };
-const uint32_t kFullscreenVert[] = {
-#include "fullscreen.vert.inc"
-};
-const uint32_t kSsaoFrag[] = {
-#include "ssao.frag.inc"
-};
-const uint32_t kBlurFrag[] = {
-#include "blur.frag.inc"
-};
-const uint32_t kCompositeFrag[] = {
-#include "composite.frag.inc"
-};
 const uint32_t kXrayFrag[] = {
 #include "xray.frag.inc"
 };
 const uint32_t kMeshVert[] = {
 #include "mesh.vert.inc"
 };
-const uint32_t kMeshPlainVert[] = {
-#include "mesh_plain.vert.inc"
-};
 const uint32_t kMeshFrag[] = {
 #include "mesh.frag.inc"
-};
-const uint32_t kMeshBaryFrag[] = {
-#include "mesh_bary.frag.inc"
 };
 const uint32_t kShadowCellsVert[] = {
 #include "shadow_cells.vert.inc"
@@ -59,31 +41,70 @@ const uint32_t kShadowMeshVert[] = {
 const uint32_t kShadowMeshFrag[] = {
 #include "shadow_mesh.frag.inc"
 };
-const uint32_t kRtaoFrag[] = {
-#include "rtao.frag.inc"
+const uint32_t kFullscreenVert[] = {
+#include "fullscreen.vert.inc"
+};
+const uint32_t kSsaoFrag[] = {
+#include "ssao.frag.inc"
+};
+const uint32_t kGatherFrag[] = {
+#include "rtgather.frag.inc"
+};
+const uint32_t kBlurFrag[] = {
+#include "blur.frag.inc"
+};
+const uint32_t kLightFrag[] = {
+#include "light.frag.inc"
+};
+const uint32_t kSssFrag[] = {
+#include "sss.frag.inc"
+};
+const uint32_t kCombineFrag[] = {
+#include "combine.frag.inc"
+};
+const uint32_t kDofFrag[] = {
+#include "dof.frag.inc"
+};
+const uint32_t kCopyFrag[] = {
+#include "copy.frag.inc"
+};
+const uint32_t kBloomFrag[] = {
+#include "bloom.frag.inc"
+};
+const uint32_t kTonemapFrag[] = {
+#include "tonemap.frag.inc"
+};
+const uint32_t kFinalFrag[] = {
+#include "final.frag.inc"
 };
 const uint32_t kPathTraceFrag[] = {
 #include "pathtrace.frag.inc"
 };
+const uint32_t kDenoiseFrag[] = {
+#include "denoise.frag.inc"
+};
 const uint32_t kBoxComp[] = {
 #include "aabb.comp.inc"
 };
-const uint32_t kDenoiseFrag[] = {
-#include "denoise.frag.inc"
+const uint32_t kRefineComp[] = {
+#include "refine.comp.inc"
 };
 
 constexpr VkFormat kAlbedoFormat = VK_FORMAT_R8G8B8A8_UNORM;
 constexpr VkFormat kNormalDepthFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr VkFormat kIdFormat = VK_FORMAT_R32_UINT;
+constexpr VkFormat kMaterialFormat = VK_FORMAT_R8G8B8A8_UNORM;
 constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
-constexpr VkFormat kAoFormat = VK_FORMAT_R8_UNORM;
-constexpr VkFormat kAccumFormat = VK_FORMAT_R32G32B32A32_SFLOAT;
-constexpr VkFormat kGuideFormat = VK_FORMAT_R16G16B16A16_SFLOAT;    // first-hit normal and distance
-constexpr VkFormat kFirstFormat = VK_FORMAT_R16G16B16A16_SFLOAT;    // first-hit colour and coverage
-constexpr VkFormat kDisplayFormat = VK_FORMAT_R16G16B16A16_SFLOAT;  // the (denoised) path traced image
+constexpr VkFormat kHdrFormat = VK_FORMAT_R16G16B16A16_SFLOAT;    // work images in linear light
+constexpr VkFormat kAccumFormat = VK_FORMAT_R32G32B32A32_SFLOAT;  // the running mean
+constexpr VkFormat kLdrFormat = VK_FORMAT_R8G8B8A8_UNORM;         // tone mapped
 constexpr VkFormat kEnvFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 
-enum class VertexInput { None, Cells, Mesh, CellsPos, MeshPos };
+constexpr VkShaderStageFlags kPushStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
+constexpr uint32_t kPushBytes = 32;
+constexpr uint64_t kMostFineTriangles = 12'000'000;  // the membrane is refined into no more small triangles than this
+
+enum class VertexInput { None, Cells, CellsPos };
 enum class Blend { Opaque, Additive, Accumulate };
 
 struct PipelineDesc {
@@ -111,22 +132,22 @@ VkPipeline makePipeline(Context& ctx, VkPipelineLayout layout, const PipelineDes
     stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     stages[1].module = fs;
 
-    // One buffer per attribute; binding = location: 0 position, 1 birth step, 2 food, 3 normal
-    // (membrane only), 4 the extra scalar. Cells: one instance per cell. Membrane: one vertex
-    // per cell.
-    const bool cells = d.input == VertexInput::Cells || d.input == VertexInput::CellsPos;
-    const VkVertexInputRate rate = cells ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
+    // Cells drawn as spheres: one buffer per attribute, one instance per cell; binding =
+    // location: 0 position, 1 birth step, 2 food, 4 the three extra values. Everything else
+    // (the membrane, the full-screen passes) has no vertex input and reads what it needs from
+    // storage buffers or images.
+    const bool cells = d.input != VertexInput::None;
+    const VkVertexInputRate rate = VK_VERTEX_INPUT_RATE_INSTANCE;
     const VkVertexInputBindingDescription allBindings[5] = {
-        {0, 3 * sizeof(float), rate}, {1, sizeof(uint32_t), rate}, {2, sizeof(float), rate}, {3, 3 * sizeof(float), rate}, {4, sizeof(float), rate},
+        {0, 3 * sizeof(float), rate}, {1, sizeof(uint32_t), rate}, {2, sizeof(float), rate}, {3, 3 * sizeof(float), rate}, {4, 3 * sizeof(float), rate},
     };
     const VkVertexInputAttributeDescription allAttributes[5] = {
         {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0}, {1, 1, VK_FORMAT_R32_UINT, 0},  {2, 2, VK_FORMAT_R32_SFLOAT, 0},
-        {3, 3, VK_FORMAT_R32G32B32_SFLOAT, 0}, {4, 4, VK_FORMAT_R32_SFLOAT, 0},
+        {3, 3, VK_FORMAT_R32G32B32_SFLOAT, 0}, {4, 4, VK_FORMAT_R32G32B32_SFLOAT, 0},
     };
     std::vector<int> used;
     if (d.input == VertexInput::Cells) used = {0, 1, 2, 4};
-    else if (d.input == VertexInput::Mesh) used = {0, 1, 2, 3, 4};
-    else if (d.input == VertexInput::CellsPos || d.input == VertexInput::MeshPos) used = {0};
+    else if (d.input == VertexInput::CellsPos) used = {0};
     std::vector<VkVertexInputBindingDescription> bindings;
     std::vector<VkVertexInputAttributeDescription> attributes;
     for (int i : used) {
@@ -165,11 +186,10 @@ VkPipeline makePipeline(Context& ctx, VkPipelineLayout layout, const PipelineDes
     std::vector<VkPipelineColorBlendAttachmentState> blendAttachments(d.colorFormats.size());
     for (size_t i = 0; i < blendAttachments.size(); ++i) {
         VkPipelineColorBlendAttachmentState& a = blendAttachments[i];
-        const bool integer = d.colorFormats[i] == kIdFormat;  // integer targets cannot blend
         a.colorWriteMask = d.colorMask;
         if (d.blend == Blend::Additive) {
-            if (integer) {
-                a.colorWriteMask = 0;  // the x-ray pass has no single cell per pixel
+            if (i >= 2) {
+                a.colorWriteMask = 0;  // x-ray: there is no single cell or material per pixel
             } else {
                 a.blendEnable = VK_TRUE;
                 a.srcColorBlendFactor = a.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
@@ -218,6 +238,21 @@ VkPipeline makePipeline(Context& ctx, VkPipelineLayout layout, const PipelineDes
     vkDestroyShaderModule(ctx.device, vs, nullptr);
     vkDestroyShaderModule(ctx.device, fs, nullptr);
     vk_check(r, "vkCreateGraphicsPipelines");
+    return pipeline;
+}
+
+VkPipeline makeComputePipeline(Context& ctx, VkPipelineLayout layout, const uint32_t* code, size_t words) {
+    const VkShaderModule cs = ctx.createShaderModule(code, words);
+    VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    ci.stage.module = cs;
+    ci.stage.pName = "main";
+    ci.layout = layout;
+    VkPipeline pipeline;
+    const VkResult r = vkCreateComputePipelines(ctx.device, VK_NULL_HANDLE, 1, &ci, nullptr, &pipeline);
+    vkDestroyShaderModule(ctx.device, cs, nullptr);
+    vk_check(r, "vkCreateComputePipelines");
     return pipeline;
 }
 
@@ -273,19 +308,6 @@ void beginRegionPass(VkCommandBuffer cmd, VkRect2D rect, VkImageView target, boo
     vkCmdSetScissor(cmd, 0, 1, &rect);
 }
 
-void toAttachment(VkCommandBuffer cmd, const Image& img) {
-    transition(cmd, img.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
-               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
-               VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-}
-
-void toSampled(VkCommandBuffer cmd, const Image& img) {
-    transition(cmd, img.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-               VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-               VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-}
-
 void memoryBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dstStage,
                    VkAccessFlags2 dstAccess) {
     VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
@@ -297,6 +319,25 @@ void memoryBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage, VkAccess
     dep.memoryBarrierCount = 1;
     dep.pMemoryBarriers = &b;
     vkCmdPipelineBarrier2(cmd, &dep);
+}
+
+// A single-level texture with its contents, ready to be read by shaders.
+Image makeTexture(Context& ctx, VkFormat format, uint32_t width, uint32_t height, const void* data, VkDeviceSize bytes) {
+    Image img = ctx.createImage(VkExtent2D{width, height}, format, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+    Buffer staging = ctx.createBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
+    std::memcpy(staging.mapped, data, bytes);
+    ctx.immediate([&](VkCommandBuffer cmd) {
+        transition(cmd, img.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_NONE, 0,
+                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        VkBufferImageCopy region{};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageExtent = {width, height, 1};
+        vkCmdCopyBufferToImage(cmd, staging.buffer, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        transition(cmd, img.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    });
+    ctx.destroy(staging);
+    return img;
 }
 
 // --- small matrix helpers (column-major, see math.hpp)
@@ -363,6 +404,17 @@ void set3(float* dst, const float* src, float w) {
     dst[3] = w;
 }
 
+// Element `index` of the low-discrepancy sequence in `base`: points that fill 0..1 evenly.
+float halton(uint32_t index, uint32_t base) {
+    float f = 1.0f, r = 0.0f;
+    while (index > 0) {
+        f /= static_cast<float>(base);
+        r += f * static_cast<float>(index % base);
+        index /= base;
+    }
+    return r;
+}
+
 }  // namespace
 
 Renderer::Renderer(Context& ctx, VkFormat targetFormat) : ctx_(ctx), targetFormat_(targetFormat) {
@@ -371,6 +423,8 @@ Renderer::Renderer(Context& ctx, VkFormat targetFormat) : ctx_(ctx), targetForma
     shadowUniformBuffer_ = ctx_.createBuffer(sizeof(FrameUniforms), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, hostVisible, true);
     noLightMap_ = ctx_.createBuffer(16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hostVisible, true);
     std::memset(noLightMap_.mapped, 0, 16);
+    dummy_ = ctx_.createBuffer(256, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hostVisible, true);
+    std::memset(dummy_.mapped, 0, 256);
 
     VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     si.magFilter = VK_FILTER_NEAREST;
@@ -378,6 +432,9 @@ Renderer::Renderer(Context& ctx, VkFormat targetFormat) : ctx_(ctx), targetForma
     si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     vk_check(vkCreateSampler(ctx_.device, &si, nullptr, &sampler_), "vkCreateSampler");
+    si.magFilter = VK_FILTER_LINEAR;
+    si.minFilter = VK_FILTER_LINEAR;
+    vk_check(vkCreateSampler(ctx_.device, &si, nullptr, &linearSampler_), "vkCreateSampler (linear)");
 
     // Linear filtering over all levels, wrapping around the horizon: the environment map.
     VkSamplerCreateInfo ei{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -389,85 +446,68 @@ Renderer::Renderer(Context& ctx, VkFormat targetFormat) : ctx_(ctx), targetForma
     ei.maxLod = VK_LOD_CLAMP_NONE;
     vk_check(vkCreateSampler(ctx_.device, &ei, nullptr, &envSampler_), "vkCreateSampler (environment)");
 
-    // Set 0: the frame uniforms, up to six images a pass samples (see composite.frag), and the
-    // environment map.
-    VkDescriptorSetLayoutBinding bindings[9]{};
-    bindings[0] = {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-    for (uint32_t i = 1; i < 8; ++i) bindings[i] = {i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-    bindings[8] = {8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};  // the simulation's light map
-    VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 9;
-    li.pBindings = bindings;
-    vk_check(vkCreateDescriptorSetLayout(ctx_.device, &li, nullptr, &setLayout_), "vkCreateDescriptorSetLayout");
-
-    std::vector<VkDescriptorPoolSize> sizes = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 10}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 64}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8}};
-    if (ctx_.hasRayTracing) {
-        // Set 1 of the ray-traced passes: the acceleration structure and the per-cell buffers.
-        // 0 the structure, 1 positions, 2 birth steps, 3 food, 4 the extra scalar, 5 the boxes
-        // (written by the compute pass), 6 normals and 7 triangle indices (membrane).
-        VkDescriptorSetLayoutBinding rt[8]{};
-        rt[0] = {0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-        rt[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-        for (uint32_t i = 2; i < 5; ++i) rt[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-        rt[5] = {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-        rt[6] = {6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-        rt[7] = {7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-        VkDescriptorSetLayoutCreateInfo rli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        rli.bindingCount = 8;
-        rli.pBindings = rt;
-        vk_check(vkCreateDescriptorSetLayout(ctx_.device, &rli, nullptr, &rtSetLayout_), "vkCreateDescriptorSetLayout (ray tracing)");
-        sizes.push_back({VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7});
-        sizes.push_back({VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1});
-    }
-    VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pi.maxSets = 9;
-    pi.poolSizeCount = static_cast<uint32_t>(sizes.size());
-    pi.pPoolSizes = sizes.data();
-    vk_check(vkCreateDescriptorPool(ctx_.device, &pi, nullptr, &descriptorPool_), "vkCreateDescriptorPool");
-
-    const VkDescriptorSetLayout layouts[8] = {setLayout_, setLayout_, setLayout_, setLayout_, setLayout_, setLayout_, setLayout_, setLayout_};
-    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    ai.descriptorPool = descriptorPool_;
-    ai.descriptorSetCount = 8;
-    ai.pSetLayouts = layouts;
-    VkDescriptorSet sets[8];
-    vk_check(vkAllocateDescriptorSets(ctx_.device, &ai, sets), "vkAllocateDescriptorSets");
-    setGeometry_ = sets[0];
-    setShadow_ = sets[1];
-    setSsao_ = sets[2];
-    setBlur_ = sets[3];
-    setComposite_ = sets[4];
-    for (int i = 0; i < 3; ++i) setDenoise_[i] = sets[5 + i];
-
-    VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    pli.setLayoutCount = 1;
-    pli.pSetLayouts = &setLayout_;
-    vk_check(vkCreatePipelineLayout(ctx_.device, &pli, nullptr, &pipelineLayout_), "vkCreatePipelineLayout");
+    // Set 0, what a pass reads besides the cells: 0 the frame uniforms, 1 .. 7 the images of the
+    // pass, 8 the environment map, 9 and 10 its sampling tables, 11 the simulation's light map.
     {
-        // The denoiser passes differ only in a few numbers, given as push constants.
-        const VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16};
-        VkPipelineLayoutCreateInfo dl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-        dl.setLayoutCount = 1;
-        dl.pSetLayouts = &setLayout_;
-        dl.pushConstantRangeCount = 1;
-        dl.pPushConstantRanges = &push;
-        vk_check(vkCreatePipelineLayout(ctx_.device, &dl, nullptr, &denoiseLayout_), "vkCreatePipelineLayout (denoiser)");
+        VkDescriptorSetLayoutBinding bindings[12]{};
+        bindings[0] = {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+        for (uint32_t i = 1; i < 11; ++i) bindings[i] = {i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+        bindings[11] = {11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        li.bindingCount = 12;
+        li.pBindings = bindings;
+        vk_check(vkCreateDescriptorSetLayout(ctx_.device, &li, nullptr, &setLayout_), "vkCreateDescriptorSetLayout");
+    }
+    // Set 1, the cells: 0 the acceleration structure (with ray tracing), 1 positions, 2 birth
+    // steps, 3 food, 4 the extra values, 5 the boxes of the cells (written by a compute pass),
+    // 6 normals, 7 the triangles of the membrane, 8 .. 10 the membrane refined into patches
+    // (positions, normals, triangles; written by a compute pass).
+    {
+        const VkShaderStageFlags stages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
+        std::vector<VkDescriptorSetLayoutBinding> bindings;
+        if (ctx_.hasRayTracing) bindings.push_back({0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+        for (uint32_t i = 1; i <= 10; ++i) bindings.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, stages, nullptr});
+        VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        li.bindingCount = static_cast<uint32_t>(bindings.size());
+        li.pBindings = bindings.data();
+        vk_check(vkCreateDescriptorSetLayout(ctx_.device, &li, nullptr, &cellSetLayout_), "vkCreateDescriptorSetLayout (cells)");
+    }
+    {
+        const uint32_t sets = 128;
+        const VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, sets}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, sets * 10}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, sets}};
+        VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        pi.maxSets = sets;
+        pi.poolSizeCount = 3;
+        pi.pPoolSizes = sizes;
+        vk_check(vkCreateDescriptorPool(ctx_.device, &pi, nullptr, &screenPool_), "vkCreateDescriptorPool");
+
+        std::vector<VkDescriptorPoolSize> cellSizes = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10}};
+        if (ctx_.hasRayTracing) cellSizes.push_back({VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1});
+        VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        ci.maxSets = 1;
+        ci.poolSizeCount = static_cast<uint32_t>(cellSizes.size());
+        ci.pPoolSizes = cellSizes.data();
+        vk_check(vkCreateDescriptorPool(ctx_.device, &ci, nullptr, &cellPool_), "vkCreateDescriptorPool (cells)");
+        VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool = cellPool_;
+        ai.descriptorSetCount = 1;
+        ai.pSetLayouts = &cellSetLayout_;
+        vk_check(vkAllocateDescriptorSets(ctx_.device, &ai, &cellSet_), "vkAllocateDescriptorSets (cells)");
+    }
+    {
+        // One layout for every pipeline; the few numbers that differ between passes of one
+        // shader are push constants.
+        const VkDescriptorSetLayout both[2] = {setLayout_, cellSetLayout_};
+        const VkPushConstantRange push{kPushStages, 0, kPushBytes};
+        VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        pli.setLayoutCount = 2;
+        pli.pSetLayouts = both;
+        pli.pushConstantRangeCount = 1;
+        pli.pPushConstantRanges = &push;
+        vk_check(vkCreatePipelineLayout(ctx_.device, &pli, nullptr, &layout_), "vkCreatePipelineLayout");
     }
 
     if (ctx_.hasRayTracing) {
-        VkDescriptorSetAllocateInfo rai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-        rai.descriptorPool = descriptorPool_;
-        rai.descriptorSetCount = 1;
-        rai.pSetLayouts = &rtSetLayout_;
-        vk_check(vkAllocateDescriptorSets(ctx_.device, &rai, &rtSet_), "vkAllocateDescriptorSets (ray tracing)");
-        const VkDescriptorSetLayout both[2] = {setLayout_, rtSetLayout_};
-        const VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT, 0, 8};
-        VkPipelineLayoutCreateInfo rpl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-        rpl.setLayoutCount = 2;
-        rpl.pSetLayouts = both;
-        rpl.pushConstantRangeCount = 1;
-        rpl.pPushConstantRanges = &push;
-        vk_check(vkCreatePipelineLayout(ctx_.device, &rpl, nullptr, &rtLayout_), "vkCreatePipelineLayout (ray tracing)");
 #define CF_LOAD(member, name) member = reinterpret_cast<PFN_##name>(vkGetDeviceProcAddr(ctx_.device, #name))
         CF_LOAD(createAs_, vkCreateAccelerationStructureKHR);
         CF_LOAD(destroyAs_, vkDestroyAccelerationStructureKHR);
@@ -486,246 +526,280 @@ Renderer::Renderer(Context& ctx, VkFormat targetFormat) : ctx_(ctx), targetForma
 Renderer::~Renderer() {
     vkDeviceWaitIdle(ctx_.device);
     destroyImages();
-    ctx_.destroy(shadowMap_);
+    ctx_.destroy(shadowMap_.image);
     ctx_.destroy(env_);
+    ctx_.destroy(envTable_);
+    ctx_.destroy(envRows_);
     destroyCellTree();
-    for (VkPipeline p : {impostorPipeline_, ssaoPipeline_, blurPipeline_, compositePipeline_, compositeRedPipeline_, compositeCyanPipeline_,
-                         xrayPipeline_, meshPipeline_, shadowCellsPipeline_,
-                         shadowMeshPipeline_, rtaoPipeline_, pathTracePipeline_, boxPipeline_, denoisePipeline_})
+    for (Buffer* b : {&fine_.pos, &fine_.normal, &fine_.index}) ctx_.destroy(*b);
+    for (VkPipeline p : {impostorPipeline_, xrayPipeline_, meshPipeline_, shadowCellsPipeline_, shadowMeshPipeline_, ssaoPipeline_, gatherPipeline_,
+                         blurPipeline_, lightPipeline_, sssPipeline_, combinePipeline_, dofPipeline_, accumulatePipeline_, bloomPipeline_,
+                         tonemapPipeline_, smoothPipeline_, pathTracePipeline_, denoisePipeline_, boxPipeline_, refinePipeline_, finalPipeline_[0],
+                         finalPipeline_[1], finalPipeline_[2]})
         if (p) vkDestroyPipeline(ctx_.device, p, nullptr);
-    if (envSampler_) vkDestroySampler(ctx_.device, envSampler_, nullptr);
-    if (denoiseLayout_) vkDestroyPipelineLayout(ctx_.device, denoiseLayout_, nullptr);
-    if (pipelineLayout_) vkDestroyPipelineLayout(ctx_.device, pipelineLayout_, nullptr);
-    if (rtLayout_) vkDestroyPipelineLayout(ctx_.device, rtLayout_, nullptr);
-    if (descriptorPool_) vkDestroyDescriptorPool(ctx_.device, descriptorPool_, nullptr);
+    for (VkSampler s : {sampler_, linearSampler_, envSampler_})
+        if (s) vkDestroySampler(ctx_.device, s, nullptr);
+    if (layout_) vkDestroyPipelineLayout(ctx_.device, layout_, nullptr);
+    if (screenPool_) vkDestroyDescriptorPool(ctx_.device, screenPool_, nullptr);
+    if (cellPool_) vkDestroyDescriptorPool(ctx_.device, cellPool_, nullptr);
     if (setLayout_) vkDestroyDescriptorSetLayout(ctx_.device, setLayout_, nullptr);
-    if (rtSetLayout_) vkDestroyDescriptorSetLayout(ctx_.device, rtSetLayout_, nullptr);
-    if (sampler_) vkDestroySampler(ctx_.device, sampler_, nullptr);
+    if (cellSetLayout_) vkDestroyDescriptorSetLayout(ctx_.device, cellSetLayout_, nullptr);
     ctx_.destroy(uniformBuffer_);
     ctx_.destroy(shadowUniformBuffer_);
     ctx_.destroy(noLightMap_);
+    ctx_.destroy(dummy_);
 }
 
 void Renderer::createPipelines() {
-    const std::vector<VkFormat> gbuffer = {kAlbedoFormat, kNormalDepthFormat, kIdFormat};
+    const std::vector<VkFormat> gbuffer = {kAlbedoFormat, kNormalDepthFormat, kIdFormat, kMaterialFormat};
 
     PipelineDesc impostor{kImpostorVert, std::size(kImpostorVert), kImpostorFrag, std::size(kImpostorFrag)};
     impostor.input = VertexInput::Cells;
     impostor.colorFormats = gbuffer;
     impostor.depthFormat = kDepthFormat;
-    impostorPipeline_ = makePipeline(ctx_, pipelineLayout_, impostor);
+    impostorPipeline_ = makePipeline(ctx_, layout_, impostor);
 
     PipelineDesc xray = impostor;  // same quads, additive, no depth
     xray.frag = kXrayFrag;
     xray.fragWords = std::size(kXrayFrag);
     xray.blend = Blend::Additive;
-    xrayPipeline_ = makePipeline(ctx_, pipelineLayout_, xray);
+    xrayPipeline_ = makePipeline(ctx_, layout_, xray);
 
-    PipelineDesc mesh{kMeshPlainVert, std::size(kMeshPlainVert), kMeshFrag, std::size(kMeshFrag)};
-    if (ctx_.hasBarycentric) {
-        mesh.vert = kMeshVert;
-        mesh.vertWords = std::size(kMeshVert);
-        mesh.frag = kMeshBaryFrag;
-        mesh.fragWords = std::size(kMeshBaryFrag);
-    }
-    mesh.input = VertexInput::Mesh;
+    PipelineDesc mesh{kMeshVert, std::size(kMeshVert), kMeshFrag, std::size(kMeshFrag)};
     mesh.colorFormats = gbuffer;
     mesh.depthFormat = kDepthFormat;
-    meshPipeline_ = makePipeline(ctx_, pipelineLayout_, mesh);
+    meshPipeline_ = makePipeline(ctx_, layout_, mesh);
 
     PipelineDesc shadowCells{kShadowCellsVert, std::size(kShadowCellsVert), kShadowCellsFrag, std::size(kShadowCellsFrag)};
     shadowCells.input = VertexInput::CellsPos;
     shadowCells.depthFormat = kDepthFormat;
-    shadowCellsPipeline_ = makePipeline(ctx_, pipelineLayout_, shadowCells);
+    shadowCellsPipeline_ = makePipeline(ctx_, layout_, shadowCells);
 
     PipelineDesc shadowMesh{kShadowMeshVert, std::size(kShadowMeshVert), kShadowMeshFrag, std::size(kShadowMeshFrag)};
-    shadowMesh.input = VertexInput::MeshPos;
     shadowMesh.depthFormat = kDepthFormat;
-    shadowMeshPipeline_ = makePipeline(ctx_, pipelineLayout_, shadowMesh);
+    shadowMeshPipeline_ = makePipeline(ctx_, layout_, shadowMesh);
 
-    PipelineDesc ssao{kFullscreenVert, std::size(kFullscreenVert), kSsaoFrag, std::size(kSsaoFrag)};
-    ssao.colorFormats = {kAoFormat};
-    ssaoPipeline_ = makePipeline(ctx_, pipelineLayout_, ssao);
+    // The passes that cover the screen.
+    auto screen = [&](const uint32_t* frag, size_t words, std::vector<VkFormat> formats, Blend blend = Blend::Opaque) {
+        PipelineDesc d{kFullscreenVert, std::size(kFullscreenVert), frag, words};
+        d.colorFormats = std::move(formats);
+        d.blend = blend;
+        return makePipeline(ctx_, layout_, d);
+    };
+    ssaoPipeline_ = screen(kSsaoFrag, std::size(kSsaoFrag), {kHdrFormat});
+    blurPipeline_ = screen(kBlurFrag, std::size(kBlurFrag), {kHdrFormat});
+    lightPipeline_ = screen(kLightFrag, std::size(kLightFrag), {kHdrFormat, kHdrFormat});
+    sssPipeline_ = screen(kSssFrag, std::size(kSssFrag), {kHdrFormat});
+    combinePipeline_ = screen(kCombineFrag, std::size(kCombineFrag), {kHdrFormat});
+    dofPipeline_ = screen(kDofFrag, std::size(kDofFrag), {kHdrFormat});
+    accumulatePipeline_ = screen(kCopyFrag, std::size(kCopyFrag), {kAccumFormat}, Blend::Accumulate);
+    bloomPipeline_ = screen(kBloomFrag, std::size(kBloomFrag), {kHdrFormat});
+    tonemapPipeline_ = screen(kTonemapFrag, std::size(kTonemapFrag), {kLdrFormat});
+    smoothPipeline_ = screen(kFinalFrag, std::size(kFinalFrag), {kLdrFormat});
+    denoisePipeline_ = screen(kDenoiseFrag, std::size(kDenoiseFrag), {kHdrFormat});
 
-    PipelineDesc blur{kFullscreenVert, std::size(kFullscreenVert), kBlurFrag, std::size(kBlurFrag)};
-    blur.colorFormats = {kAoFormat};
-    blurPipeline_ = makePipeline(ctx_, pipelineLayout_, blur);
+    // The last pass, into the target; the two halves of a red and cyan stereo image each write
+    // only their colours.
+    PipelineDesc final{kFullscreenVert, std::size(kFullscreenVert), kFinalFrag, std::size(kFinalFrag)};
+    final.colorFormats = {targetFormat_};
+    finalPipeline_[0] = makePipeline(ctx_, layout_, final);
+    final.colorMask = VK_COLOR_COMPONENT_R_BIT;
+    finalPipeline_[1] = makePipeline(ctx_, layout_, final);
+    final.colorMask = VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    finalPipeline_[2] = makePipeline(ctx_, layout_, final);
 
-    PipelineDesc composite{kFullscreenVert, std::size(kFullscreenVert), kCompositeFrag, std::size(kCompositeFrag)};
-    composite.colorFormats = {targetFormat_};
-    compositePipeline_ = makePipeline(ctx_, pipelineLayout_, composite);
-    // The two halves of a red and cyan stereo image: each eye writes only its colours.
-    composite.colorMask = VK_COLOR_COMPONENT_R_BIT;
-    compositeRedPipeline_ = makePipeline(ctx_, pipelineLayout_, composite);
-    composite.colorMask = VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    compositeCyanPipeline_ = makePipeline(ctx_, pipelineLayout_, composite);
-
-    PipelineDesc denoise{kFullscreenVert, std::size(kFullscreenVert), kDenoiseFrag, std::size(kDenoiseFrag)};
-    denoise.colorFormats = {kDisplayFormat};
-    denoisePipeline_ = makePipeline(ctx_, denoiseLayout_, denoise);
-
+    refinePipeline_ = makeComputePipeline(ctx_, layout_, kRefineComp, std::size(kRefineComp));
     if (ctx_.hasRayTracing) {
-        PipelineDesc rtao{kFullscreenVert, std::size(kFullscreenVert), kRtaoFrag, std::size(kRtaoFrag)};
-        rtao.colorFormats = {kAoFormat};
-        rtaoPipeline_ = makePipeline(ctx_, rtLayout_, rtao);
-
-        PipelineDesc pt{kFullscreenVert, std::size(kFullscreenVert), kPathTraceFrag, std::size(kPathTraceFrag)};
-        pt.colorFormats = {kAccumFormat, kGuideFormat, kFirstFormat};
-        pt.blend = Blend::Accumulate;
-        pathTracePipeline_ = makePipeline(ctx_, rtLayout_, pt);
-
-        const VkShaderModule cs = ctx_.createShaderModule(kBoxComp, std::size(kBoxComp));
-        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-        ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        ci.stage.module = cs;
-        ci.stage.pName = "main";
-        ci.layout = rtLayout_;
-        const VkResult r = vkCreateComputePipelines(ctx_.device, VK_NULL_HANDLE, 1, &ci, nullptr, &boxPipeline_);
-        vkDestroyShaderModule(ctx_.device, cs, nullptr);
-        vk_check(r, "vkCreateComputePipelines");
+        gatherPipeline_ = screen(kGatherFrag, std::size(kGatherFrag), {kHdrFormat});
+        pathTracePipeline_ = screen(kPathTraceFrag, std::size(kPathTraceFrag), {kAccumFormat, kHdrFormat, kHdrFormat}, Blend::Accumulate);
+        boxPipeline_ = makeComputePipeline(ctx_, layout_, kBoxComp, std::size(kBoxComp));
     }
 }
 
 void Renderer::destroyImages() {
-    for (Image* img : {&albedo_, &normalDepth_, &id_, &depth_, &aoRaw_, &aoBlur_, &accum_, &ptGuide_, &ptFirst_, &denoiseA_, &denoiseB_, &ptDisplay_})
-        ctx_.destroy(*img);
+    for (Target* t : {&albedo_, &normalDepth_, &id_, &material_, &hdr_[0], &hdr_[1], &hdr_[2], &hdr_[3], &hdr_[4], &accum_, &bloom_[0], &bloom_[1],
+                      &ldr_[0], &ldr_[1]}) {
+        ctx_.destroy(t->image);
+        t->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+    ctx_.destroy(depth_);
 }
 
-void Renderer::resize(VkExtent2D extent) {
-    if (extent.width == extent_.width && extent.height == extent_.height && albedo_.image) return;
+void Renderer::resize(VkExtent2D extent, float scale) {
+    if (scale <= 0.0f) scale = scale_;
+    scale = std::clamp(scale, 0.25f, 4.0f);
+    const VkExtent2D render{std::clamp<uint32_t>(static_cast<uint32_t>(std::lround(static_cast<float>(extent.width) * scale)), 1u, 16384u),
+                            std::clamp<uint32_t>(static_cast<uint32_t>(std::lround(static_cast<float>(extent.height) * scale)), 1u, 16384u)};
+    if (render.width == extent_.width && render.height == extent_.height && extent.width == outExtent_.width && extent.height == outExtent_.height &&
+        albedo_.image.image)
+        return;
     vkDeviceWaitIdle(ctx_.device);
     destroyImages();
-    extent_ = extent;
-    const VkImageUsageFlags colorUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    albedo_ = ctx_.createImage(extent, kAlbedoFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
-    normalDepth_ = ctx_.createImage(extent, kNormalDepthFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
-    id_ = ctx_.createImage(extent, kIdFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
-    depth_ = ctx_.createImage(extent, kDepthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
-    aoRaw_ = ctx_.createImage(extent, kAoFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
-    aoBlur_ = ctx_.createImage(extent, kAoFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
-    accum_ = ctx_.createImage(extent, kAccumFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
-    ptGuide_ = ctx_.createImage(extent, kGuideFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
-    ptFirst_ = ctx_.createImage(extent, kFirstFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
-    denoiseA_ = ctx_.createImage(extent, kDisplayFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
-    denoiseB_ = ctx_.createImage(extent, kDisplayFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
-    ptDisplay_ = ctx_.createImage(extent, kDisplayFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
-    accumReady_ = false;
+    forgetSets();
+    extent_ = render;
+    outExtent_ = extent;
+    scale_ = static_cast<float>(render.width) / static_cast<float>(std::max(extent.width, 1u));
+    const VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    auto make = [&](Target& t, VkExtent2D size, VkFormat format) { t.image = ctx_.createImage(size, format, usage, VK_IMAGE_ASPECT_COLOR_BIT); };
+    make(albedo_, render, kAlbedoFormat);
+    make(normalDepth_, render, kNormalDepthFormat);
+    make(id_, render, kIdFormat);
+    make(material_, render, kMaterialFormat);
+    depth_ = ctx_.createImage(render, kDepthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
+    for (Target& t : hdr_) make(t, render, kHdrFormat);
+    make(accum_, render, kAccumFormat);
+    const VkExtent2D quarter{std::max(render.width / 4u, 1u), std::max(render.height / 4u, 1u)};
+    for (Target& t : bloom_) make(t, quarter, kHdrFormat);
+    for (Target& t : ldr_) make(t, render, kLdrFormat);
     accumSamples_ = 0;
     accumKey_ = 0;
-    writeDescriptors();
 }
 
 void Renderer::ensureShadowMap(uint32_t size) {
     size = std::clamp<uint32_t>(size, 256u, 8192u);
-    if (size == shadowSize_ && shadowMap_.image) return;
+    if (size == shadowSize_ && shadowMap_.image.image) return;
     vkDeviceWaitIdle(ctx_.device);
-    ctx_.destroy(shadowMap_);
-    shadowMap_ = ctx_.createImage(VkExtent2D{size, size}, kDepthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                                  VK_IMAGE_ASPECT_DEPTH_BIT);
+    ctx_.destroy(shadowMap_.image);
+    forgetSets();
+    shadowMap_.image = ctx_.createImage(VkExtent2D{size, size}, kDepthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                        VK_IMAGE_ASPECT_DEPTH_BIT);
+    shadowMap_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
     shadowSize_ = size;
-    if (albedo_.image) writeDescriptors();
 }
 
-void Renderer::writeDescriptors() {
-    const VkDescriptorBufferInfo ubo{uniformBuffer_.buffer, 0, sizeof(FrameUniforms)};
-    const VkDescriptorBufferInfo shadowUbo{shadowUniformBuffer_.buffer, 0, sizeof(FrameUniforms)};
-    const VkDescriptorImageInfo normalDepth{sampler_, normalDepth_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    const VkDescriptorImageInfo aoRaw{sampler_, aoRaw_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    const VkDescriptorImageInfo aoBlur{sampler_, aoBlur_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    const VkDescriptorImageInfo albedo{sampler_, albedo_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    const VkDescriptorImageInfo shadow{sampler_, shadowMap_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    const VkDescriptorImageInfo id{sampler_, id_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    const VkDescriptorImageInfo accum{sampler_, accum_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    const VkDescriptorImageInfo guide{sampler_, ptGuide_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    const VkDescriptorImageInfo first{sampler_, ptFirst_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    const VkDescriptorImageInfo workA{sampler_, denoiseA_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    const VkDescriptorImageInfo workB{sampler_, denoiseB_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    const VkDescriptorImageInfo display{sampler_, ptDisplay_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+// ------------------------------------------------------------------ descriptor sets and layouts
 
-    std::vector<VkWriteDescriptorSet> writes;
-    auto addUbo = [&](VkDescriptorSet set, const VkDescriptorBufferInfo* info) {
+// The sets of the screen passes refer to images that are about to go away.
+void Renderer::forgetSets() {
+    if (screenPool_) vkResetDescriptorPool(ctx_.device, screenPool_, 0);
+    screenSets_.clear();
+}
+
+// The set for a pass that reads these images (bindings 1, 2, ...), made the first time it is
+// asked for. `lightView`: the uniforms are those of the key light (the shadow pass).
+// `environment`: the pass reads the environment map. `lightMap`: the pass reads the light map of
+// the simulation from this buffer (written into the set every time, as the buffer changes).
+VkDescriptorSet Renderer::screenSet(bool lightView, std::initializer_list<Tex> textures, bool environment, VkBuffer lightMap) {
+    ScreenSet key{};
+    key.ubo = lightView ? shadowUniformBuffer_.buffer : uniformBuffer_.buffer;
+    uint32_t count = 0;
+    for (const Tex& t : textures) {
+        key.views[count] = t.view;
+        if (t.linear) key.linear |= 1u << count;
+        ++count;
+    }
+    key.environment = environment;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    for (const ScreenSet& s : screenSets_)
+        if (s.ubo == key.ubo && std::equal(s.views, s.views + 7, key.views) && s.linear == key.linear && s.environment == key.environment &&
+            (s.lightMap != VK_NULL_HANDLE) == (lightMap != VK_NULL_HANDLE))
+            set = s.set;
+    if (set == VK_NULL_HANDLE) {
+        VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool = screenPool_;
+        ai.descriptorSetCount = 1;
+        ai.pSetLayouts = &setLayout_;
+        vk_check(vkAllocateDescriptorSets(ctx_.device, &ai, &set), "vkAllocateDescriptorSets");
+        const VkDescriptorBufferInfo ubo{key.ubo, 0, sizeof(FrameUniforms)};
+        VkDescriptorImageInfo images[10]{};
+        std::vector<VkWriteDescriptorSet> writes;
         VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w.dstSet = set;
+        w.descriptorCount = 1;
         w.dstBinding = 0;
-        w.descriptorCount = 1;
         w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        w.pBufferInfo = info;
+        w.pBufferInfo = &ubo;
         writes.push_back(w);
-    };
-    auto addImage = [&](VkDescriptorSet set, uint32_t binding, const VkDescriptorImageInfo* info) {
+        w.pBufferInfo = nullptr;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        for (uint32_t i = 0; i < count; ++i) {
+            images[i] = {(key.linear >> i) & 1u ? linearSampler_ : sampler_, key.views[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            w.dstBinding = 1 + i;
+            w.pImageInfo = &images[i];
+            writes.push_back(w);
+        }
+        if (environment) {
+            images[7] = {envSampler_, env_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            images[8] = {sampler_, envTable_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            images[9] = {sampler_, envRows_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            for (uint32_t i = 0; i < 3; ++i) {
+                w.dstBinding = 8 + i;
+                w.pImageInfo = &images[7 + i];
+                writes.push_back(w);
+            }
+        }
+        vkUpdateDescriptorSets(ctx_.device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+        key.lightMap = lightMap;
+        key.set = set;
+        screenSets_.push_back(key);
+    }
+    if (lightMap != VK_NULL_HANDLE) {
+        const VkDescriptorBufferInfo info{lightMap, 0, VK_WHOLE_SIZE};
         VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w.dstSet = set;
-        w.dstBinding = binding;
+        w.dstBinding = 11;
         w.descriptorCount = 1;
-        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        w.pImageInfo = info;
-        writes.push_back(w);
-    };
-    // Only the bindings the shaders of a pass use are written; the others are never accessed.
-    addUbo(setGeometry_, &ubo);
-    addUbo(setShadow_, &shadowUbo);
-    addUbo(setSsao_, &ubo);
-    addImage(setSsao_, 1, &normalDepth);
-    addUbo(setBlur_, &ubo);
-    addImage(setBlur_, 1, &normalDepth);
-    addImage(setBlur_, 2, &aoRaw);
-    addUbo(setComposite_, &ubo);
-    addImage(setComposite_, 1, &normalDepth);
-    addImage(setComposite_, 2, &aoBlur);
-    addImage(setComposite_, 3, &albedo);
-    addImage(setComposite_, 4, &shadow);
-    addImage(setComposite_, 5, &id);
-    addImage(setComposite_, 6, &display);
-    // The denoiser: its input (the running mean, then its own work images) and the two guides.
-    const VkDescriptorImageInfo* inputs[3] = {&accum, &workA, &workB};
-    for (int i = 0; i < 3; ++i) {
-        addUbo(setDenoise_[i], &ubo);
-        addImage(setDenoise_[i], 1, inputs[i]);
-        addImage(setDenoise_[i], 2, &guide);
-        addImage(setDenoise_[i], 3, &first);
+        w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w.pBufferInfo = &info;
+        vkUpdateDescriptorSets(ctx_.device, 1, &w, 0, nullptr);
     }
-    vkUpdateDescriptorSets(ctx_.device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-    writeEnvDescriptor();
-    boundLightMap_ = VK_NULL_HANDLE;
-    bindLightMap(noLightMap_.buffer);
+    return set;
 }
 
-// The buffer the composite pass reads the simulation's light map from.
-void Renderer::bindLightMap(VkBuffer buffer) {
-    if (buffer == boundLightMap_) return;
-    const VkDescriptorBufferInfo info{buffer, 0, VK_WHOLE_SIZE};
-    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    w.dstSet = setComposite_;
-    w.dstBinding = 8;
-    w.descriptorCount = 1;
-    w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    w.pBufferInfo = &info;
-    vkUpdateDescriptorSets(ctx_.device, 1, &w, 0, nullptr);
-    boundLightMap_ = buffer;
+// Makes an image ready to be drawn into. `keep`: what it holds is needed (a running mean).
+void Renderer::toWrite(VkCommandBuffer cmd, Target& t, bool keep) {
+    VkPipelineStageFlags2 srcStage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkAccessFlags2 srcAccess = 0;
+    if (t.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        srcStage = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        srcAccess = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    } else if (t.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+        srcAccess = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    }
+    transition(cmd, t.image.image, VK_IMAGE_ASPECT_COLOR_BIT, keep ? t.layout : VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+               srcStage, srcAccess, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+               VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | (keep ? VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT : VkAccessFlags2{0}));
+    t.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 }
 
-void Renderer::writeEnvDescriptor() {
-    if (!env_.view) return;
-    const VkDescriptorImageInfo info{envSampler_, env_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    VkWriteDescriptorSet writes[2]{};
-    const VkDescriptorSet sets[2] = {setGeometry_, setComposite_};  // the path tracer and the composite pass
-    for (int i = 0; i < 2; ++i) {
-        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[i].dstSet = sets[i];
-        writes[i].dstBinding = 7;
-        writes[i].descriptorCount = 1;
-        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[i].pImageInfo = &info;
-    }
-    vkUpdateDescriptorSets(ctx_.device, 2, writes, 0, nullptr);
+// Makes an image ready to be read by a pass.
+void Renderer::toRead(VkCommandBuffer cmd, Target& t) {
+    if (t.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return;
+    const bool written = t.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    transition(cmd, t.image.image, VK_IMAGE_ASPECT_COLOR_BIT, t.layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+               written ? VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT : VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+               written ? VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT : VkAccessFlags2{0}, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+               VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    t.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
+
+void Renderer::pushConstants(VkCommandBuffer cmd, const void* data, uint32_t bytes) {
+    unsigned char block[kPushBytes] = {};
+    std::memcpy(block, data, std::min(bytes, kPushBytes));
+    vkCmdPushConstants(cmd, layout_, kPushStages, 0, kPushBytes, block);
+}
+
+// One pass over the whole of `out` with a full-screen triangle.
+void Renderer::screenPass(VkCommandBuffer cmd, VkPipeline pipeline, Target& out, VkDescriptorSet set, const void* push, uint32_t pushBytes) {
+    toWrite(cmd, out);
+    beginPass(cmd, out.image.extent, {out.image.view}, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_NULL_HANDLE);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set, 0, nullptr);
+    if (push != nullptr) pushConstants(cmd, push, pushBytes);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRendering(cmd);
+}
+
+// ------------------------------------------------------------------ environment map
 
 // Uploads an environment map (linear colour, three floats per pixel) with its chain of smaller,
-// blurrier levels.
+// blurrier levels, and the tables the path tracer picks bright directions from.
 void Renderer::setEnvironment(const float* rgb, int width, int height) {
     vkDeviceWaitIdle(ctx_.device);
     ctx_.destroy(env_);
+    ctx_.destroy(envTable_);
+    ctx_.destroy(envRows_);
+    forgetSets();
     uint32_t levels = 1;
     for (int m = std::max(width, height); m > 1; m >>= 1) ++levels;
     envLevels_ = levels;
@@ -814,8 +888,16 @@ void Renderer::setEnvironment(const float* rgb, int width, int height) {
                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
     });
     ctx_.destroy(staging);
+
+    const EnvironmentTable table = environmentTable(rgb, width, height);
+    envTable_ = makeTexture(ctx_, VK_FORMAT_R32G32_SFLOAT, static_cast<uint32_t>(table.width), static_cast<uint32_t>(table.height), table.table.data(),
+                            table.table.size() * sizeof(float));
+    envRows_ = makeTexture(ctx_, VK_FORMAT_R32_SFLOAT, 1, static_cast<uint32_t>(table.height), table.rows.data(), table.rows.size() * sizeof(float));
+    envSampleLevel_ = static_cast<float>(table.level);
+    envTableW_ = table.width;
+    envTableH_ = table.height;
+    envMean_ = table.mean;
     ++envVersion_;
-    writeEnvDescriptor();
 }
 
 // Makes the environment map the one the settings name: a file, or the built-in studio.
@@ -827,9 +909,10 @@ void Renderer::syncEnvironment(const RenderSettings& settings) {
     int w = 0, h = 0;
     if (!settings.envFile.empty()) {
         std::string error;
-        if (loadEnvironmentImage(settings.envFile, rgb, w, h, error)) {
+        const std::string file = resolveEnvironment(settings.envFile);
+        if (loadEnvironmentImage(file, rgb, w, h, error)) {
             setEnvironment(rgb.data(), w, h);
-            envStatus_ = settings.envFile + " (" + std::to_string(w) + " x " + std::to_string(h) + ")";
+            envStatus_ = file + " (" + std::to_string(w) + " x " + std::to_string(h) + ")";
             return;
         }
         envStatus_ = error + "; using the built-in studio";
@@ -843,8 +926,10 @@ void Renderer::syncEnvironment(const RenderSettings& settings) {
     setEnvironment(rgb.data(), w, h);
 }
 
+// ------------------------------------------------------------------ the frame's uniforms
+
 FrameSetup Renderer::makeUniforms(const OrbitCamera& camera, const RenderSettings& s, Vec3 sceneCentre, float sceneRadius, float currentStep,
-                                  uint64_t frameIndex, float eyeOffset) const {
+                                  uint64_t /*frameIndex*/, float eyeOffset) const {
     FrameSetup frame{};
     FrameUniforms& u = frame.uniforms;
     const float w = static_cast<float>(extent_.width), h = static_cast<float>(extent_.height);
@@ -869,8 +954,9 @@ FrameSetup Renderer::makeUniforms(const OrbitCamera& camera, const RenderSetting
     u.viewport[1] = h;
     u.viewport[2] = 1.0f / w;
     u.viewport[3] = 1.0f / h;
+    // What is measured in pixels is measured in pixels of the target, whatever size is rendered.
     u.sphere[0] = s.sphereRadius;
-    u.sphere[1] = s.minPixelRadius;
+    u.sphere[1] = s.minPixelRadius * scale_;
     u.sphere[2] = zNear;
     u.sphere[3] = zFar;
     u.colorParams[0] = static_cast<float>(static_cast<int>(s.colorMode));
@@ -888,18 +974,14 @@ FrameSetup Renderer::makeUniforms(const OrbitCamera& camera, const RenderSetting
         lightWorld = Vec3{std::cos(el) * std::sin(az), std::sin(el), std::cos(el) * std::cos(az)};
         lightView = normalize(rotate(view, lightWorld));
     }
-    int drawMode = s.drawMode;
-    if (drawMode == kDrawPathTraced && !ctx_.hasRayTracing) drawMode = kDrawCells;
-    if (drawMode == kDrawMembranePathTraced && !ctx_.hasRayTracing) drawMode = kDrawMembrane;
-    const bool shadows = s.shadows && s.shadowStrength > 0.0f && (drawMode == kDrawCells || drawMode == kDrawMembrane || drawMode == kDrawMembraneSss);
     u.light[0] = lightView.x;
     u.light[1] = lightView.y;
     u.light[2] = lightView.z;
-    u.light[3] = s.ambient;
+    u.light[3] = std::clamp(s.ambient, 0.0f, 1.0f);
     u.lightColor[0] = s.lightColor[0] * s.lightIntensity;
     u.lightColor[1] = s.lightColor[1] * s.lightIntensity;
     u.lightColor[2] = s.lightColor[2] * s.lightIntensity;
-    u.lightColor[3] = shadows ? std::clamp(s.shadowStrength, 0.0f, 1.0f) : 0.0f;
+    u.lightColor[3] = s.shadows ? std::clamp(s.shadowStrength, 0.0f, 1.0f) : 0.0f;
     u.sunWorld[0] = lightWorld.x;
     u.sunWorld[1] = lightWorld.y;
     u.sunWorld[2] = lightWorld.z;
@@ -923,41 +1005,106 @@ FrameSetup Renderer::makeUniforms(const OrbitCamera& camera, const RenderSetting
         u.shadow[1] = s.shadowSoftness;
         u.shadow[2] = 1.0f / mapSize;
         u.shadow[3] = 1.0f / mapSize;  // depth bias: about one texel, as a share of the depth range of the box
+        u.shadow2[0] = 3.0f * half;    // that depth range in world units
     }
 
     u.ao[0] = s.aoRadiusSmall;
     u.ao[1] = s.aoRadiusLarge;
     u.ao[2] = s.aoIntensity;
     u.ao[3] = s.aoEnabled ? 1.0f : 0.0f;
-    u.rt[0] = 0.0f;  // set by record() when the occlusion is ray traced
     u.rt[1] = s.rtAoRadius;
     u.pt[0] = static_cast<float>(std::clamp(s.ptBounces, 1, 16));
-    u.pt[1] = std::max(s.ptAperture, 0.0f);
-    u.pt[2] = s.ptFocus > 0.0f ? s.ptFocus : camera.distance;
+    u.pt[1] = std::max(s.ptClamp, 0.0f);
+    u.lens[0] = std::max(s.lensAperture, 0.0f);
+    u.lens[1] = std::max(s.lensFocus > 0.0f ? s.lensFocus : camera.distance + s.lensFocusShift * sceneRadius, zNear);
+    u.lens[2] = std::clamp(s.dofMaxBlur, 1.0f, 64.0f) * scale_;
     set3(u.baseColor, s.baseColor, s.exposure);
     set3(u.background, s.background, s.vignette);
-    u.material[0] = s.specular;
-    u.material[1] = s.shininess;
-    u.material[2] = static_cast<float>(s.palette);
-    u.material[3] = s.paletteReverse ? 1.0f : 0.0f;
+    u.palette[0] = static_cast<float>(s.palette);
+    u.palette[1] = s.paletteReverse ? 1.0f : 0.0f;
+
+    u.matBase[0] = std::clamp(s.roughness, 0.0f, 1.0f);
+    u.matBase[1] = std::clamp(s.metalness, 0.0f, 1.0f);
+    u.matBase[2] = std::clamp(s.specular, 0.0f, 1.0f);
+    u.matBase[3] = std::clamp(s.sheen, 0.0f, 1.0f);
+    u.matSss[0] = std::clamp(s.subsurface, 0.0f, 1.0f);
+    u.matSss[1] = std::max(s.sssRadius, 0.0f);
+    u.matSss[2] = std::clamp(s.translucency, 0.0f, 1.0f);
+    u.matSss[3] = std::max(s.transDepth, 1.0e-3f);
+    for (int c = 0; c < 3; ++c) u.matSssColor[c] = std::clamp(s.sssColor[c], 0.02f, 1.0f);
+    set3(u.matEmission, s.emissionColor, std::max(s.emission, 0.0f));
+    u.matEmission2[0] = std::clamp(s.emissionTint, 0.0f, 1.0f);
+    for (int c = 0; c < kMaterialChannels; ++c) {
+        u.modSource[c] = static_cast<float>(std::clamp(s.modSource[c], 0, kCellProperties));
+        u.modLo[c] = std::clamp(s.modLo[c], 0.0f, 1.0f);
+        u.modHi[c] = std::clamp(s.modHi[c], 0.0f, 1.0f);
+        u.modFrom[c] = std::clamp(s.modFrom[c], 0.0f, 1.0f);
+        u.modTo[c] = std::clamp(s.modTo[c], 0.0f, 1.0f);
+    }
+    for (int p = 0; p < kCellProperties; ++p) {
+        (p < 4 ? u.propMin0[p] : u.propMin1[p - 4]) = s.propMin[p];
+        (p < 4 ? u.propMax0[p] : u.propMax1[p - 4]) = s.propMax[p];
+    }
+
     set3(u.wall, s.wallColor, s.walls ? std::clamp(s.wallStrength, 0.0f, 1.0f) : 0.0f);
     set3(u.outline, s.outlineColor, s.outlines ? std::clamp(s.outlineStrength, 0.0f, 1.0f) : 0.0f);
-    u.style[0] = std::max(s.wallWidth, 0.25f);
-    u.style[1] = std::max(s.outlineWidth, 0.25f);
+    u.style[0] = std::max(s.wallWidth, 0.25f) * scale_;
+    u.style[1] = std::max(s.outlineWidth, 0.25f) * scale_;
     u.style[2] = std::max(s.outlineThreshold, 1.0e-4f);
     u.style[3] = static_cast<float>(std::max(s.toonBands, 0));
-    u.misc[0] = static_cast<float>(frameIndex % 1024);
-    u.misc[1] = static_cast<float>(s.debugView);
-    u.misc[2] = static_cast<float>(drawMode);
-    u.misc[3] = drawMode == kDrawMembraneSss ? s.sssRadius : s.xrayDensity;
     u.env[0] = s.envLight ? 1.0f : 0.0f;
     u.env[1] = std::max(s.envIntensity, 0.0f);
     u.env[2] = s.envRotation * 3.14159265f / 180.0f;
     u.env[3] = s.envBackground ? 1.0f : 0.0f;
+    u.bloom[0] = std::max(s.bloom, 0.0f);
+    u.bloom[1] = std::max(s.bloomThreshold, 0.0f);
+    u.aa[1] = s.fxaa ? 1.0f : 0.0f;
+    u.mesh[0] = 1.0f;
+    u.mesh[1] = 3.0f;
+    u.mesh[2] = 1.0f;
+    u.misc[1] = static_cast<float>(s.debugView);
+    u.misc[2] = static_cast<float>(s.drawMode);
+    u.misc[3] = s.xrayDensity;
     u.misc2[0] = static_cast<float>(s.toneMap);
     u.misc2[1] = std::clamp(s.backgroundGradient, 0.0f, 1.0f);
-    u.misc2[3] = static_cast<float>(envLevels_ - 1u);
     return frame;
+}
+
+// ------------------------------------------------------------------ the cells: buffers, patches, ray tracing
+
+// Segments per edge for a membrane of this many triangles: what is asked for, fewer for very
+// large forms.
+int Renderer::segmentsFor(uint32_t triangles, int wanted) const {
+    int n = std::clamp(wanted, 1, 8);
+    while (n > 1 && static_cast<uint64_t>(triangles) * static_cast<uint64_t>(n * n) > kMostFineTriangles) --n;
+    return n;
+}
+
+// Buffers for the membrane refined into `segments` per edge; the triangle indices only when it
+// is going to be ray traced.
+void Renderer::ensureFineBuffers(uint32_t triangles, int segments, bool withIndex) {
+    const uint64_t points = static_cast<uint64_t>(triangles) * static_cast<uint64_t>((segments + 1) * (segments + 2) / 2);
+    const uint64_t small = static_cast<uint64_t>(triangles) * static_cast<uint64_t>(segments * segments);
+    const bool growPoints = points > fine_.points || !fine_.pos.buffer;
+    const bool growIndex = withIndex && (small > fine_.triangles || !fine_.index.buffer);
+    if (!growPoints && !growIndex) return;
+    vkDeviceWaitIdle(ctx_.device);
+    const VkBufferUsageFlags traced = ctx_.hasRayTracing ? VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+                                                         : VkBufferUsageFlags{0};
+    if (growPoints) {
+        ctx_.destroy(fine_.pos);
+        ctx_.destroy(fine_.normal);
+        fine_.points = points + points / 4 + 4096;
+        fine_.pos = ctx_.createBuffer(fine_.points * 3 * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | traced, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        fine_.normal = ctx_.createBuffer(fine_.points * 3 * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        fine_.version = ~uint64_t{0};
+    }
+    if (growIndex) {
+        ctx_.destroy(fine_.index);
+        fine_.triangles = small + small / 4 + 4096;
+        fine_.index = ctx_.createBuffer(fine_.triangles * 3 * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | traced, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        fine_.indexSegments = 0;
+    }
 }
 
 void Renderer::destroyCellTree() {
@@ -967,32 +1114,11 @@ void Renderer::destroyCellTree() {
     tree_ = CellTree{};
 }
 
-// Brings the acceleration structure up to date with the cells. Cells as spheres: a compute pass
-// writes the box of every cell and the bottom level is built over the boxes. Membrane: the bottom
-// level is built over its triangles. The top level has one instance of it. Recorded into the
-// frame, before any render pass. Skipped while nothing has changed.
-void Renderer::updateCellTree(VkCommandBuffer cmd, const PointBuffers& points, float radius, bool mesh) {
-    const uint32_t primitives = mesh ? points.indexCount / 3u : points.count;
-    const VkBuffer wanted[6] = {points.pos,    points.birth, points.food, points.extra ? points.extra : points.food,
-                                mesh ? points.normal : points.food, mesh ? points.index : points.birth};
-    const bool sameBuffers = std::equal(wanted, wanted + 6, tree_.bound);
-    if (tree_.blas && tree_.mesh == mesh && sameBuffers && tree_.version == points.version && tree_.count == primitives &&
-        (mesh || tree_.radius == radius))
-        return;
+namespace {
 
-    const VkBufferUsageFlags address = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-    const VkBufferUsageFlags input = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | address;
-    const VkBufferUsageFlags store = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | address;
-    const VkMemoryPropertyFlags local = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    auto addressOf = [&](VkBuffer buffer) {
-        VkBufferDeviceAddressInfo info{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
-        info.buffer = buffer;
-        return vkGetBufferDeviceAddress(ctx_.device, &info);
-    };
-
-    const bool grow = primitives > tree_.capacity || !tree_.blas || tree_.mesh != mesh;
-    const uint32_t capacity = grow ? primitives + primitives / 4u + 1024u : tree_.capacity;
-
+// The description of what the bottom-level structure holds: the triangles of the membrane, or a
+// box per cell.
+VkAccelerationStructureGeometryKHR treeShape(bool mesh, uint32_t mostVertices) {
     VkAccelerationStructureGeometryKHR shape{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
     shape.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
     if (mesh) {
@@ -1001,136 +1127,239 @@ void Renderer::updateCellTree(VkCommandBuffer cmd, const PointBuffers& points, f
         shape.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
         shape.geometry.triangles.vertexStride = 3 * sizeof(float);
         shape.geometry.triangles.indexType = VK_INDEX_TYPE_UINT32;
-        // A closed sheet has more triangles than cells, so the capacity bounds the vertices too.
-        shape.geometry.triangles.maxVertex = capacity;
+        shape.geometry.triangles.maxVertex = mostVertices;
     } else {
         shape.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
         shape.geometry.aabbs.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
         shape.geometry.aabbs.stride = 6 * sizeof(float);
     }
-    VkAccelerationStructureBuildGeometryInfoKHR bottom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
-    bottom.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-    bottom.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;  // rebuilt whenever the cells move
-    bottom.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-    bottom.geometryCount = 1;
-    bottom.pGeometries = &shape;
+    return shape;
+}
 
+VkAccelerationStructureBuildGeometryInfoKHR treeBuild(VkAccelerationStructureTypeKHR type, const VkAccelerationStructureGeometryKHR* shape) {
+    VkAccelerationStructureBuildGeometryInfoKHR b{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    b.type = type;
+    b.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;  // rebuilt whenever the cells move
+    b.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    b.geometryCount = 1;
+    b.pGeometries = shape;
+    return b;
+}
+
+}  // namespace
+
+// The acceleration structure and its buffers, sized for this many primitives (cells as boxes,
+// or triangles of the membrane) with room to grow, so they are not made anew for every new cell.
+void Renderer::ensureCellTree(uint32_t primitives, bool mesh) {
+    if (tree_.blas && tree_.mesh == mesh && primitives <= tree_.capacity) return;
+    const VkBufferUsageFlags address = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    const VkBufferUsageFlags input = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | address;
+    const VkBufferUsageFlags store = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | address;
+    const VkMemoryPropertyFlags local = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    const uint32_t capacity = primitives + primitives / 4u + 1024u;
+
+    vkDeviceWaitIdle(ctx_.device);
+    destroyCellTree();
+    tree_.capacity = capacity;
+    tree_.mesh = mesh;
+    // The boxes of the cells (the membrane needs none).
+    if (!mesh) tree_.boxes = ctx_.createBuffer(static_cast<VkDeviceSize>(capacity) * 6 * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | input, local);
+
+    const VkAccelerationStructureGeometryKHR shape = treeShape(mesh, capacity * 3u);  // no triangle has more than three corners of its own
+    const VkAccelerationStructureBuildGeometryInfoKHR bottom = treeBuild(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, &shape);
     VkAccelerationStructureGeometryKHR instances{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
     instances.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
     instances.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
-    VkAccelerationStructureBuildGeometryInfoKHR top{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
-    top.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-    top.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
-    top.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-    top.geometryCount = 1;
-    top.pGeometries = &instances;
+    const VkAccelerationStructureBuildGeometryInfoKHR top = treeBuild(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, &instances);
 
-    if (grow) {
-        // Everything is sized for the capacity, so it is not rebuilt for every new cell.
-        vkDeviceWaitIdle(ctx_.device);
-        destroyCellTree();
-        tree_.capacity = capacity;
-        tree_.mesh = mesh;
-        // The boxes of the cells (the membrane needs none, but the binding needs a buffer).
-        tree_.boxes = ctx_.createBuffer(mesh ? 6 * sizeof(float) : static_cast<VkDeviceSize>(capacity) * 6 * sizeof(float),
-                                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | input, local);
+    VkAccelerationStructureBuildSizesInfoKHR bottomSizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+    buildSizes_(ctx_.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bottom, &capacity, &bottomSizes);
+    const uint32_t one = 1;
+    VkAccelerationStructureBuildSizesInfoKHR topSizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+    buildSizes_(ctx_.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &top, &one, &topSizes);
 
-        VkAccelerationStructureBuildSizesInfoKHR bottomSizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-        buildSizes_(ctx_.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bottom, &capacity, &bottomSizes);
-        const uint32_t one = 1;
-        VkAccelerationStructureBuildSizesInfoKHR topSizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-        buildSizes_(ctx_.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &top, &one, &topSizes);
+    tree_.blasStore = ctx_.createBuffer(bottomSizes.accelerationStructureSize, store, local);
+    tree_.tlasStore = ctx_.createBuffer(topSizes.accelerationStructureSize, store, local);
+    VkAccelerationStructureCreateInfoKHR ci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
+    ci.buffer = tree_.blasStore.buffer;
+    ci.size = bottomSizes.accelerationStructureSize;
+    ci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    vk_check(createAs_(ctx_.device, &ci, nullptr, &tree_.blas), "vkCreateAccelerationStructureKHR (cells)");
+    ci.buffer = tree_.tlasStore.buffer;
+    ci.size = topSizes.accelerationStructureSize;
+    ci.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    vk_check(createAs_(ctx_.device, &ci, nullptr, &tree_.tlas), "vkCreateAccelerationStructureKHR (top)");
 
-        tree_.blasStore = ctx_.createBuffer(bottomSizes.accelerationStructureSize, store, local);
-        tree_.tlasStore = ctx_.createBuffer(topSizes.accelerationStructureSize, store, local);
-        VkAccelerationStructureCreateInfoKHR ci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
-        ci.buffer = tree_.blasStore.buffer;
-        ci.size = bottomSizes.accelerationStructureSize;
-        ci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-        vk_check(createAs_(ctx_.device, &ci, nullptr, &tree_.blas), "vkCreateAccelerationStructureKHR (cells)");
-        ci.buffer = tree_.tlasStore.buffer;
-        ci.size = topSizes.accelerationStructureSize;
-        ci.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-        vk_check(createAs_(ctx_.device, &ci, nullptr, &tree_.tlas), "vkCreateAccelerationStructureKHR (top)");
+    // One scratch buffer for both builds (they run one after the other), aligned as the device asks.
+    VkPhysicalDeviceAccelerationStructurePropertiesKHR asProps{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR};
+    VkPhysicalDeviceProperties2 props{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    props.pNext = &asProps;
+    vkGetPhysicalDeviceProperties2(ctx_.gpu, &props);
+    const VkDeviceSize align = std::max<VkDeviceSize>(asProps.minAccelerationStructureScratchOffsetAlignment, 1);
+    const VkDeviceSize scratchBytes = std::max(bottomSizes.buildScratchSize, topSizes.buildScratchSize) + align;
+    tree_.scratch = ctx_.createBuffer(scratchBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | address, local);
+    tree_.scratchAddress = (ctx_.address(tree_.scratch) + align - 1) / align * align;
 
-        // One scratch buffer for both builds (they run one after the other), aligned as the device asks.
-        VkPhysicalDeviceAccelerationStructurePropertiesKHR asProps{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR};
-        VkPhysicalDeviceProperties2 props{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-        props.pNext = &asProps;
-        vkGetPhysicalDeviceProperties2(ctx_.gpu, &props);
-        const VkDeviceSize align = std::max<VkDeviceSize>(asProps.minAccelerationStructureScratchOffsetAlignment, 1);
-        const VkDeviceSize scratchBytes = std::max(bottomSizes.buildScratchSize, topSizes.buildScratchSize) + align;
-        tree_.scratch = ctx_.createBuffer(scratchBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | address, local);
-        tree_.scratchAddress = (ctx_.address(tree_.scratch) + align - 1) / align * align;
+    // The one instance of the top level: the cells, where they are.
+    tree_.instance = ctx_.createBuffer(sizeof(VkAccelerationStructureInstanceKHR), input,
+                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
+    VkAccelerationStructureInstanceKHR inst{};
+    inst.transform.matrix[0][0] = inst.transform.matrix[1][1] = inst.transform.matrix[2][2] = 1.0f;
+    inst.mask = 0xFF;
+    inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;  // both sides of the sheet
+    VkAccelerationStructureDeviceAddressInfoKHR ai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
+    ai.accelerationStructure = tree_.blas;
+    inst.accelerationStructureReference = asAddress_(ctx_.device, &ai);
+    std::memcpy(tree_.instance.mapped, &inst, sizeof inst);
+}
 
-        // The one instance of the top level: the cells, where they are.
-        tree_.instance = ctx_.createBuffer(sizeof(VkAccelerationStructureInstanceKHR), input,
-                                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
-        VkAccelerationStructureInstanceKHR inst{};
-        inst.transform.matrix[0][0] = inst.transform.matrix[1][1] = inst.transform.matrix[2][2] = 1.0f;
-        inst.mask = 0xFF;
-        inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;  // both sides of the sheet
-        VkAccelerationStructureDeviceAddressInfoKHR ai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
-        ai.accelerationStructure = tree_.blas;
-        inst.accelerationStructureReference = asAddress_(ctx_.device, &ai);
-        std::memcpy(tree_.instance.mapped, &inst, sizeof inst);
+// Points set 1 at the cells of this frame and at what was derived from them. A per-cell buffer
+// the frame does not have is replaced by one of the same size, so a shader that reads it reads
+// something.
+void Renderer::bindCells(const PointBuffers& points) {
+    const VkBuffer buffers[10] = {
+        points.pos,
+        points.birth,
+        points.food,
+        points.extra ? points.extra : points.pos,
+        tree_.boxes.buffer ? tree_.boxes.buffer : dummy_.buffer,
+        points.normal ? points.normal : points.pos,
+        points.index ? points.index : dummy_.buffer,
+        fine_.pos.buffer ? fine_.pos.buffer : dummy_.buffer,
+        fine_.normal.buffer ? fine_.normal.buffer : dummy_.buffer,
+        fine_.index.buffer ? fine_.index.buffer : dummy_.buffer,
+    };
+    VkDescriptorBufferInfo infos[10];
+    VkWriteDescriptorSet writes[11]{};
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < 10; ++i) {
+        infos[i] = VkDescriptorBufferInfo{buffers[i], 0, VK_WHOLE_SIZE};
+        VkWriteDescriptorSet& w = writes[count++];
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = cellSet_;
+        w.dstBinding = i + 1;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w.pBufferInfo = &infos[i];
     }
-
-    if (grow || !sameBuffers) {
-        VkWriteDescriptorSetAccelerationStructureKHR asWrite{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
+    VkWriteDescriptorSetAccelerationStructureKHR asWrite{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
+    if (ctx_.hasRayTracing && tree_.tlas) {
         asWrite.accelerationStructureCount = 1;
         asWrite.pAccelerationStructures = &tree_.tlas;
-        // Bindings 1..7: positions, birth, food, extra, boxes, normals, triangle indices.
-        const VkBuffer buffers[7] = {wanted[0], wanted[1], wanted[2], wanted[3], tree_.boxes.buffer, wanted[4], wanted[5]};
-        VkDescriptorBufferInfo infos[7];
-        for (int i = 0; i < 7; ++i) infos[i] = VkDescriptorBufferInfo{buffers[i], 0, VK_WHOLE_SIZE};
-        VkWriteDescriptorSet writes[8]{};
-        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].pNext = &asWrite;
-        writes[0].dstSet = rtSet_;
-        writes[0].dstBinding = 0;
-        writes[0].descriptorCount = 1;
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-        for (uint32_t i = 0; i < 7; ++i) {
-            writes[i + 1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[i + 1].dstSet = rtSet_;
-            writes[i + 1].dstBinding = i + 1;
-            writes[i + 1].descriptorCount = 1;
-            writes[i + 1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[i + 1].pBufferInfo = &infos[i];
-        }
-        vkUpdateDescriptorSets(ctx_.device, 8, writes, 0, nullptr);
-        std::copy(wanted, wanted + 6, tree_.bound);
+        VkWriteDescriptorSet& w = writes[count++];
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.pNext = &asWrite;
+        w.dstSet = cellSet_;
+        w.dstBinding = 0;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     }
+    vkUpdateDescriptorSets(ctx_.device, count, writes, 0, nullptr);
+}
 
+// Computes the patches of the membrane (refine.comp) when the cells have changed, and the
+// indices of their small triangles when those are needed and not yet written.
+void Renderer::refineMembrane(VkCommandBuffer cmd, const PointBuffers& points, int segments, bool withIndex) {
+    const uint32_t triangles = points.indexCount / 3u;
+    const bool stale = fine_.version != points.version || fine_.segments != segments || fine_.count != triangles || fine_.from[0] != points.pos ||
+                       fine_.from[1] != points.normal || fine_.from[2] != points.index;
+    const bool indexStale = withIndex && (fine_.indexSegments != segments || fine_.indexCount != triangles);
+    if (!stale && !indexStale) return;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, refinePipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout_, 1, 1, &cellSet_, 0, nullptr);
+    struct {
+        uint32_t count;
+        float radius;
+        uint32_t triangles, segments, mode, base;
+    } push{points.count, 0.0f, triangles, static_cast<uint32_t>(segments), 0u, 0u};
+    // One invocation per lattice point or small triangle, in as many dispatches as the device's
+    // limit on the size of one asks for.
+    const uint64_t mostGroups = std::min<uint64_t>(ctx_.gpuProperties.limits.maxComputeWorkGroupCount[0], 1u << 22);
+    auto run = [&](uint32_t mode, uint64_t invocations) {
+        push.mode = mode;
+        for (uint64_t done = 0; done < invocations;) {
+            const uint64_t groups = std::min((invocations - done + 255u) / 256u, mostGroups);
+            push.base = static_cast<uint32_t>(done);
+            pushConstants(cmd, &push, sizeof push);
+            vkCmdDispatch(cmd, static_cast<uint32_t>(groups), 1, 1);
+            done += groups * 256u;
+        }
+    };
+    if (stale) run(0u, static_cast<uint64_t>(triangles) * static_cast<uint64_t>((segments + 1) * (segments + 2) / 2));
+    if (indexStale) run(1u, static_cast<uint64_t>(triangles) * static_cast<uint64_t>(segments * segments));
+    VkPipelineStageFlags2 readers = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    if (ctx_.hasRayTracing) readers |= VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+    memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT, readers, VK_ACCESS_2_SHADER_READ_BIT);
+
+    fine_.version = points.version;
+    fine_.segments = segments;
+    fine_.count = triangles;
+    fine_.from[0] = points.pos;
+    fine_.from[1] = points.normal;
+    fine_.from[2] = points.index;
+    if (withIndex) {
+        fine_.indexSegments = segments;
+        fine_.indexCount = triangles;
+    }
+}
+
+// Brings the acceleration structure up to date with the cells. Cells as spheres: a compute pass
+// writes the box of every cell and the bottom level is built over the boxes. Membrane: the bottom
+// level is built over its (refined) triangles. The top level has one instance of it. Recorded
+// into the frame, before any render pass. Skipped while nothing has changed.
+void Renderer::buildCellTree(VkCommandBuffer cmd, const PointBuffers& points, float radius, bool mesh, int segments) {
+    const uint32_t triangles = points.indexCount / 3u;
+    const bool refined = mesh && segments > 1;
+    const uint32_t primitives = mesh ? triangles * static_cast<uint32_t>(segments * segments) : points.count;
+    const VkBuffer from[2] = {points.pos, mesh ? points.index : VkBuffer{VK_NULL_HANDLE}};
+    if (tree_.version == points.version && tree_.count == primitives && tree_.from[0] == from[0] && tree_.from[1] == from[1] &&
+        (mesh ? tree_.segments == segments : tree_.radius == radius))
+        return;
+    auto addressOf = [&](VkBuffer buffer) {
+        VkBufferDeviceAddressInfo info{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+        info.buffer = buffer;
+        return vkGetBufferDeviceAddress(ctx_.device, &info);
+    };
+
+    VkAccelerationStructureGeometryKHR shape = treeShape(mesh, 0);
     if (mesh) {
-        shape.geometry.triangles.vertexData.deviceAddress = addressOf(points.pos);
-        shape.geometry.triangles.indexData.deviceAddress = addressOf(points.index);
-        shape.geometry.triangles.maxVertex = points.count > 0 ? points.count - 1u : 0u;
+        const uint32_t vertices = refined ? triangles * static_cast<uint32_t>((segments + 1) * (segments + 2) / 2) : points.count;
+        shape.geometry.triangles.vertexData.deviceAddress = refined ? ctx_.address(fine_.pos) : addressOf(points.pos);
+        shape.geometry.triangles.indexData.deviceAddress = refined ? ctx_.address(fine_.index) : addressOf(points.index);
+        shape.geometry.triangles.maxVertex = vertices > 0 ? vertices - 1u : 0u;
     } else {
         // Boxes from the positions.
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, boxPipeline_);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, rtLayout_, 1, 1, &rtSet_, 0, nullptr);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout_, 1, 1, &cellSet_, 0, nullptr);
         struct {
             uint32_t count;
             float radius;
         } push{points.count, radius};
-        vkCmdPushConstants(cmd, rtLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof push, &push);
+        pushConstants(cmd, &push, sizeof push);
         vkCmdDispatch(cmd, (points.count + 255u) / 256u, 1, 1);
         memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                       VK_ACCESS_2_SHADER_READ_BIT);
         shape.geometry.aabbs.data.deviceAddress = ctx_.address(tree_.boxes);
     }
 
+    VkAccelerationStructureBuildGeometryInfoKHR bottom = treeBuild(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, &shape);
     bottom.dstAccelerationStructure = tree_.blas;
     bottom.scratchData.deviceAddress = tree_.scratchAddress;
     const VkAccelerationStructureBuildRangeInfoKHR bottomRange{primitives, 0, 0, 0};
     const VkAccelerationStructureBuildRangeInfoKHR* bottomRanges = &bottomRange;
     buildAs_(cmd, 1, &bottom, &bottomRanges);
+    // The top level reads the bottom level, and its build writes the same scratch buffer: it
+    // has to wait for the first build on both counts.
     memoryBarrier(cmd, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
-                  VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+                  VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                  VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
 
+    VkAccelerationStructureGeometryKHR instances{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+    instances.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    instances.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
     instances.geometry.instances.data.deviceAddress = ctx_.address(tree_.instance);
+    VkAccelerationStructureBuildGeometryInfoKHR top = treeBuild(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, &instances);
     top.dstAccelerationStructure = tree_.tlas;
     top.scratchData.deviceAddress = tree_.scratchAddress;
     const VkAccelerationStructureBuildRangeInfoKHR topRange{1, 0, 0, 0};
@@ -1142,26 +1371,53 @@ void Renderer::updateCellTree(VkCommandBuffer cmd, const PointBuffers& points, f
     tree_.version = points.version;
     tree_.count = primitives;
     tree_.radius = radius;
+    tree_.segments = segments;
+    tree_.from[0] = from[0];
+    tree_.from[1] = from[1];
 }
+
+// ------------------------------------------------------------------ one frame
 
 void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBuffers& points, const FrameSetup& frame,
                       const RenderSettings& settings, const std::function<void(VkCommandBuffer)>& overlay, const Region* region) {
     syncEnvironment(settings);
     FrameUniforms u = frame.uniforms;
-    u.misc2[3] = static_cast<float>(envLevels_ - 1u);
-    int drawMode = static_cast<int>(u.misc[2] + 0.5f);
+    u.envSample[0] = static_cast<float>(envLevels_ - 1u);
+    u.envSample[1] = envSampleLevel_;
+    u.envSample[2] = static_cast<float>(envTableW_);
+    u.envSample[3] = static_cast<float>(envTableH_);
+    u.envSample2[0] = envMean_;
+
+    // --- what is drawn, and how
+    int drawMode = settings.drawMode;
     const bool havePoints = points.count > 0 && points.pos && points.birth && points.food;
-    // Data without a membrane (a snapshot file): the membrane modes draw the cells instead.
+    // Data without a membrane (a snapshot file) shows the cells instead, and without ray tracing
+    // the path traced modes show their raster counterparts.
     const bool haveMembrane = havePoints && points.normal && points.index && points.indexCount > 0;
     if (drawMode == kDrawMembranePathTraced && !haveMembrane) drawMode = kDrawPathTraced;
-    if ((drawMode == kDrawMembrane || drawMode == kDrawMembraneSss) && !haveMembrane) drawMode = kDrawCells;
+    if (drawMode == kDrawMembrane && !haveMembrane) drawMode = kDrawCells;
+    if (drawMode == kDrawPathTraced && (!ctx_.hasRayTracing || !havePoints)) drawMode = kDrawCells;
+    if (drawMode == kDrawMembranePathTraced && !ctx_.hasRayTracing) drawMode = kDrawMembrane;
+    if (drawMode != kDrawCells && drawMode != kDrawXray && drawMode != kDrawMembrane && drawMode != kDrawPathTraced &&
+        drawMode != kDrawMembranePathTraced)
+        drawMode = kDrawCells;
     u.misc[2] = static_cast<float>(drawMode);
-    const bool membrane = drawMode == kDrawMembrane || drawMode == kDrawMembraneSss;
-    const bool pathTraced = (drawMode == kDrawPathTraced || drawMode == kDrawMembranePathTraced) && ctx_.hasRayTracing && havePoints;
-    const bool tracedOcclusion = (drawMode == kDrawCells || membrane) && settings.rtAo && settings.aoEnabled && ctx_.hasRayTracing && havePoints;
+    const bool membrane = drawMode == kDrawMembrane;
+    const bool pathTraced = drawMode == kDrawPathTraced || drawMode == kDrawMembranePathTraced;
+    const bool solid = drawMode == kDrawCells || membrane;  // a raster mode with surfaces to light
+    const bool glowGather = settings.emissionLights && materialUses(settings, kMatEmission);
+    const bool traced = solid && ctx_.hasRayTracing && havePoints && ((settings.rtAo && settings.aoEnabled) || glowGather);
     // What the rays meet: the triangles of the membrane, or the cells as spheres.
-    const bool traceMesh = drawMode == kDrawMembranePathTraced || (membrane && tracedOcclusion);
-    u.pt[3] = traceMesh ? std::clamp(settings.ptTranslucency, 0.0f, 1.0f) : 0.0f;
+    const bool drawMesh = membrane || drawMode == kDrawMembranePathTraced;
+    const bool traceMesh = drawMode == kDrawMembranePathTraced || (membrane && traced);
+    const uint32_t triangles = points.indexCount / 3u;
+    const int segments = drawMesh ? segmentsFor(triangles, settings.meshSmooth) : 1;
+    if (drawMesh) segmentsUsed_ = segments;
+    u.mesh[0] = static_cast<float>(segments);
+    u.mesh[1] = static_cast<float>((segments + 1) * (segments + 2) / 2);
+    u.mesh[2] = static_cast<float>(segments * segments);
+    u.rt[0] = traced ? static_cast<float>(std::clamp(settings.rtAoRays, 1, 64)) : 0.0f;
+    u.matEmission2[1] = traced && glowGather ? 1.0f : 0.0f;
 
     // The key light of the simulation: its direction in every mode, and in the raster modes its
     // own shadow map in place of the one drawn here.
@@ -1189,16 +1445,16 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
             u.lightColor[3] = std::clamp(settings.shadowStrength, 0.0f, 1.0f);
         }
     }
-    bindLightMap(simLight && !pathTraced ? points.lightMap : noLightMap_.buffer);
+    // The shadow map gives the shadows of the key light, and how much material its light has
+    // crossed where it comes through from behind.
+    const bool shadowMap = solid && havePoints && !simLight && (u.lightColor[3] > 0.0f || materialUses(settings, kMatTranslucency));
+    if (!solid) u.lightColor[3] = 0.0f;
+    u.shadow2[1] = shadowMap ? 1.0f : 0.0f;
 
-    if (pathTraced || tracedOcclusion) updateCellTree(cmd, points, settings.sphereRadius, traceMesh);
-
-    // The path tracer refines a running mean for as long as nothing that shows in the image changes.
-    uint32_t newSamples = 0;
-    if (pathTraced) {
-        FrameUniforms keyed = u;
-        keyed.misc[0] = 0.0f;  // the frame counter does not change the image
-        uint64_t key = fnv(&keyed, sizeof keyed);
+    // --- the running mean: frames of the raster modes or samples of the path tracer are averaged
+    // for as long as nothing that shows in the image changes.
+    {
+        uint64_t key = fnv(&u, sizeof u);
         key = fnv(&points.version, sizeof points.version, key);
         key = fnv(&points.count, sizeof points.count, key);
         key = fnv(&envVersion_, sizeof envVersion_, key);
@@ -1206,165 +1462,263 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
             accumKey_ = key;
             accumSamples_ = 0;
         }
+    }
+    uint32_t newSamples = 0;
+    if (pathTraced) {
         const uint32_t limit = static_cast<uint32_t>(std::max(settings.ptMaxSamples, 1));
         if (accumSamples_ < limit) newSamples = std::min(static_cast<uint32_t>(std::clamp(settings.ptSamplesPerFrame, 1, 64)), limit - accumSamples_);
         u.rt[2] = static_cast<float>(accumSamples_);
         u.rt[3] = static_cast<float>(newSamples);
     } else {
-        accumSamples_ = 0;
-        accumKey_ = 0;
+        // Raster modes: a view that stands still is drawn again a fraction of a pixel aside and
+        // with fresh noise, until there are enough frames; then it is only shown.
+        const uint32_t limit = settings.aaAccumulate ? static_cast<uint32_t>(std::clamp(settings.aaFrames, 1, 4096)) : 1u;
+        if (accumSamples_ < limit) {
+            newSamples = 1;
+            if (accumSamples_ > 0) {
+                u.proj[8] += 2.0f * (halton(accumSamples_, 2) - 0.5f) / static_cast<float>(extent_.width);
+                u.proj[9] += 2.0f * (halton(accumSamples_, 3) - 0.5f) / static_cast<float>(extent_.height);
+                u.aa[0] = static_cast<float>(accumSamples_);
+            }
+        }
     }
-    u.rt[0] = tracedOcclusion ? static_cast<float>(std::clamp(settings.rtAoRays, 1, 64)) : 0.0f;
     std::memcpy(uniformBuffer_.mapped, &u, sizeof u);
 
-    const VkBuffer vertexBuffers[5] = {points.pos, points.birth, points.food, points.normal ? points.normal : points.pos,
-                                       points.extra ? points.extra : points.food};
+    // --- the cells: set 1, the patches of the membrane, what the rays are traced against
+    const bool needTree = havePoints && (pathTraced || traced) && newSamples > 0;
+    const bool refine = havePoints && drawMesh && segments > 1 && newSamples > 0;
+    if (refine) ensureFineBuffers(triangles, segments, traceMesh);
+    if (needTree) ensureCellTree(traceMesh ? triangles * static_cast<uint32_t>(segments * segments) : points.count, traceMesh);
+    if (havePoints && newSamples > 0 && (drawMesh || needTree)) bindCells(points);
+    if (refine) refineMembrane(cmd, points, segments, traceMesh);
+    if (needTree) buildCellTree(cmd, points, settings.sphereRadius, traceMesh, segments);
+
+    auto read = [&](Target& t) {
+        toRead(cmd, t);
+        return Tex{t.image.view, false};
+    };
+    auto readLinear = [&](Target& t) {
+        toRead(cmd, t);
+        return Tex{t.image.view, true};
+    };
+    const VkBuffer vertexBuffers[5] = {points.pos, points.birth, points.food, points.pos, points.extra ? points.extra : points.pos};
     const VkDeviceSize offsets[5] = {0, 0, 0, 0, 0};
     const VkPipelineStageFlags2 depthStages = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+    const uint32_t meshVertices = triangles * static_cast<uint32_t>(segments * segments) * 3u;
+    Target* shown = &accum_;  // the image in linear light that is tone mapped
 
-    // --- shadow map: the cells seen from the key light
-    const bool shadows = u.lightColor[3] > 0.0f && havePoints && drawMode != kDrawXray && !pathTraced && !simLight;
-    if (shadows) {
-        ensureShadowMap(static_cast<uint32_t>(std::clamp(settings.shadowMapSize, 256, 8192)));
-        FrameUniforms lightFrame = u;
-        std::memcpy(lightFrame.view, frame.lightView, sizeof lightFrame.view);
-        std::memcpy(lightFrame.proj, frame.lightProj, sizeof lightFrame.proj);
-        lightFrame.sphere[1] = 0.75f * frame.shadowTexel;  // no cell smaller than about a texel
-        std::memcpy(shadowUniformBuffer_.mapped, &lightFrame, sizeof lightFrame);
-        transition(cmd, shadowMap_.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, depthStages, 0,
-                   depthStages, VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
-        beginPass(cmd, VkExtent2D{shadowSize_, shadowSize_}, {}, VK_ATTACHMENT_LOAD_OP_DONT_CARE, shadowMap_.view, true);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &setShadow_, 0, nullptr);
-        vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
-        if (membrane) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowMeshPipeline_);
-            vkCmdBindIndexBuffer(cmd, points.index, 0, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexed(cmd, points.indexCount, 1, 0, 0, 0);
-        } else {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowCellsPipeline_);
-            vkCmdDraw(cmd, 4, points.count, 0, 0);
-        }
-        vkCmdEndRendering(cmd);
-        transition(cmd, shadowMap_.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                   depthStages, VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                   VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-    } else {
-        // Not drawn this frame, but the composite shader names it: it has to be in a readable layout.
-        transition(cmd, shadowMap_.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-    }
-
-    // --- G-buffer: one impostor quad per cell, or the membrane
-    toAttachment(cmd, albedo_);
-    toAttachment(cmd, normalDepth_);
-    toAttachment(cmd, id_);
-    transition(cmd, depth_.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, depthStages, 0,
-               depthStages, VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
-    beginPass(cmd, extent_, {albedo_.view, normalDepth_.view, id_.view}, VK_ATTACHMENT_LOAD_OP_CLEAR, depth_.view);
-    if (havePoints && !pathTraced) {
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &setGeometry_, 0, nullptr);
-        vkCmdBindVertexBuffers(cmd, 0, 5, vertexBuffers, offsets);
-        if (membrane) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline_);
-            vkCmdBindIndexBuffer(cmd, points.index, 0, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexed(cmd, points.indexCount, 1, 0, 0, 0);
-        } else {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, drawMode == kDrawXray ? xrayPipeline_ : impostorPipeline_);
-            vkCmdDraw(cmd, 4, points.count, 0, 0);
-        }
-    }
-    vkCmdEndRendering(cmd);
-
-    // --- ambient occlusion: screen space, or rays against the cells
-    toSampled(cmd, albedo_);
-    toSampled(cmd, normalDepth_);
-    toSampled(cmd, id_);
-    toAttachment(cmd, aoRaw_);
-    beginPass(cmd, extent_, {aoRaw_.view}, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_NULL_HANDLE);
-    if (tracedOcclusion) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rtaoPipeline_);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rtLayout_, 0, 1, &setSsao_, 0, nullptr);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rtLayout_, 1, 1, &rtSet_, 0, nullptr);
-    } else {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ssaoPipeline_);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &setSsao_, 0, nullptr);
-    }
-    vkCmdDraw(cmd, 3, 1, 0, 0);
-    vkCmdEndRendering(cmd);
-
-    // --- blur
-    toSampled(cmd, aoRaw_);
-    toAttachment(cmd, aoBlur_);
-    beginPass(cmd, extent_, {aoBlur_.view}, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_NULL_HANDLE);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline_);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &setBlur_, 0, nullptr);
-    vkCmdDraw(cmd, 3, 1, 0, 0);
-    vkCmdEndRendering(cmd);
-    toSampled(cmd, aoBlur_);
-
-    // --- path tracer: a few more samples into the running mean (the images keep their contents),
-    // then the denoiser, or a plain copy, into the image the composite pass shows.
-    const VkImageLayout readable = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    if (!accumReady_) {
-        for (const Image* img : {&accum_, &ptGuide_, &ptFirst_, &ptDisplay_})
-            transition(cmd, img->image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, readable, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
-                       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-        accumReady_ = true;
-    }
-    if (newSamples > 0) {
-        for (const Image* img : {&accum_, &ptGuide_, &ptFirst_})
-            transition(cmd, img->image, VK_IMAGE_ASPECT_COLOR_BIT, readable, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                       VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT);
-        beginPass(cmd, extent_, {accum_.view, ptGuide_.view, ptFirst_.view}, VK_ATTACHMENT_LOAD_OP_LOAD, VK_NULL_HANDLE);
-        // The weight of this frame in the running mean.
-        const float weight = static_cast<float>(newSamples) / static_cast<float>(accumSamples_ + newSamples);
-        const float constants[4] = {weight, weight, weight, weight};
-        vkCmdSetBlendConstants(cmd, constants);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pathTracePipeline_);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rtLayout_, 0, 1, &setGeometry_, 0, nullptr);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rtLayout_, 1, 1, &rtSet_, 0, nullptr);
-        vkCmdDraw(cmd, 3, 1, 0, 0);
-        vkCmdEndRendering(cmd);
-        for (const Image* img : {&accum_, &ptGuide_, &ptFirst_}) toSampled(cmd, *img);
-        accumSamples_ += newSamples;
-    }
     if (pathTraced) {
+        // --- path tracer: a few more samples into the running mean, then the denoiser, or a
+        // plain copy, into the image that is shown. hdr_[0] and hdr_[1] hold what the denoiser
+        // needs to know about the first hit of every pixel.
+        if (newSamples > 0) {
+            const bool keep = accumSamples_ > 0;
+            const VkDescriptorSet set = screenSet(false, {}, true);
+            for (Target* t : {&accum_, &hdr_[0], &hdr_[1]}) toWrite(cmd, *t, keep);
+            beginPass(cmd, extent_, {accum_.image.view, hdr_[0].image.view, hdr_[1].image.view}, keep ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR,
+                      VK_NULL_HANDLE);
+            // The weight of this frame in the running mean.
+            const float weight = static_cast<float>(newSamples) / static_cast<float>(accumSamples_ + newSamples);
+            const float constants[4] = {weight, weight, weight, weight};
+            vkCmdSetBlendConstants(cmd, constants);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pathTracePipeline_);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set, 0, nullptr);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 1, 1, &cellSet_, 0, nullptr);
+            vkCmdDraw(cmd, 3, 1, 0, 0);
+            vkCmdEndRendering(cmd);
+            accumSamples_ += newSamples;
+        }
         struct Pass {
-            int set;
-            const Image* target;
+            Target* from;
+            Target* to;
             int32_t step, first, last;
         };
         const bool denoise = settings.ptDenoise && settings.ptDenoiseStrength > 0.0f;
-        const Pass blur[3] = {{0, &denoiseA_, 1, 1, 0}, {1, &denoiseB_, 2, 0, 0}, {2, &ptDisplay_, 4, 0, 1}};
-        const Pass copy[1] = {{0, &ptDisplay_, 0, 1, 1}};
+        const Pass blur[3] = {{&accum_, &hdr_[2], 1, 1, 0}, {&hdr_[2], &hdr_[3], 2, 0, 0}, {&hdr_[3], &hdr_[4], 4, 0, 1}};
+        const Pass copy[1] = {{&accum_, &hdr_[4], 0, 1, 1}};
         const Pass* passes = denoise ? blur : copy;
         // The fewer samples, the noisier the image and the more a neighbour may differ.
         const float sigma = settings.ptDenoiseStrength * 4.0f / std::sqrt(static_cast<float>(std::max(accumSamples_, 1u)));
         for (int i = 0; i < (denoise ? 3 : 1); ++i) {
             const Pass& pass = passes[i];
-            toAttachment(cmd, *pass.target);
-            beginPass(cmd, extent_, {pass.target->view}, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_NULL_HANDLE);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, denoisePipeline_);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, denoiseLayout_, 0, 1, &setDenoise_[pass.set], 0, nullptr);
             struct {
                 int32_t step, first, last;
                 float sigma;
             } push{pass.step, pass.first, pass.last, sigma};
-            vkCmdPushConstants(cmd, denoiseLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof push, &push);
+            const VkDescriptorSet set = screenSet(false, {read(*pass.from), read(hdr_[0]), read(hdr_[1])});
+            screenPass(cmd, denoisePipeline_, *pass.to, set, &push, sizeof push);
+        }
+        shown = &hdr_[4];
+    } else if (newSamples > 0) {
+        // --- shadow map: the cells seen from the key light
+        if (shadowMap) {
+            ensureShadowMap(static_cast<uint32_t>(std::clamp(settings.shadowMapSize, 256, 8192)));
+            FrameUniforms lightFrame = u;
+            std::memcpy(lightFrame.view, frame.lightView, sizeof lightFrame.view);
+            std::memcpy(lightFrame.proj, frame.lightProj, sizeof lightFrame.proj);
+            lightFrame.sphere[1] = 0.75f * frame.shadowTexel;  // no cell smaller than about a texel
+            std::memcpy(shadowUniformBuffer_.mapped, &lightFrame, sizeof lightFrame);
+            const VkDescriptorSet set = screenSet(true, {});
+            transition(cmd, shadowMap_.image.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                       depthStages | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0, depthStages,
+                       VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
+            beginPass(cmd, VkExtent2D{shadowSize_, shadowSize_}, {}, VK_ATTACHMENT_LOAD_OP_DONT_CARE, shadowMap_.image.view, true);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set, 0, nullptr);
+            if (membrane) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowMeshPipeline_);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 1, 1, &cellSet_, 0, nullptr);
+                vkCmdDraw(cmd, meshVertices, 1, 0, 0);
+            } else {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowCellsPipeline_);
+                vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+                vkCmdDraw(cmd, 4, points.count, 0, 0);
+            }
+            vkCmdEndRendering(cmd);
+            transition(cmd, shadowMap_.image.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                       depthStages, VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                       VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            shadowMap_.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        } else if (shadowMap_.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            // Not drawn, but the light pass names it: it has to be in a readable layout.
+            transition(cmd, shadowMap_.image.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            shadowMap_.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+
+        // --- G-buffer: one impostor quad per cell, or the patches of the membrane
+        {
+            const VkDescriptorSet set = screenSet(false, {});
+            for (Target* t : {&albedo_, &normalDepth_, &id_, &material_}) toWrite(cmd, *t);
+            transition(cmd, depth_.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, depthStages, 0,
+                       depthStages, VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
+            beginPass(cmd, extent_, {albedo_.image.view, normalDepth_.image.view, id_.image.view, material_.image.view}, VK_ATTACHMENT_LOAD_OP_CLEAR,
+                      depth_.view);
+            if (havePoints) {
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set, 0, nullptr);
+                if (membrane) {
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline_);
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 1, 1, &cellSet_, 0, nullptr);
+                    vkCmdDraw(cmd, meshVertices, 1, 0, 0);
+                } else {
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, drawMode == kDrawXray ? xrayPipeline_ : impostorPipeline_);
+                    vkCmdBindVertexBuffers(cmd, 0, 5, vertexBuffers, offsets);
+                    vkCmdDraw(cmd, 4, points.count, 0, 0);
+                }
+            }
+            vkCmdEndRendering(cmd);
+        }
+
+        // --- occlusion and the light of glowing cells nearby: screen space, or rays against the
+        // cells; then a blur that takes the sampling noise out. hdr_[0] raw, hdr_[1] blurred.
+        if (traced) {
+            const VkDescriptorSet set = screenSet(false, {read(normalDepth_)});
+            toWrite(cmd, hdr_[0]);
+            beginPass(cmd, extent_, {hdr_[0].image.view}, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_NULL_HANDLE);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gatherPipeline_);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set, 0, nullptr);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 1, 1, &cellSet_, 0, nullptr);
             vkCmdDraw(cmd, 3, 1, 0, 0);
             vkCmdEndRendering(cmd);
-            toSampled(cmd, *pass.target);
+        } else {
+            screenPass(cmd, ssaoPipeline_, hdr_[0], screenSet(false, {read(normalDepth_)}));
+        }
+        screenPass(cmd, blurPipeline_, hdr_[1], screenSet(false, {read(normalDepth_), read(hdr_[0])}));
+
+        // --- light: the matt light into hdr_[2], highlights, glow and background into hdr_[3]
+        {
+            const Tex shadowTex{shadowMap_.image.view, false};
+            const VkDescriptorSet set = screenSet(false, {read(normalDepth_), read(hdr_[1]), read(albedo_), shadowTex, read(material_)}, true,
+                                                  simLight ? points.lightMap : noLightMap_.buffer);
+            toWrite(cmd, hdr_[2]);
+            toWrite(cmd, hdr_[3]);
+            beginPass(cmd, extent_, {hdr_[2].image.view, hdr_[3].image.view}, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_NULL_HANDLE);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, lightPipeline_);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set, 0, nullptr);
+            vkCmdDraw(cmd, 3, 1, 0, 0);
+            vkCmdEndRendering(cmd);
+        }
+
+        // --- subsurface scattering: the matt light blurred across (into hdr_[0]) and down (back
+        // into hdr_[2])
+        if (solid && materialUses(settings, kMatSubsurface)) {
+            const float across[2] = {1.0f, 0.0f}, down[2] = {0.0f, 1.0f};
+            screenPass(cmd, sssPipeline_, hdr_[0], screenSet(false, {read(normalDepth_), read(hdr_[2]), read(material_)}), across, sizeof across);
+            screenPass(cmd, sssPipeline_, hdr_[2], screenSet(false, {read(normalDepth_), read(hdr_[0]), read(material_)}), down, sizeof down);
+        }
+
+        // --- the image: light times colour, plus highlights and glow, walls, outlines (hdr_[0])
+        screenPass(cmd, combinePipeline_, hdr_[0],
+                   screenSet(false, {read(normalDepth_), read(hdr_[2]), read(albedo_), read(hdr_[3]), read(id_), read(material_), read(hdr_[1])}));
+        Target* image = &hdr_[0];
+
+        // --- the lens (into hdr_[2])
+        if (solid && u.lens[0] > 0.0f) {
+            screenPass(cmd, dofPipeline_, hdr_[2], screenSet(false, {read(normalDepth_), readLinear(hdr_[0])}));
+            image = &hdr_[2];
+        }
+
+        // --- into the running mean
+        {
+            const bool keep = accumSamples_ > 0;
+            const VkDescriptorSet set = screenSet(false, {read(*image)});
+            toWrite(cmd, accum_, keep);
+            beginPass(cmd, extent_, {accum_.image.view}, keep ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR, VK_NULL_HANDLE);
+            const float weight = 1.0f / static_cast<float>(accumSamples_ + 1u);
+            const float constants[4] = {weight, weight, weight, weight};
+            vkCmdSetBlendConstants(cmd, constants);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, accumulatePipeline_);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set, 0, nullptr);
+            vkCmdDraw(cmd, 3, 1, 0, 0);
+            vkCmdEndRendering(cmd);
+            accumSamples_ += 1;
         }
     }
 
-    // --- composite into the target, then the overlay (UI) on top
+    // --- bloom: the bright part of the image at a quarter of the size, blurred twice
+    if (settings.bloom > 0.0f) {
+        struct {
+            float axis[2];
+            int32_t mode;
+        } push{{0.0f, 0.0f}, 0};
+        screenPass(cmd, bloomPipeline_, bloom_[0], screenSet(false, {readLinear(*shown)}), &push, sizeof push);
+        push.mode = 1;
+        for (float step : {1.0f, 2.5f}) {
+            push.axis[0] = step;
+            push.axis[1] = 0.0f;
+            screenPass(cmd, bloomPipeline_, bloom_[1], screenSet(false, {readLinear(bloom_[0])}), &push, sizeof push);
+            push.axis[0] = 0.0f;
+            push.axis[1] = step;
+            screenPass(cmd, bloomPipeline_, bloom_[0], screenSet(false, {readLinear(bloom_[1])}), &push, sizeof push);
+        }
+    }
+
+    // --- exposure, bloom, tone mapping
+    screenPass(cmd, tonemapPipeline_, ldr_[0], screenSet(false, {read(*shown), readLinear(bloom_[0])}));
+
+    // --- edge smoothing and the resize into the target, then the overlay (UI) on top. Rendered
+    // at the size of the target, the smoothing pass is the last one; otherwise it comes first
+    // and the last pass resizes.
+    struct {
+        int32_t mode;
+        float scale;
+    } last{0, scale_};
+    Target* ldr = &ldr_[0];
+    const bool resized = extent_.width != outExtent_.width || extent_.height != outExtent_.height;
+    if (settings.fxaa && resized) {
+        last.mode = 1;
+        screenPass(cmd, smoothPipeline_, ldr_[1], screenSet(false, {readLinear(ldr_[0])}), &last, sizeof last);
+        ldr = &ldr_[1];
+        last.mode = 0;
+    } else if (settings.fxaa) {
+        last.mode = 1;
+    }
+    const VkDescriptorSet finalSet = screenSet(false, {readLinear(*ldr)});
     if (region != nullptr) beginRegionPass(cmd, region->rect, targetView, region->keep);
-    else beginPass(cmd, extent_, {targetView}, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_NULL_HANDLE);
-    const int channels = region != nullptr ? region->channels : 0;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      channels == 1 ? compositeRedPipeline_ : channels == 2 ? compositeCyanPipeline_ : compositePipeline_);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &setComposite_, 0, nullptr);
+    else beginPass(cmd, outExtent_, {targetView}, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_NULL_HANDLE);
+    const int channels = region != nullptr ? std::clamp(region->channels, 0, 2) : 0;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, finalPipeline_[channels]);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &finalSet, 0, nullptr);
+    pushConstants(cmd, &last, sizeof last);
     vkCmdDraw(cmd, 3, 1, 0, 0);
     if (overlay) overlay(cmd);
     vkCmdEndRendering(cmd);
@@ -1373,9 +1727,10 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
 void renderView(VkCommandBuffer cmd, VkImageView target, VkExtent2D targetExtent, Renderer& left, Renderer* right, const PointBuffers& points,
                 const OrbitCamera& camera, const RenderSettings& settings, Vec3 sceneCentre, float sceneRadius, float currentStep,
                 uint64_t frameIndex, const std::function<void(VkCommandBuffer)>& overlay) {
+    const float scale = std::clamp(settings.renderScale, 0.25f, 4.0f);
     const int mode = right != nullptr ? settings.stereoMode : 0;
     if (mode < 1 || mode > 3) {
-        left.resize(targetExtent);
+        left.resize(targetExtent, scale);
         left.record(cmd, target, points, left.makeUniforms(camera, settings, sceneCentre, sceneRadius, currentStep, frameIndex), settings, overlay);
         return;
     }
@@ -1383,8 +1738,8 @@ void renderView(VkCommandBuffer cmd, VkImageView target, VkExtent2D targetExtent
     const float half = 0.5f * settings.stereoSeparation * camera.distance;
     const bool sideBySide = mode != 3;
     const VkExtent2D eyeExtent{sideBySide ? std::max(targetExtent.width / 2u, 1u) : targetExtent.width, targetExtent.height};
-    left.resize(eyeExtent);
-    right->resize(eyeExtent);
+    left.resize(eyeExtent, scale);
+    right->resize(eyeExtent, scale);
     Renderer::Region leftRegion, rightRegion;
     leftRegion.rect = VkRect2D{{0, 0}, eyeExtent};
     rightRegion.rect = leftRegion.rect;
@@ -1406,177 +1761,6 @@ void renderView(VkCommandBuffer cmd, VkImageView target, VkExtent2D targetExtent
         overlay(cmd);
         vkCmdEndRendering(cmd);
     }
-}
-
-// ------------------------------------------------------------------ settings by name
-
-namespace {
-
-bool parseFloats(const std::string& text, float* out, int count) {
-    const char* p = text.c_str();
-    for (int i = 0; i < count; ++i) {
-        char* end = nullptr;
-        out[i] = std::strtof(p, &end);
-        if (end == p) return false;
-        p = end;
-        while (*p == ',' || *p == ' ') ++p;
-    }
-    return *p == '\0';
-}
-
-bool parseBool(const std::string& v, bool& out) {
-    if (v == "1" || v == "true" || v == "on" || v == "yes") out = true;
-    else if (v == "0" || v == "false" || v == "off" || v == "no") out = false;
-    else return false;
-    return true;
-}
-
-struct Entry {
-    const char* name;
-    std::function<bool(RenderSettings&, const std::string&)> set;
-};
-
-Entry number(const char* name, float RenderSettings::* field) {
-    return {name, [field](RenderSettings& s, const std::string& v) { return parseFloats(v, &(s.*field), 1); }};
-}
-Entry whole(const char* name, int RenderSettings::* field) {
-    return {name, [field](RenderSettings& s, const std::string& v) {
-                float x = 0.0f;
-                if (!parseFloats(v, &x, 1)) return false;
-                s.*field = static_cast<int>(x);
-                return true;
-            }};
-}
-Entry flag(const char* name, bool RenderSettings::* field) {
-    return {name, [field](RenderSettings& s, const std::string& v) { return parseBool(v, s.*field); }};
-}
-Entry triple(const char* name, float (RenderSettings::* field)[3]) {
-    return {name, [field](RenderSettings& s, const std::string& v) { return parseFloats(v, s.*field, 3); }};
-}
-
-const std::vector<Entry>& entries() {
-    static const std::vector<Entry> table = {
-        {"drawMode",
-         [](RenderSettings& s, const std::string& v) {
-             const char* names[] = {"cells", "xray", "membrane", "sss", "path", "pathmesh"};
-             for (int i = 0; i < 6; ++i)
-                 if (v == names[i]) {
-                     s.drawMode = i;
-                     return true;
-                 }
-             if (v == "mesh") {
-                 s.drawMode = kDrawMembrane;
-                 return true;
-             }
-             return false;
-         }},
-        number("radius", &RenderSettings::sphereRadius),
-        number("minPixelRadius", &RenderSettings::minPixelRadius),
-        {"color",
-         [](RenderSettings& s, const std::string& v) {
-             const char* names[] = {"uniform", "age", "food", "birth", "generation", "curvature", "activator"};
-             for (int i = 0; i < 7; ++i)
-                 if (v == names[i]) {
-                     s.colorMode = static_cast<ColorMode>(i);
-                     return true;
-                 }
-             return false;
-         }},
-        flag("autoRange", &RenderSettings::autoRange),
-        number("min", &RenderSettings::scalarMin),
-        number("max", &RenderSettings::scalarMax),
-        whole("palette", &RenderSettings::palette),
-        flag("paletteReverse", &RenderSettings::paletteReverse),
-        triple("baseColor", &RenderSettings::baseColor),
-        flag("lightFollowsCamera", &RenderSettings::lightFollowsCamera),
-        flag("simLight", &RenderSettings::simLight),
-        triple("lightDir", &RenderSettings::lightDir),
-        number("sunAzimuth", &RenderSettings::sunAzimuth),
-        number("sunElevation", &RenderSettings::sunElevation),
-        number("lightIntensity", &RenderSettings::lightIntensity),
-        triple("lightColor", &RenderSettings::lightColor),
-        number("ambient", &RenderSettings::ambient),
-        triple("skyColor", &RenderSettings::skyColor),
-        triple("groundColor", &RenderSettings::groundColor),
-        flag("shadows", &RenderSettings::shadows),
-        whole("shadowMapSize", &RenderSettings::shadowMapSize),
-        number("shadowStrength", &RenderSettings::shadowStrength),
-        number("shadowSoftness", &RenderSettings::shadowSoftness),
-        number("shadowBias", &RenderSettings::shadowBias),
-        flag("ao", &RenderSettings::aoEnabled),
-        number("aoSmall", &RenderSettings::aoRadiusSmall),
-        number("aoLarge", &RenderSettings::aoRadiusLarge),
-        number("aoIntensity", &RenderSettings::aoIntensity),
-        flag("rtAo", &RenderSettings::rtAo),
-        whole("rtAoRays", &RenderSettings::rtAoRays),
-        number("rtAoRadius", &RenderSettings::rtAoRadius),
-        number("specular", &RenderSettings::specular),
-        number("shininess", &RenderSettings::shininess),
-        number("sssRadius", &RenderSettings::sssRadius),
-        number("xrayDensity", &RenderSettings::xrayDensity),
-        flag("walls", &RenderSettings::walls),
-        number("wallWidth", &RenderSettings::wallWidth),
-        number("wallStrength", &RenderSettings::wallStrength),
-        triple("wallColor", &RenderSettings::wallColor),
-        whole("toonBands", &RenderSettings::toonBands),
-        flag("outlines", &RenderSettings::outlines),
-        number("outlineWidth", &RenderSettings::outlineWidth),
-        number("outlineThreshold", &RenderSettings::outlineThreshold),
-        number("outlineStrength", &RenderSettings::outlineStrength),
-        triple("outlineColor", &RenderSettings::outlineColor),
-        whole("ptBounces", &RenderSettings::ptBounces),
-        whole("ptSamplesPerFrame", &RenderSettings::ptSamplesPerFrame),
-        whole("ptMaxSamples", &RenderSettings::ptMaxSamples),
-        number("ptSunSize", &RenderSettings::ptSunSize),
-        number("ptSunIntensity", &RenderSettings::ptSunIntensity),
-        number("ptSkyIntensity", &RenderSettings::ptSkyIntensity),
-        number("ptAperture", &RenderSettings::ptAperture),
-        number("ptFocus", &RenderSettings::ptFocus),
-        number("ptTranslucency", &RenderSettings::ptTranslucency),
-        flag("ptDenoise", &RenderSettings::ptDenoise),
-        number("ptDenoiseStrength", &RenderSettings::ptDenoiseStrength),
-        flag("envLight", &RenderSettings::envLight),
-        number("envIntensity", &RenderSettings::envIntensity),
-        number("envRotation", &RenderSettings::envRotation),
-        flag("envBackground", &RenderSettings::envBackground),
-        {"envFile",
-         [](RenderSettings& st, const std::string& v) {
-             st.envFile = v;
-             return true;
-         }},
-        {"stereo",
-         [](RenderSettings& st, const std::string& v) {
-             const char* names[] = {"off", "sidebyside", "crosseyed", "anaglyph"};
-             for (int i = 0; i < 4; ++i)
-                 if (v == names[i]) {
-                     st.stereoMode = i;
-                     return true;
-                 }
-             return false;
-         }},
-        number("stereoSeparation", &RenderSettings::stereoSeparation),
-        number("exposure", &RenderSettings::exposure),
-        whole("toneMap", &RenderSettings::toneMap),
-        triple("background", &RenderSettings::background),
-        number("backgroundGradient", &RenderSettings::backgroundGradient),
-        number("vignette", &RenderSettings::vignette),
-        whole("debugView", &RenderSettings::debugView),
-    };
-    return table;
-}
-
-}  // namespace
-
-std::string setRenderSetting(RenderSettings& settings, const std::string& name, const std::string& value) {
-    for (const Entry& e : entries())
-        if (name == e.name) return e.set(settings, value) ? std::string() : "bad value '" + value + "' for " + name;
-    return "unknown render setting '" + name + "'";
-}
-
-std::vector<std::string> renderSettingNames() {
-    std::vector<std::string> names;
-    for (const Entry& e : entries()) names.emplace_back(e.name);
-    return names;
 }
 
 }  // namespace cfv

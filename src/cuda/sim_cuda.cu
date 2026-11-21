@@ -793,18 +793,21 @@ __global__ void k_after_permute(const std::uint32_t* uid, std::uint32_t* slotOf,
     sortedSlot[q] = q;
 }
 
-// ---- For the viewer (CudaSim::copy_render_data): a per-cell scalar to colour by, and the
-// triangles of the membrane. Everything is in slot order, like the positions the viewer gets.
+// ---- For the viewer (CudaSim::copy_render_data): the normal of every cell from the positions
+// as they are now, three values to colour and shade by (generation, curvature, morphogen
+// activator), and the triangles of the membrane. Everything is in slot order, like the positions
+// the viewer gets. The stored normal is only the fallback for a degenerate ring.
 
-__global__ void k_render_scalar(int kind, const std::uint32_t* gen, const Vec3* pos, const Vec3* nrm, const std::uint32_t* nbr,
-                                const std::uint8_t* deg, const float* morphB, float l0, float* out, std::uint32_t n) {
+__global__ void k_render_cells(const std::uint32_t* gen, const Vec3* pos, const Vec3* nrm, const std::uint32_t* nbr, const std::uint8_t* deg,
+                               const float* morphB, float l0, float eps2, Vec3* outNormal, Vec3* outExtra, std::uint32_t n) {
     const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
     if (v >= n) return;
-    float x = 0.0f;
-    if (kind == static_cast<int>(RenderScalar::Generation)) x = static_cast<float>(gen[v]);
-    else if (kind == static_cast<int>(RenderScalar::Curvature)) x = cell_curvature(pos, nbr + static_cast<std::size_t>(v) * kMaxDeg, deg[v], pos[v], nrm[v], l0);
-    else if (kind == static_cast<int>(RenderScalar::Activator)) x = morphB != nullptr ? morph_signal(morphB[v]) : 0.0f;
-    out[v] = x;
+    const std::uint32_t* ring = nbr + static_cast<std::size_t>(v) * kMaxDeg;
+    Vec3 N;
+    ring_normal(pos, ring, deg[v], pos[v], nrm[v], eps2, N);
+    if (outNormal != nullptr) outNormal[v] = N;
+    if (outExtra != nullptr)
+        outExtra[v] = Vec3{static_cast<float>(gen[v]), cell_curvature(pos, ring, deg[v], pos[v], N, l0), morphB != nullptr ? morph_signal(morphB[v]) : 0.0f};
 }
 
 // The triangles of the membrane: every triangle (v, a, b) of consecutive ring entries is listed
@@ -1946,20 +1949,19 @@ BatchEnd CudaSim::Impl::run_batch(std::uint32_t steps, std::uint32_t stopCells, 
     return result;
 }
 
-CudaSim::RenderDataHost CudaSim::render_data_host(RenderScalar kind) {
+CudaSim::RenderDataHost CudaSim::render_data_host() {
     Impl& m = *impl_;
     const std::size_t n = m.n;
     RenderDataHost out;
-    float* extra = nullptr;
+    Vec3* extra = nullptr;
     Vec3* normal = nullptr;
     std::uint32_t* index = nullptr;
     const std::size_t maxIndices = n * 6;
-    CF_CUDA(cudaMalloc(&extra, n * sizeof(float)));
+    CF_CUDA(cudaMalloc(&extra, n * sizeof(Vec3)));
     CF_CUDA(cudaMalloc(&normal, n * sizeof(Vec3)));
     CF_CUDA(cudaMalloc(&index, maxIndices * sizeof(std::uint32_t)));
     RenderTargets t;
     t.extra = extra;
-    t.extraKind = kind;
     t.normal = normal;
     t.index = index;
     t.maxIndices = static_cast<std::uint32_t>(maxIndices);
@@ -1967,7 +1969,7 @@ CudaSim::RenderDataHost CudaSim::render_data_host(RenderScalar kind) {
     out.extra.resize(n);
     out.normal.resize(n);
     out.index.resize(counts.indices);
-    CF_CUDA(cudaMemcpy(out.extra.data(), extra, n * sizeof(float), cudaMemcpyDeviceToHost));
+    CF_CUDA(cudaMemcpy(out.extra.data(), extra, n * sizeof(Vec3), cudaMemcpyDeviceToHost));
     CF_CUDA(cudaMemcpy(out.normal.data(), normal, n * sizeof(Vec3), cudaMemcpyDeviceToHost));
     if (counts.indices > 0) CF_CUDA(cudaMemcpy(out.index.data(), index, counts.indices * sizeof(std::uint32_t), cudaMemcpyDeviceToHost));
     CF_CUDA(cudaFree(extra));
@@ -2057,10 +2059,10 @@ RenderCounts CudaSim::copy_render_data(const RenderTargets& t, std::uint32_t max
     if (t.pos) CF_CUDA(cudaMemcpyAsync(t.pos, m.pos[m.cur], c * sizeof(Vec3), cudaMemcpyDeviceToDevice, st));
     if (t.birth) CF_CUDA(cudaMemcpyAsync(t.birth, m.birth, c * sizeof(std::uint32_t), cudaMemcpyDeviceToDevice, st));
     if (t.food) CF_CUDA(cudaMemcpyAsync(t.food, m.food[m.cur], c * sizeof(float), cudaMemcpyDeviceToDevice, st));
-    if (t.normal) CF_CUDA(cudaMemcpyAsync(t.normal, m.normal[m.cur], c * sizeof(Vec3), cudaMemcpyDeviceToDevice, st));
-    if (t.extra && t.extraKind != RenderScalar::None)
-        k_render_scalar<<<gb, kBlock, 0, st>>>(static_cast<int>(t.extraKind), m.gen, m.pos[m.cur], m.normal[m.cur], m.nbr, m.deg,
-                                               m.morphPresent ? m.morphB[m.cur] : nullptr, m.params.linkRestLength, static_cast<float*>(t.extra), n);
+    if (t.normal || t.extra)
+        k_render_cells<<<gb, kBlock, 0, st>>>(m.gen, m.pos[m.cur], m.normal[m.cur], m.nbr, m.deg, m.morphPresent ? m.morphB[m.cur] : nullptr,
+                                              m.params.linkRestLength, normal_eps2(m.params.linkRestLength), static_cast<Vec3*>(t.normal),
+                                              static_cast<Vec3*>(t.extra), n);
     std::uint32_t* counts = m.idBlock;  // the id buffers of the grid are free between steps
     std::uint32_t* offsets = m.idBlock + m.capacity;
     const bool triangles = t.index != nullptr && t.maxIndices >= 3u && n >= 3u;

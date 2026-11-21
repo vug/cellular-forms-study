@@ -19,12 +19,10 @@ namespace cfv {
 std::vector<std::uint8_t> renderOffscreen(Context& ctx, const PointBuffers& points, const OrbitCamera& camera,
                                           const RenderSettings& settings, Vec3 sceneCentre, float sceneRadius, float currentStep,
                                           int width, int height, int ssaa) {
-    ssaa = std::clamp(ssaa, 1, 4);
-    const VkExtent2D extent{static_cast<uint32_t>(width * ssaa), static_cast<uint32_t>(height * ssaa)};
+    const VkExtent2D extent{static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
     const VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
 
     Renderer renderer(ctx, format);
-    renderer.resize(extent);
     // The second eye of a stereo capture has a renderer of its own.
     std::unique_ptr<Renderer> second;
     if (settings.stereoMode != 0) second = std::make_unique<Renderer>(ctx, format);
@@ -34,33 +32,28 @@ std::vector<std::uint8_t> renderOffscreen(Context& ctx, const PointBuffers& poin
     Buffer readback = ctx.createBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
 
-    // Supersampling shrinks every pixel, so scale what is measured in pixels with it.
+    // Supersampling: the renderer draws at a multiple of the size and scales down in its last pass.
     RenderSettings s = settings;
-    s.minPixelRadius = settings.minPixelRadius * static_cast<float>(ssaa);
-    s.wallWidth = settings.wallWidth * static_cast<float>(ssaa);
-    s.outlineWidth = settings.outlineWidth * static_cast<float>(ssaa);
+    s.renderScale = std::clamp(settings.renderScale * static_cast<float>(std::clamp(ssaa, 1, 4)), 0.25f, 4.0f);
     auto draw = [&](VkCommandBuffer cmd) {
+        transition(cmd, target.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                   VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
         renderView(cmd, target.view, extent, renderer, second.get(), points, camera, s, sceneCentre, sceneRadius, currentStep, 0, {});
     };
 
-    // The path tracer refines its image frame by frame: render until it has all its samples.
-    if (s.drawMode >= kDrawPathTraced && renderer.rayTracing()) {
+    // The image builds up over frames: the samples of the path tracer, or in the raster modes
+    // frames drawn a fraction of a pixel apart with fresh noise. Render them all.
+    int frames = 1;
+    if ((s.drawMode == kDrawPathTraced || s.drawMode == kDrawMembranePathTraced) && renderer.rayTracing()) {
         const int perFrame = std::clamp(s.ptSamplesPerFrame, 1, 64);
-        const int frames = (std::max(s.ptMaxSamples, 1) + perFrame - 1) / perFrame;
-        for (int i = 0; i + 1 < frames; ++i) {
-            ctx.immediate([&](VkCommandBuffer cmd) {
-                transition(cmd, target.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
-                           VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
-                           VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-                draw(cmd);
-            });
-        }
+        frames = (std::max(s.ptMaxSamples, 1) + perFrame - 1) / perFrame;
+    } else if (s.aaAccumulate) {
+        frames = std::clamp(s.aaFrames, 1, 4096);
     }
+    for (int i = 0; i + 1 < frames; ++i) ctx.immediate(draw);
 
     ctx.immediate([&](VkCommandBuffer cmd) {
-        transition(cmd, target.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
-                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
-                   VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
         draw(cmd);
         transition(cmd, target.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -73,25 +66,7 @@ std::vector<std::uint8_t> renderOffscreen(Context& ctx, const PointBuffers& poin
 
     if (renderer.environmentFailed()) std::fprintf(stderr, "note: %s\n", renderer.environmentStatus().c_str());
     std::vector<std::uint8_t> out(static_cast<size_t>(width) * height * 4);
-    const auto* src = static_cast<const std::uint8_t*>(readback.mapped);
-    if (ssaa == 1) {
-        std::memcpy(out.data(), src, out.size());
-    } else {
-        const int n = ssaa * ssaa;
-        for (int y = 0; y < height; ++y) {
-            for (int x = 0; x < width; ++x) {
-                unsigned sum[4] = {0, 0, 0, 0};
-                for (int sy = 0; sy < ssaa; ++sy) {
-                    const std::uint8_t* row = src + (static_cast<size_t>(y * ssaa + sy) * extent.width + static_cast<size_t>(x * ssaa)) * 4;
-                    for (int sx = 0; sx < ssaa; ++sx)
-                        for (int c = 0; c < 4; ++c) sum[c] += row[sx * 4 + c];
-                }
-                std::uint8_t* dst = out.data() + (static_cast<size_t>(y) * width + x) * 4;
-                for (int c = 0; c < 4; ++c) dst[c] = static_cast<std::uint8_t>((sum[c] + n / 2) / n);
-            }
-        }
-    }
-
+    std::memcpy(out.data(), readback.mapped, out.size());
     ctx.destroy(readback);
     ctx.destroy(target);
     return out;

@@ -35,10 +35,10 @@ struct Cloud {
     float agePercentile90 = 1.0f;        // 90% of the cells are younger than this (steps)
 
     std::uint32_t count() const { return static_cast<std::uint32_t>(pos.size()); }
-    // The values of an extra scalar (1 generation, 2 curvature, 3 activator), or null.
-    const std::vector<float>* extra(int kind) const {
-        const std::vector<float>* v = kind == 1 ? &generation : kind == 2 ? &curvature : kind == 3 ? &activator : nullptr;
-        return v != nullptr && v->size() == pos.size() && !pos.empty() ? v : nullptr;
+    // Which of the extra values the cloud has: bit 0 generation, 1 curvature, 2 activator.
+    int extraMask() const {
+        const std::size_t n = pos.size();
+        return n == 0 ? 0 : (generation.size() == n ? 1 : 0) | (curvature.size() == n ? 2 : 0) | (activator.size() == n ? 4 : 0);
     }
     void finalize();
 };
@@ -62,16 +62,13 @@ public:
     CloudGpu(const CloudGpu&) = delete;
     CloudGpu& operator=(const CloudGpu&) = delete;
 
-    // Uploads the cloud, with one extra scalar (see Cloud::extra) when the cloud has it. No frame
-    // may be using the buffers (they can be reallocated).
-    void upload(const Cloud& cloud, int extraKind = 0);
-    // Replaces only the extra scalar, when the colour mode changes.
-    void setExtra(const Cloud& cloud, int extraKind);
-    int extraKind() const { return extraKind_; }
+    // Uploads the cloud, with its extra values (generation, curvature, activator; zero where
+    // the cloud has none). No frame may be using the buffers (they can be reallocated).
+    void upload(const Cloud& cloud);
     PointBuffers buffers() const {
         PointBuffers b{pos_.buffer, birth_.buffer, food_.buffer, count_, normal_.buffer, index_.buffer, indexCount_};
         b.extra = extra_.buffer;
-        b.extraKind = extra_.buffer ? extraKind_ : 0;
+        b.extraMask = extraMask_;
         b.version = version_;
         return b;
     }
@@ -82,7 +79,8 @@ private:
     std::uint32_t capacity_ = 0;
     std::uint32_t count_ = 0;
     std::uint32_t indexCount_ = 0;
-    int extraKind_ = 0;
+    int extraMask_ = 0;
+    std::vector<cf::Vec3> packed_;  // the extra values of the last upload, three per cell
     std::uint64_t version_ = 0;
 };
 
@@ -99,7 +97,8 @@ inline VkBufferUsageFlags cellBufferUsage(const Context& ctx, bool index = false
     return usage;
 }
 
-// Sets the scalar range of `settings` for its colour mode from the cloud (when autoRange is on).
+// Sets the ranges of the cell properties in `settings`, and the range of its colour mode, from
+// the cloud (when autoRange is on).
 void applyAutoRange(RenderSettings& settings, const Cloud& cloud);
 
 }  // namespace cfv

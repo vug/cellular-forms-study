@@ -80,10 +80,11 @@ public:
     void setStepsPerSecondLimit(double limit);  // 0 = as fast as possible
     LiveStatus status() const;
 
-    // --- render thread. What the simulation publishes besides positions, birth steps and food:
-    // one more per-cell scalar (0 none, 1 generation, 2 curvature, 3 morphogen activator) and
-    // the membrane (normals and triangles). A change is published at once, also while paused.
-    void setRenderNeeds(int extraKind, bool mesh, bool lightMap = false);
+    // --- render thread. What the simulation publishes besides positions, birth steps, food
+    // and the three extra values per cell (generation, curvature, morphogen activator): the
+    // membrane (normals and triangles) and the shadow map of the food light. A change is
+    // published at once, also while paused.
+    void setRenderNeeds(bool mesh, bool lightMap = false);
 
     // --- render thread. Call with no frame in flight: switches to the newest published frame,
     // if there is one, and returns what to draw.
@@ -109,11 +110,11 @@ private:
         std::vector<cf::Vec3> hostPos;
         std::vector<std::uint32_t> hostBirth;
         std::vector<float> hostFood;
-        std::vector<float> hostExtra;
+        std::vector<float> hostGeneration, hostCurvature, hostActivator;
         std::vector<cf::Vec3> hostNormal;
         std::vector<std::uint32_t> hostIndex;
         std::uint32_t count = 0;
-        int extraKind = 0;             // what `extra` holds in this frame (0: nothing)
+        int extraMask = 0;             // which extra values this frame has (bit 0 generation, 1 curvature, 2 activator)
         bool hasMesh = false;          // normals and triangles were published with this frame
         std::uint32_t indexCount = 0;
         std::uint64_t version = 0;     // PointBuffers::version of this frame
@@ -141,7 +142,6 @@ private:
     int front_ = 0, ready_ = 1, back_ = 2;
     bool readyFresh_ = false;
     std::unique_ptr<CloudGpu> frontGpu_;  // CPU backend: device copy of the front slot
-    std::atomic<int> wantExtra_{0};
     std::atomic<bool> wantMesh_{false};
     std::atomic<bool> meshReady_{false};  // the shared membrane buffers exist
     std::atomic<bool> wantLightMap_{false};

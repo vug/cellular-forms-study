@@ -8,6 +8,8 @@
 #include "app.hpp"
 #include "core/params.hpp"
 #include "cloud.hpp"
+#include "environment.hpp"
+#include "materials.hpp"
 #include "state_file.hpp"
 
 namespace {
@@ -37,19 +39,24 @@ void usage() {
         "                         or a list such as 3,10,-1 (negative counts from the end)\n"
         "  --sheet [--sheet-columns <n>]  tile the captured frames into one PNG\n"
         "  --size <W>x<H>         image or window size (default 1600x1000)\n"
-        "  --ssaa <1..4>          supersampling for captures (default 2)\n"
+        "  --ssaa <1..4>          supersampling for captures (default 2); a capture also averages\n"
+        "                         aaFrames frames drawn a fraction of a pixel apart (see --set)\n"
         "\n"
         "Look:\n"
-        "  --mode <cells|xray|mesh|sss|path>  spheres (default), additive x-ray, the membrane mesh, the membrane\n"
-        "                         with subsurface scattering (these two need a state with its rings: a\n"
-        "                         checkpoint file or a live run), or path traced spheres (needs ray tracing)\n"
+        "  --mode <cells|xray|mesh|path|pathmesh>  spheres (default), additive x-ray, the membrane (needs a\n"
+        "                         state with its rings: a checkpoint file or a live run), or either of the\n"
+        "                         two path traced (needs ray tracing); sss = the membrane as skin\n"
+        "  --material <name>      a material from the library, with its colour (--list-materials prints them;\n"
+        "                         --set materialOnly=<name> keeps the colours of the cells)\n"
         "  --xray-density <x>     brightness of the x-ray mode (default 0.06)\n"
         "  --color <age|food|birth|uniform|generation|curvature|activator>\n"
         "                         curvature needs a state with its rings, activator one with morphogens\n"
-        "  --env <image>          light the form with an environment map (.hdr, .png, .jpg; equirectangular);\n"
+        "  --env <image>          light the form with an environment map (.hdr, .png, .jpg; equirectangular):\n"
+        "                         a file, or the name of one in assets/hdri (--list-environments);\n"
         "                         --set envLight=on alone uses the built-in studio\n"
-        "  --set name=value       any render setting (repeatable): light, shadows, occlusion, cell walls,\n"
-        "                         outlines, path tracer, tone mapping, ...;  --list-settings prints the names\n"
+        "  --set name=value       any render setting (repeatable): material, glow, lens, anti-aliasing, bloom,\n"
+        "                         light, shadows, occlusion, cell walls, outlines, path tracer, tone mapping, ...;\n"
+        "                         --list-settings prints the names\n"
         "  --yaw <deg> --pitch <deg> --zoom <factor>\n"
         "  --radius <r>           cell radius in world units (default 0.55)\n"
         "  --no-ao                turn ambient occlusion off\n"
@@ -130,6 +137,15 @@ int main(int argc, char** argv) {
             } else if (a == "--list-settings") {
                 for (const std::string& n : cfv::renderSettingNames()) std::printf("%s%s", n.c_str(), "\n");
                 return 0;
+            } else if (a == "--material") {
+                const std::string v = next();
+                if (!cfv::setRenderSetting(o.settings, "material", v).empty()) throw std::runtime_error("unknown material " + v + " (see --list-materials)");
+            } else if (a == "--list-materials") {
+                for (const cfv::Material& m : cfv::materials()) std::printf("%-16s %s%s", m.name, m.note, "\n");
+                return 0;
+            } else if (a == "--list-environments") {
+                for (const std::string& n : cfv::listEnvironments()) std::printf("%s%s", n.c_str(), "\n");
+                return 0;
             } else if (a == "--yaw") {
                 o.yawDeg = static_cast<float>(std::atof(next()));
             } else if (a == "--pitch") {
@@ -140,7 +156,7 @@ int main(int argc, char** argv) {
                 o.settings.sphereRadius = static_cast<float>(std::atof(next()));
             } else if (a == "--mode") {
                 const std::string v = next();
-                if (!cfv::setRenderSetting(o.settings, "drawMode", v).empty()) throw std::runtime_error("--mode expects cells, xray, mesh, sss or path");
+                if (!cfv::setRenderSetting(o.settings, "drawMode", v).empty()) throw std::runtime_error("--mode expects cells, xray, mesh, path, pathmesh or sss");
             } else if (a == "--env") {
                 // An image of the surroundings to light the form with (see --set envLight, envBackground).
                 o.settings.envFile = next();

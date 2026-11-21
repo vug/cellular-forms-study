@@ -9,10 +9,12 @@ layout(location = 2) flat in float vRadius;
 layout(location = 3) flat in float vPixelRadius;
 layout(location = 4) flat in float vScalar;
 layout(location = 5) flat in uint vId;
+layout(location = 6) flat in vec4 vMaterial;
 
-layout(location = 0) out vec4 outAlbedo;       // rgb colour
+layout(location = 0) out vec4 outAlbedo;       // rgb colour, a = cell wall coverage (which only the membrane knows)
 layout(location = 1) out vec4 outNormalDepth;  // view-space normal (xyz), linear view depth (w > 0)
 layout(location = 2) out uint outId;           // cell index + 1
+layout(location = 3) out vec4 outMaterial;     // emission, roughness, subsurface, translucency
 
 // The sphere surface is never behind the quad (the quad passes through the centre), so the
 // depth we write is <= the rasterised depth and early depth testing stays valid.
@@ -39,7 +41,8 @@ void main() {
     vec4 clip = F.proj * vec4(hit, 1.0);
     gl_FragDepth = clip.z / clip.w;
 
-    outAlbedo = vec4(cellAlbedo(vScalar), 0.0);  // a: cell wall coverage, which only the membrane knows
+    outAlbedo = vec4(cellAlbedo(vScalar), 0.0);
     outNormalDepth = vec4(normal, -hit.z);
     outId = vId;
+    outMaterial = vMaterial;
 }

@@ -13,7 +13,7 @@ Newest entries at the bottom. Times are local (America/New_York).
 
 | Milestone | State | Verified how |
 | --- | --- | --- |
-| M1 CPU reference + CLI | exit criteria observed with GCC in the sandbox (cloud session, 00:20); MSVC run on the PC pending | 100,033 cells, 69 invariant checks ok, checksum identical on 4 reruns incl. 1 thread and a 5-part resume; 28/28 tests |
+| M1 CPU reference + CLI | exit criteria observed: GCC 11.4 in the sandbox (cloud session, 00:20), MSVC on the PC (local session, 00:40), GCC 13.3 and Clang 18.1 (cloud session, 00:55) | 100,033 cells under uniform food, 0 invariant failures at every check, checksum `12cfc7e0294813a9` on every rerun on all four compilers and on the GPU; 31/31 tests. Open point: self-intersection above about 500k cells with the default food rate (00:45 entry) |
 | M2 Snapshot viewer (Vulkan 1.4) | exit criteria observed (local session, 00:25) | timed scrub of a 100k-cell run, headless captures, validation layer clean; mouse interaction not tried by hand |
 | M3 CUDA backend | exit criteria observed (local session, 00:40) | bit-identical to the CPU reference at every snapshot of a 100k run and in 9 tests; 100M-cell benchmark with 21 invariant checks ok. Open point: the default growth rate compresses the sheet above about 500k cells (see the M3 entry) |
 | M4 Live viewer | exit criteria observed (local session, 00:40) | scripted run: parameters changed mid-run, pause, single steps, reset; no frame over 15 ms, 0 validation errors, CUDA and CPU backends. Not tried by hand |
@@ -637,3 +637,54 @@ What I am doing meanwhile, all inside the original assignment:
   agreement, which is stronger; the tool is for when a fast, non-deterministic mode exists.
 - `cf::is_finite`: I will switch it to the `fabsf(x) <= FLT_MAX` form you found, so device code
   can share it.
+
+## 2026-11-21 00:55 · Cloud session: M1 wrap-up
+
+Commit `676a851`. M1 is done from this side; this is the state it is left in.
+
+**Added since 00:45**
+
+- `cf_run --new ellipsoid:<level>:<ax>:<ay>:<az>` and `--new noisy:<level>:<amplitude>:<frequency>`
+  (`make_ellipsoid`, `make_noisy_sphere` in `topology.*`): the "other genus-0 shapes" of M1 in
+  design.md. Same mesh as the icosphere, different positions, rescaled to the rest length.
+  Observed: under uniform food the start shape washes out. A 3:1:1 ellipsoid and a lumpy
+  sphere are both folded balls by 8k cells (image below); 60k cells, 0 piercings, checker ok.
+- `cf::is_finite` uses `|x| <= FLT_MAX` (local session's finding), so device code can share it.
+  The golden checksum did not change.
+
+**Verified at `676a851`**
+
+| Compiler / machine | Build | `cf_tests` | Oracle vs Python | Exit run checksum |
+| --- | --- | --- | --- | --- |
+| GCC 11.4, sandbox VM on the PC (GNU make) | no warnings | 31 of 31 | pass | `12cfc7e0294813a9` |
+| GCC 13.3, cloud workspace (CMake 3.28 + Ninja) | no warnings | 31 of 31 | pass | `12cfc7e0294813a9` |
+| Clang 18.1, cloud workspace (CMake 3.28 + Ninja) | no warnings | 31 of 31 | pass | `12cfc7e0294813a9` |
+| MSVC 19.51 on the PC | local session ran 30 of 30 at an earlier commit and the exit run (`12cfc7e0294813a9`); not rerun by anyone at `676a851` | | | |
+
+The exit run at 100,033 cells has 0 link-through-triangle piercings (`--intersections`).
+
+**What was not compared any more:** I did not write `compare_runs.py`. The CUDA backend
+agrees with the CPU bit for bit, so a statistical comparison has nothing left to do until a
+non-deterministic fast mode exists. I also did not run the slower-food / stronger-repulsion
+continuations: the local session measured the slower food rate on the GPU in seconds
+(00:40 entry, mean link 1.02 at 4M cells with `foodMax=0.0005`), which a 2-core sandbox would
+have taken most of an hour to reproduce.
+
+**Open, for Uğur**
+
+- **Growth rate at scale** (both sessions found it independently): with the default food rate
+  the form is healthy to a few hundred thousand cells; at 1M it has 179 piercings and at 65M
+  links are squeezed to 0.57. A quarter of the food rate is healthy to at least 4M. Large
+  forms need growth that slows as they grow; which rule to use is a modelling decision.
+  One thing still worth measuring on the GPU: piercing counts for the slow-food run
+  (`cf::self_intersections` on a downloaded state, or `cf_run --intersections`).
+- **Geometric tie-break and roi = 2.0** are deviations from model.md's starting point
+  (decisions 11 and 12, 00:20 entry). They are what make the default run fold with links near
+  rest length; say so if you would rather have the hashed tie-break back as an option.
+- **M5 to M8**: not started by this session (00:50 entry); waiting for a yes from Uğur.
+- No true self-intersection test runs during a simulation; it is a diagnostic on snapshots.
+- `tests/oracle_compare.py` is not wired into CTest (CMake is the local session's file):
+  `python tests/oracle_compare.py <path to cf_oracle>`.
+- `scripts/sandbox.mk` only matters for a machine without CMake.
+
+![other starts](img/m1_other_starts.png)

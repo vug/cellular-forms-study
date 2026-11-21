@@ -27,6 +27,9 @@ struct CudaOptions {
     double maxFractionOfFreeMemory = 0.92;
     // Speed-ups that do not change the result; the switches exist so tests can hold them to that.
     bool rowTable = true;  // per-row index of the grid instead of searching the whole sorted array
+    // Small forms: build the grid, pick the dividing cells and take the bounds with a few simple
+    // kernels instead of the general library sort, selection and reduction (fewer kernels per step).
+    bool leanPipeline = true;
     // Renumbering: from time to time the backend moves its cells into spatial order in memory
     // (cells keep their ids, so results do not change; see sim_cuda.cu). It happens when the
     // form has at least renumberMinCells cells and has grown by renumberGrowth since the last
@@ -36,8 +39,9 @@ struct CudaOptions {
     std::uint32_t renumberMaxSteps = 512u;
     // Batches: run() queues up to maxBatch steps on the device before it looks at the results
     // (see sim_cuda.cu, "Batches of steps"). The number is chosen so that a batch takes about
-    // batchMilliseconds, so large forms still run one step at a time. maxBatch = 1 switches it
-    // off. The result does not depend on either value.
+    // batchMilliseconds, and only forms of up to 262,144 cells are batched: larger forms run
+    // one step at a time, as before. maxBatch = 1 switches it off. The result does not depend
+    // on either value.
     std::uint32_t maxBatch = 64u;
     double batchMilliseconds = 8.0;
 };
@@ -46,6 +50,7 @@ struct CudaOptions {
 struct CudaBatchStats {
     std::uint64_t batches = 0;       // round trips to the device
     std::uint64_t steps = 0;         // steps applied
+    std::uint64_t leanSteps = 0;     // of those, steps that ran on the lean pipeline for small forms
     std::uint64_t outOfRoom = 0;     // batches cut short: the form outgrew the room reserved for the batch
     std::uint64_t gridOutgrown = 0;  // batches cut short: the bounding box outgrew the grid planned for the batch
     std::uint64_t repeated = 0;      // steps run a second time, alone, to report why they were not applied

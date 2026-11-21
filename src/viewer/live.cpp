@@ -328,9 +328,11 @@ void LiveSim::threadMain() {
             }
         }
 
+        std::uint64_t requested = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             doStep = (running_ || stepsRequested_ > 0) && !status_.failed && !status_.capacityReached;
+            requested = static_cast<std::uint64_t>(stepsRequested_ > 0 ? stepsRequested_ : 0);
         }
         if (doStep) {
             if (limit > 0.0) {
@@ -339,29 +341,46 @@ void LiveSim::threadMain() {
             }
             const auto t0 = SteadyClock::now();
             cf::StepReport r;
+            std::uint64_t applied = 0, clamped = 0;
+            std::uint32_t lastDivisions = 0;
             try {
-                r = sim_->step();
+                // A small form takes many steps per call (the CUDA backend runs them in one round
+                // trip to the GPU); a few milliseconds per call keep the frames coming. A step
+                // rate limit and a count of requested steps are kept exactly.
+                cf::RunLimits lim;
+                lim.maxSteps = limit > 0.0 ? 1 : (requested > 0 ? requested : ~std::uint64_t{0});
+                lim.maxSeconds = 0.004;
+                applied = sim_->run(lim, [&](const cf::StepReport& each) {
+                    r = each;
+                    if (each.ok()) {
+                        lastDivisions = each.divisions;
+                        clamped += each.clamped;
+                    }
+                });
             } catch (const std::exception& e) {
                 r.status = cf::StepStatus::Failed;
                 r.message = e.what();
             }
             const auto t1 = SteadyClock::now();
-            const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            const double stepsDone = applied > 0 ? static_cast<double>(applied) : 1.0;
+            const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count() / stepsDone;
             const double gap = std::chrono::duration<double>(t1 - lastStep).count();
             lastStep = t1;
             emaMs = emaMs == 0.0 ? ms : emaMs * 0.95 + ms * 0.05;
-            if (gap > 0.0) emaRate = emaRate == 0.0 ? 1.0 / gap : emaRate * 0.95 + (1.0 / gap) * 0.05;
+            if (gap > 0.0) emaRate = emaRate == 0.0 ? stepsDone / gap : emaRate * 0.95 + (stepsDone / gap) * 0.05;
 
             std::lock_guard<std::mutex> lock(mutex_);
             status_.step = sim_->step_count();
             status_.cells = sim_->cell_count();
             status_.msPerStep = emaMs;
             status_.stepsPerSecond = emaRate;
-            if (r.ok()) {
-                status_.lastDivisions = r.divisions;
-                status_.clampedTotal += r.clamped;
-                if (stepsRequested_ > 0) --stepsRequested_;
-            } else {
+            if (applied > 0) {
+                status_.lastDivisions = lastDivisions;
+                status_.clampedTotal += clamped;
+                const int taken = static_cast<int>(applied < requested ? applied : requested);
+                stepsRequested_ = stepsRequested_ > taken ? stepsRequested_ - taken : 0;
+            }
+            if (!r.ok()) {
                 status_.capacityReached = r.status == cf::StepStatus::CapacityReached;
                 status_.failed = r.status == cf::StepStatus::Failed;
                 status_.message = r.message;

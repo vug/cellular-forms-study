@@ -93,7 +93,8 @@ cf::State reorder(const cf::State& s, const std::string& order) {
 int main(int argc, char** argv) {
     std::string path, order = "none";
     int steps = 200, warmup = 20;
-    bool phases = true, rowTable = true;
+    bool phases = true, rowTable = true, lean = true;
+    std::uint32_t maxBatch = 1;  // 1: one step per round trip, as the phase timing needs; more: Simulation::run in batches
     const cf::CudaOptions defaults;
     std::uint32_t renumberMin = defaults.renumberMinCells, renumberMaxSteps = defaults.renumberMaxSteps;
     double renumberGrowth = defaults.renumberGrowth;
@@ -110,6 +111,8 @@ int main(int argc, char** argv) {
         else if (a == "--param") overrides.push_back(next());
         else if (a == "--no-phases") phases = false;
         else if (a == "--no-row-table") rowTable = false;
+        else if (a == "--no-lean") lean = false;
+        else if (a == "--max-batch") maxBatch = static_cast<std::uint32_t>(std::atoi(next().c_str()));
         else if (a == "--no-renumber") renumberMin = 0xFFFFFFFFu;
         else if (a == "--renumber-growth") renumberGrowth = std::atof(next().c_str());
         else if (a == "--renumber-max-steps") renumberMaxSteps = static_cast<std::uint32_t>(std::atoi(next().c_str()));
@@ -131,6 +134,8 @@ int main(int argc, char** argv) {
         const double grow = std::pow(2.0, 1.15 * doublings) + 0.05;
         cf::CudaOptions options;
         options.rowTable = rowTable;
+        options.leanPipeline = lean;
+        options.maxBatch = maxBatch < 1u ? 1u : maxBatch;
         options.renumberMinCells = renumberMin;
         options.renumberGrowth = renumberGrowth;
         options.renumberMaxSteps = renumberMaxSteps;
@@ -150,11 +155,23 @@ int main(int argc, char** argv) {
             sim.enable_phase_timing(pass == 1);
             cf::State tmp;
             const auto t0 = Clock::now();
-            for (int k = 0; k < steps; ++k) {
-                const cf::StepReport r = sim.step();
-                if (!r.ok()) die("step failed: " + r.message);
-                clamped += r.clamped;
-                divisions += r.divisions;
+            if (maxBatch > 1u && pass == 0) {
+                cf::RunLimits lim;
+                lim.maxSteps = static_cast<std::uint64_t>(steps);
+                cf::StepReport last;
+                sim.run(lim, [&](const cf::StepReport& r) {
+                    last = r;
+                    clamped += r.clamped;
+                    divisions += r.divisions;
+                });
+                if (!last.ok()) die("step failed: " + last.message);
+            } else {
+                for (int k = 0; k < steps; ++k) {
+                    const cf::StepReport r = sim.step();
+                    if (!r.ok()) die("step failed: " + r.message);
+                    clamped += r.clamped;
+                    divisions += r.divisions;
+                }
             }
             cf::Vec3 lo, hi;
             sim.bounds(lo, hi);

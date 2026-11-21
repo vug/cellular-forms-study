@@ -157,6 +157,10 @@ def quality(desc, summary):
 
 
 def tool(name):
+    # CF_BIN_DIR: take a tool from another build when it is there (to compare two builds).
+    other = os.environ.get("CF_BIN_DIR")
+    if other and os.path.exists(os.path.join(other, name + ".exe")):
+        return os.path.join(other, name + ".exe")
     path = os.path.join(REPO, "build", "release", "bin", name + ".exe")
     if not os.path.exists(path):
         path = os.path.join(REPO, "build", "release", "bin", name)

@@ -127,8 +127,23 @@ struct StepOut {
     std::uint32_t cells;  // cells after the step, when it was applied
 };
 
+// Bounds gathered with atomics by the lean pipeline: order-preserving bits of the floats
+// (core/food.hpp ordered_bits), so integer minima and maxima are float minima and maxima.
+struct BoxAcc {
+    std::int32_t lo[3], hi[3];
+    std::uint32_t bad;  // lowest cell id with a non-finite position, or kInvalid
+};
+__host__ __device__ inline BoxAcc empty_box_acc() {
+    BoxAcc a;
+    a.lo[0] = a.lo[1] = a.lo[2] = INT32_MAX;
+    a.hi[0] = a.hi[1] = a.hi[2] = INT32_MIN;
+    a.bad = kInvalid;
+    return a;
+}
+
 struct BatchOut {
     Ctl ctl;
+    BoxAcc acc;
     StepOut steps[kMaxBatch];
 };
 
@@ -215,7 +230,10 @@ __global__ void k_shadow_build(const Ctl* ctl, FoodParams fp, const Vec3* pos, s
 }
 
 // First kernel of a batch: the device's copy of the cell count and the grid.
-__global__ void k_begin(Ctl* ctl, Ctl value) { *ctl = value; }
+__global__ void k_begin(BatchOut* out, Ctl value) {
+    out->ctl = value;
+    out->acc = empty_box_acc();
+}
 
 // Grid keys, listed in cell-id order (the stable sort then keeps cells with equal keys in id
 // order, which the model's summation order asks for), each with the slot the cell lives in.
@@ -272,11 +290,19 @@ __global__ void k_gather_rows(const Ctl* ctl, const Vec3* pos, const std::uint32
 // Normal, move and clamp of every cell (Jacobi: reads the old positions, writes the new buffers).
 // The normal is computed here and not in a pass of its own because both need the positions of
 // the cell's ring: one pass fetches them once.
+// Two variants. In a batch (FromDevice) the cell count and the grid's origin and size are read
+// on the device. A single step gets them from the host as kernel arguments, complete in `grid`
+// and `hostCells`: arguments cost no registers in the neighbour search, values read from memory
+// do, and that made this kernel 16% slower at ten million cells.
+template <bool FromDevice>
 __global__ void k_move(const Ctl* ctl, const Vec3* pos, const Vec3* prevNrm, Vec3* nrmOut, const std::uint32_t* nbr, const std::uint8_t* deg,
-                       const std::uint32_t* uid, Vec3* out, GridView grid, KernelParams kp, FoodParams fp, float eps2,
+                       const std::uint32_t* uid, Vec3* out, GridView grid, std::uint32_t hostCells, KernelParams kp, FoodParams fp, float eps2,
                        MorphParams mp, const float* morphB, Counters* c) {
-    const std::uint32_t n = live_cells(ctl);
-    grid = live_grid(ctl, grid);
+    std::uint32_t n = hostCells;
+    if (FromDevice) {
+        n = live_cells(ctl);
+        grid = live_grid(ctl, grid);
+    }
     // The two counters are summed per block first: when most cells hit the displacement cap,
     // one atomic per cell on a single address is a bottleneck.
     __shared__ std::uint32_t blockClamped, blockFallbacks;
@@ -338,9 +364,10 @@ __global__ void k_diagnose(const Ctl* ctl, const Vec3* pos, const Vec3* nrm, con
 // are drawn by cell id (uid), not by the slot the cell happens to live in.
 __global__ void k_food_candidates(const Ctl* ctl, TopoView s, FoodParams fp, const float* oldFood, const Vec3* oldPos, const std::int32_t* shadow,
                                   const float* morphB, const std::uint32_t* uid, float threshold, std::uint64_t* prio, std::uint8_t* pair, std::uint8_t* winById,
-                                  std::uint32_t launch, std::uint64_t seed, std::uint64_t step, Orientation orient, Counters* c) {
+                                  std::uint32_t* perRun, std::uint32_t launch, std::uint64_t seed, std::uint64_t step, Orientation orient, Counters* c) {
     const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
     if (ctl->end != kRunning || v >= launch) return;
+    if (perRun != nullptr && (v & 255u) == 0u) perRun[v >> 8] = 0;  // lean pipeline: winners per run of 256 ids
     // Every entry of the flag array the selection will read is cleared by some thread (the ones
     // past the cell count too); k_winners sets the winners.
     winById[v] = 0;
@@ -410,8 +437,8 @@ __global__ void k_split(const Ctl* ctl, TopoView s, const std::uint32_t* winners
 // Last kernel of a step, one thread: does the step stand? If it does, the device's cell count
 // and grid move on to the new state, so the next step of the batch can run without the host.
 // If it does not, or the host is needed before the next step, the batch ends here.
-__global__ void k_commit(Ctl* ctl, StepOut* out, std::uint32_t limit, std::uint32_t room, std::uint32_t stopCells, float invCell,
-                         std::uint32_t maxNx, std::uint32_t maxNy, std::uint32_t maxNz) {
+__device__ inline void commit_step(Ctl* ctl, StepOut* out, std::uint32_t limit, std::uint32_t room, std::uint32_t stopCells, float invCell,
+                                   std::uint32_t maxNx, std::uint32_t maxNy, std::uint32_t maxNz) {
     if (ctl->end != kRunning) return;
     const std::uint64_t after = static_cast<std::uint64_t>(ctl->n) + static_cast<std::uint32_t>(out->c.winners);
     if (out->c.firstBadMove != kInvalid) {
@@ -441,6 +468,212 @@ __global__ void k_commit(Ctl* ctl, StepOut* out, std::uint32_t limit, std::uint3
     ctl->nz = nz;
     if (after >= stopCells) ctl->end = kEndCells;
 }
+__global__ void k_commit(Ctl* ctl, StepOut* out, std::uint32_t limit, std::uint32_t room, std::uint32_t stopCells, float invCell,
+                         std::uint32_t maxNx, std::uint32_t maxNy, std::uint32_t maxNz) {
+    commit_step(ctl, out, limit, room, stopCells, invCell, maxNx, maxNy, maxNz);
+}
+
+// ---- The lean pipeline, for small forms.
+// A small form is limited by the number of kernels in a step, not by their work (each costs
+// about as much as the whole step's arithmetic). The library sort, selection and reduction are
+// general and take ten kernels between them; the kernels below do the same three jobs in four,
+// in ways that only pay while the form is small. They give exactly the same sorted arrays, the
+// same daughters and the same bounds, so the rest of the step cannot tell which pipeline ran:
+//   grid:      a counting sort by grid row (k_s_keys counts, k_s_rows sums, k_s_scatter drops
+//              every cell into its row, k_s_place orders the row), instead of a radix sort;
+//   selection: every winner finds its own rank among the winners (k_s_winners, k_s_split),
+//              instead of a compacted list;
+//   bounds:    atomic minima and maxima kept while the cells are visited anyway.
+
+// Row table and scratch of the counting sort: per grid row (y, z), where its cells start and
+// end in the sorted arrays, a cursor for the scatter, and the number of its cells.
+struct RowWork {
+    std::uint32_t* begin;
+    std::uint32_t* end;
+    std::uint32_t* cursor;
+    std::uint32_t* count;  // zero outside k_s_keys .. k_s_place
+};
+
+constexpr unsigned kScanThreads = 1024;
+// The lean pipeline runs while the form has at most this many cells and its grid this many rows.
+constexpr std::uint32_t kLeanCells = 262144;
+constexpr std::uint32_t kLeanRows = 262144;
+// Several steps are queued per round trip while the form has at most this many cells.
+constexpr std::uint32_t kBatchCells = 262144;
+
+__device__ inline void box_add(BoxAcc* acc, Vec3 p, std::uint32_t id) {
+    if (!dev_finite(p)) {
+        atomicMin(&acc->bad, id);
+        return;
+    }
+    // Most cells are inside the bounds found so far: look first, and only then pay for an atomic.
+    const std::int32_t x = ordered_bits(p.x), y = ordered_bits(p.y), z = ordered_bits(p.z);
+    if (x < acc->lo[0]) atomicMin(&acc->lo[0], x);
+    if (y < acc->lo[1]) atomicMin(&acc->lo[1], y);
+    if (z < acc->lo[2]) atomicMin(&acc->lo[2], z);
+    if (x > acc->hi[0]) atomicMax(&acc->hi[0], x);
+    if (y > acc->hi[1]) atomicMax(&acc->hi[1], y);
+    if (z > acc->hi[2]) atomicMax(&acc->hi[2], z);
+}
+
+// Grid keys by cell id, as k_keys, and the number of cells in every grid row.
+__global__ void k_s_keys(const Ctl* ctl, const Vec3* pos, const std::uint32_t* slotOf, std::uint64_t* key, float inv, std::uint32_t* rowCount,
+                         Counters* c) {
+    const std::uint32_t u = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ctl->end != kRunning) return;
+    if (u == 0) {
+        c->fallbacks = 0;
+        c->clamped = 0;
+        c->ready = 0;
+        c->postponed = 0;
+        c->firstBadMove = kInvalid;
+        c->winners = 0;
+    }
+    if (u >= ctl->n) return;
+    const Vec3 origin = ctl->origin;
+    const std::uint32_t nx = ctl->nx, ny = ctl->ny, nz = ctl->nz;
+    const Vec3 p = pos[slotOf[u]];
+    const std::uint64_t k = grid_key(grid_coord(p.x, origin.x, inv, nx), grid_coord(p.y, origin.y, inv, ny), grid_coord(p.z, origin.z, inv, nz), nx, ny);
+    key[u] = k;
+    atomicAdd(&rowCount[k / nx], 1u);
+}
+
+// Running sum of the row counts: where every row starts and ends. One block: each thread sums a
+// run of rows, the sums are chained, then each thread writes its rows.
+__global__ void k_s_rows(const Ctl* ctl, RowWork w) {
+    __shared__ std::uint32_t before[kScanThreads];
+    if (ctl->end != kRunning) return;
+    const std::uint32_t rows = ctl->ny * ctl->nz;
+    const std::uint32_t per = (rows + blockDim.x - 1u) / blockDim.x;
+    const std::uint32_t t = threadIdx.x;
+    const std::uint32_t b = t * per < rows ? t * per : rows;
+    const std::uint32_t e = b + per < rows ? b + per : rows;
+    std::uint32_t sum = 0;
+    for (std::uint32_t r = b; r < e; ++r) sum += w.count[r];
+    before[t] = sum;
+    __syncthreads();
+    if (t == 0) {
+        std::uint32_t run = 0;
+        for (std::uint32_t k = 0; k < blockDim.x; ++k) {
+            const std::uint32_t s = before[k];
+            before[k] = run;
+            run += s;
+        }
+    }
+    __syncthreads();
+    std::uint32_t at = before[t];
+    for (std::uint32_t r = b; r < e; ++r) {
+        const std::uint32_t cells = w.count[r];
+        w.begin[r] = at;
+        w.cursor[r] = at;
+        at += cells;
+        w.end[r] = at;
+    }
+}
+
+// Every cell takes a free place in its row, in whatever order the threads arrive.
+__global__ void k_s_scatter(const Ctl* ctl, const std::uint64_t* key, std::uint32_t* cursor, std::uint64_t* rowKey, std::uint32_t* rowId) {
+    const std::uint32_t u = blockIdx.x * blockDim.x + threadIdx.x;
+    if (u >= live_cells(ctl)) return;
+    const std::uint64_t k = key[u];
+    const std::uint32_t j = atomicAdd(&cursor[k / ctl->nx], 1u);
+    rowKey[j] = k;
+    rowId[j] = u;
+}
+
+// The final place of every cell: the start of its row plus the number of cells of the row that
+// come before it (a lower key, or the same key and a lower id). That is the order a stable sort
+// by key gives cells listed by id, which is the order the model sums in. Rows are short (a row
+// is a line of grid cells through a sheet), so counting is cheap. The cell's slot and position
+// go to that place too, and the row's count is zeroed for the next step.
+__global__ void k_s_place(const Ctl* ctl, const std::uint64_t* rowKey, const std::uint32_t* rowId, RowWork w, const std::uint32_t* slotOf,
+                          const Vec3* pos, std::uint64_t* sortedKey, std::uint32_t* sortedSlot, Vec3* sortedPos) {
+    const std::uint32_t j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= live_cells(ctl)) return;
+    const std::uint64_t k = rowKey[j];
+    const std::uint32_t id = rowId[j];
+    const std::uint64_t row = k / ctl->nx;
+    const std::uint32_t b = w.begin[row], e = w.end[row];
+    std::uint32_t ahead = 0;
+    for (std::uint32_t i = b; i < e; ++i) {
+        const std::uint64_t ki = rowKey[i];
+        ahead += (ki < k || (ki == k && rowId[i] < id)) ? 1u : 0u;
+    }
+    const std::uint32_t q = b + ahead;
+    const std::uint32_t slot = slotOf[id];
+    sortedKey[q] = k;
+    sortedSlot[q] = slot;
+    sortedPos[q] = pos[slot];
+    w.count[row] = 0;
+}
+
+// The independent set, as k_winners. On the way: the number of winners, the number in every
+// run of 256 ids (a winner's rank is found from those), and the bounds of the cells that do not
+// divide (the split adds the ones that do).
+__global__ void k_s_winners(const Ctl* ctl, const std::uint64_t* prio, const std::uint32_t* nbr, const std::uint8_t* deg, const std::uint32_t* uid,
+                            std::uint8_t* winById, std::uint32_t* perRun, const Vec3* newPos, BoxAcc* acc, Counters* c) {
+    const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
+    if (v >= live_cells(ctl)) return;
+    const std::uint64_t p = prio[v];
+    bool wins = p != 0;
+    const std::uint32_t* r = nbr + static_cast<std::size_t>(v) * kMaxDeg;
+    const std::uint32_t d = deg[v];
+    for (std::uint32_t k = 0; k < d && wins; ++k) {
+        const std::uint32_t u = r[k];
+        if (prio[u] > p) wins = false;
+        const std::uint32_t* ru = nbr + static_cast<std::size_t>(u) * kMaxDeg;
+        const std::uint32_t du = deg[u];
+        for (std::uint32_t j = 0; j < du && wins; ++j)
+            if (prio[ru[j]] > p) wins = false;
+    }
+    const std::uint32_t id = uid[v];
+    if (wins) {
+        winById[id] = 1;
+        atomicAdd(&perRun[id >> 8], 1u);
+        atomicAdd(&c->winners, 1);
+    } else {
+        box_add(acc, newPos[v], id);
+    }
+}
+
+// Every winner splits, as k_split, without a list of the winners: the k-th winner by id gets
+// daughter n + k, and a winner finds its k by counting the winners with a lower id (whole runs
+// of 256 ids from the counts, the rest from the flags).
+__global__ void k_s_split(const Ctl* ctl, TopoView s, const std::uint8_t* winById, const std::uint32_t* perRun, const std::uint8_t* pair,
+                          std::uint32_t* uid, std::uint32_t* slotOf, const Counters* c, BoxAcc* acc, std::uint32_t limit, std::uint32_t room,
+                          std::uint64_t step) {
+    const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ctl->end != kRunning) return;
+    const std::uint32_t n = ctl->n;
+    if (v >= n) return;
+    const std::uint32_t id = uid[v];
+    if (winById[id] == 0) return;
+    const std::uint64_t after = static_cast<std::uint64_t>(n) + static_cast<std::uint32_t>(c->winners);
+    if (c->firstBadMove != kInvalid || after > limit || after > room) return;
+    std::uint32_t k = 0;
+    const std::uint32_t run = id >> 8;
+    for (std::uint32_t i = 0; i < run; ++i) k += perRun[i];
+    for (std::uint32_t i = run << 8; i < id; ++i) k += winById[i];
+    tv_apply_division(s, v, pair[v], n + k, step);
+    uid[n + k] = n + k;
+    slotOf[n + k] = n + k;
+    box_add(acc, s.pos[v], id);
+    box_add(acc, s.pos[n + k], n + k);
+}
+
+// Last kernel of a lean step: the bounds gathered on the way, then the decision (commit_step).
+__global__ void k_s_commit(Ctl* ctl, BoxAcc* acc, StepOut* out, std::uint32_t limit, std::uint32_t room, std::uint32_t stopCells, float invCell,
+                           std::uint32_t maxNx, std::uint32_t maxNy, std::uint32_t maxNz) {
+    if (ctl->end != kRunning) return;
+    Box b;
+    b.lo = Vec3{from_ordered_bits(acc->lo[0]), from_ordered_bits(acc->lo[1]), from_ordered_bits(acc->lo[2])};
+    b.hi = Vec3{from_ordered_bits(acc->hi[0]), from_ordered_bits(acc->hi[1]), from_ordered_bits(acc->hi[2])};
+    b.bad = acc->bad;
+    out->box = b;
+    *acc = empty_box_acc();
+    commit_step(ctl, out, limit, room, stopCells, invCell, maxNx, maxNy, maxNz);
+}
+
 
 // ---- Morphogens (core/morph.hpp)
 
@@ -660,6 +893,9 @@ struct CudaSim::Impl {
 
     bool timing = false;
     bool useRowTable = true;
+    bool useLean = true;
+    std::uint32_t* rowWork = nullptr;  // lean pipeline: row tables and sort scratch, 4 * kLeanRows entries
+    std::uint32_t* perRun = nullptr;   // lean pipeline: winners per run of 256 ids
     CudaPhaseTimes times;
 
     // --- asynchronous snapshots
@@ -769,7 +1005,12 @@ struct CudaSim::Impl {
     // halves of the double buffers), or a step that has to be reported.
     std::uint32_t plan_batch(std::uint64_t stepsLeft, double secondsLeft) {
         std::uint32_t k = maxBatch < 1u ? 1u : (maxBatch > kMaxBatch ? kMaxBatch : maxBatch);
-        if (singleNext || timing || params.lightAmount > 0.0f || snapshot_in_flight()) {
+        // A small form that is due for renumbering does that in a step of its own (renumbering
+        // goes through the library sort), so the batch after it can use the lean pipeline again.
+        const bool renumberAlone = useLean && n <= kLeanCells && renumber_due(n, step);
+        // Batches are for small forms: above kBatchCells the fixed cost of a step no longer
+        // matters, and a single step runs the faster variant of the move kernel.
+        if (singleNext || timing || params.lightAmount > 0.0f || n > kBatchCells || renumberAlone || snapshot_in_flight()) {
             k = 1;
         } else {
             const double estimate = stepMs > 0.0 ? stepMs : 0.1 + 1.0e-6 * static_cast<double>(n);
@@ -1012,6 +1253,7 @@ CudaSim::CudaSim(State initial, const CudaOptions& options) : impl_(std::make_un
 
     m.device = options.device;
     m.useRowTable = options.rowTable;
+    m.useLean = options.leanPipeline;
     m.maxBatch = options.maxBatch;
     if (options.batchMilliseconds > 0.0) m.batchMs = options.batchMilliseconds;
     m.renumberMinCells = options.renumberMinCells;
@@ -1291,6 +1533,16 @@ BatchEnd CudaSim::Impl::run_batch(std::uint32_t steps, std::uint32_t stopCells, 
     const std::uint64_t rowsCap = static_cast<std::uint64_t>(planNy) * planNz;
     const bool rowTable = m.useRowTable && rowsCap <= m.capacity;
     const unsigned gb = grid_blocks(launch);
+    // The lean pipeline (see its kernels): while the form and its grid are small, the grid is not
+    // mostly empty rows, and the batch does not start by renumbering (that uses the sort's buffers).
+    const bool lean = m.useLean && m.useRowTable && room <= kLeanCells && rowsCap <= kLeanRows && rowsCap <= 8ull * launch + 4096ull &&
+                      !m.renumber_due(n0, step0);
+    if (lean && m.rowWork == nullptr) {
+        m.rowWork = m.alloc<std::uint32_t>(static_cast<std::size_t>(kLeanRows) * 4u, "the row tables of small forms");
+        m.perRun = m.alloc<std::uint32_t>(kLeanCells / 256u + 1u, "the winner counts of small forms");
+    }
+    const RowWork rows{m.rowWork, m.rowWork + kLeanRows, m.rowWork + 2u * kLeanRows, m.rowWork + 3u * kLeanRows};
+    if (lean) CF_CUDA(cudaMemsetAsync(rows.count, 0, static_cast<std::size_t>(rowsCap) * sizeof(std::uint32_t), st));
 
     // An asynchronous snapshot may still be reading buffers that are about to be overwritten.
     // A single step waits for the half it writes (and, before it splits, for the rings). A
@@ -1315,7 +1567,7 @@ BatchEnd CudaSim::Impl::run_batch(std::uint32_t steps, std::uint32_t stopCells, 
         begin.ny = ny;
         begin.nz = nz;
         begin.origin = box.lo;
-        k_begin<<<1, 1, 0, st>>>(ctl, begin);
+        k_begin<<<1, 1, 0, st>>>(m.out, begin);
     }
 
     GridView grid{};  // of the last step queued (a single step that fails is diagnosed with it)
@@ -1330,83 +1582,117 @@ BatchEnd CudaSim::Impl::run_batch(std::uint32_t steps, std::uint32_t stopCells, 
         // the host of a single step has.)
         fp = make_food_params(p, seed, step, box.lo, box.hi);
 
-        // ---- 3. Grid: keys, stable radix sort, sorted positions.
-        k_keys<<<gb, kBlock, 0, st>>>(ctl, m.pos[cur], m.slotOf, m.key[0], m.idBlock, inv, padKey, launch, counters);
-        m.phase(m.times.keys, t0);
-        cub::DoubleBuffer<std::uint64_t> keys(m.key[0], m.key[1]);
-        cub::DoubleBuffer<std::uint32_t> ids(m.idBlock, m.idBlock + m.capacity);
-        if (i == 0) {
-            CF_CUDA(cub::DeviceRadixSort::SortPairs(nullptr, sortBytes, keys, ids, launch, 0, endBit, st));
-            m.ensure_temp(sortBytes);
+        // ---- 3. Grid: the cells sorted by grid key (ties in id order), their positions in that
+        // order, and the row table. The spare halves of the key and id buffers are free afterwards.
+        std::uint64_t* spareKeys64 = nullptr;
+        std::uint32_t* spareIds = nullptr;
+        if (lean) {
+            k_s_keys<<<gb, kBlock, 0, st>>>(ctl, m.pos[cur], m.slotOf, m.key[0], inv, rows.count, counters);
+            m.phase(m.times.keys, t0);
+            k_s_rows<<<1, kScanThreads, 0, st>>>(ctl, rows);
+            k_s_scatter<<<gb, kBlock, 0, st>>>(ctl, m.key[0], rows.cursor, m.key[1], m.idBlock + m.capacity);
+            m.phase(m.times.sort, t0);
+            k_s_place<<<gb, kBlock, 0, st>>>(ctl, m.key[1], m.idBlock + m.capacity, rows, m.slotOf, m.pos[cur], m.key[0], m.idBlock, m.sortedPos);
+            grid = GridView{};
+            grid.invCell = inv;
+            grid.sortedKey = m.key[0];
+            grid.sortedId = m.idBlock;
+            grid.sortedPos = m.sortedPos;
+            grid.rowBegin = rows.begin;
+            grid.rowEnd = rows.end;
+            spareKeys64 = m.key[1];
+            spareIds = m.idBlock + m.capacity;
+        } else {
+            k_keys<<<gb, kBlock, 0, st>>>(ctl, m.pos[cur], m.slotOf, m.key[0], m.idBlock, inv, padKey, launch, counters);
+            m.phase(m.times.keys, t0);
+            cub::DoubleBuffer<std::uint64_t> keys(m.key[0], m.key[1]);
+            cub::DoubleBuffer<std::uint32_t> ids(m.idBlock, m.idBlock + m.capacity);
+            if (i == 0) {
+                CF_CUDA(cub::DeviceRadixSort::SortPairs(nullptr, sortBytes, keys, ids, launch, 0, endBit, st));
+                m.ensure_temp(sortBytes);
+            }
+            CF_CUDA(cub::DeviceRadixSort::SortPairs(m.cubTemp, sortBytes, keys, ids, launch, 0, endBit, st));
+            m.phase(m.times.sort, t0);
+            grid = GridView{};
+            grid.sortedPos = m.sortedPos;
+            if (i == 0 && m.renumber_due(n0, step)) {
+                // Renumber: every cell moves to the slot the sort has just given it. Asynchronous
+                // snapshots still reading the arrays have to finish first. Only the first step of a
+                // batch can do this (the host has to know the cell count); the policy only decides
+                // how soon the cells are back in order, not what is computed.
+                if (m.topoPending) CF_CUDA(cudaEventSynchronize(m.evTopo));
+                if (m.geomPending) CF_CUDA(cudaEventSynchronize(m.evGeom));
+                m.topoPending = false;
+                m.geomPending = false;
+                const unsigned gb0 = grid_blocks(n0);
+                const std::uint32_t* perm = ids.Current();
+                std::uint32_t* inverse = ids.Alternate();
+                k_invert<<<gb0, kBlock, 0, st>>>(perm, inverse, n0);
+                // Positions, normals and food go to the other half of their double buffers; the small
+                // arrays go through spare buffers and back.
+                std::uint32_t* spareKeys = reinterpret_cast<std::uint32_t*>(keys.Alternate());  // 2 words per cell
+                std::uint32_t* spareSorted = reinterpret_cast<std::uint32_t*>(m.sortedPos);     // 3 words per cell
+                const std::size_t words = static_cast<std::size_t>(n0) * sizeof(std::uint32_t);
+                k_permute_cells<<<gb0, kBlock, 0, st>>>(perm, n0, m.pos[cur], m.pos[nxt], m.normal[cur], m.normal[nxt], m.food[cur], m.food[nxt],
+                                                        m.birth, spareKeys, m.gen, spareKeys + n0, m.deg, m.pair, m.uid, spareSorted);
+                CF_CUDA(cudaMemcpyAsync(m.birth, spareKeys, words, cudaMemcpyDeviceToDevice, st));
+                CF_CUDA(cudaMemcpyAsync(m.gen, spareKeys + n0, words, cudaMemcpyDeviceToDevice, st));
+                CF_CUDA(cudaMemcpyAsync(m.deg, m.pair, n0, cudaMemcpyDeviceToDevice, st));
+                CF_CUDA(cudaMemcpyAsync(m.uid, spareSorted, words, cudaMemcpyDeviceToDevice, st));
+                // The rings are parked in the halves the cells have just left, and in the two spares.
+                std::uint32_t* a = reinterpret_cast<std::uint32_t*>(m.pos[cur]);
+                std::uint32_t* b = reinterpret_cast<std::uint32_t*>(m.normal[cur]);
+                std::uint32_t* e1 = reinterpret_cast<std::uint32_t*>(m.food[cur]);
+                if (m.morphPresent) k_permute_pair<<<gb0, kBlock, 0, st>>>(perm, n0, m.morphA[cur], m.morphA[nxt], m.morphB[cur], m.morphB[nxt]);
+                k_permute_rings_out<<<gb0, kBlock, 0, st>>>(perm, inverse, n0, m.nbr, a, b, spareSorted, spareKeys, e1);
+                k_permute_rings_back<<<gb0, kBlock, 0, st>>>(n0, m.nbr, a, b, spareSorted, spareKeys, e1);
+                k_after_permute<<<gb0, kBlock, 0, st>>>(m.uid, m.slotOf, ids.Current(), n0);
+                // The cells now live in the other halves. This is committed at once: the state is the
+                // same state, whatever becomes of this step.
+                cur = nxt;
+                nxt = 1 - cur;
+                m.cur = cur;
+                curStart = cur;
+                m.permuted = true;
+                m.cellsAtRenumber = n0;
+                m.stepAtRenumber = step;
+                ++m.renumberings;
+                grid.sortedPos = m.pos[cur];  // slot order is grid order now
+            }
+            const bool gather = grid.sortedPos == m.sortedPos;
+            grid.invCell = inv;
+            grid.sortedKey = keys.Current();
+            grid.sortedId = ids.Current();
+            std::uint32_t* rowBegin = nullptr;
+            std::uint32_t* rowEnd = nullptr;
+            if (rowTable) {
+                rowBegin = reinterpret_cast<std::uint32_t*>(keys.Alternate());
+                rowEnd = rowBegin + rowsCap;
+                CF_CUDA(cudaMemsetAsync(rowBegin, 0, static_cast<std::size_t>(rowsCap) * 2 * sizeof(std::uint32_t), st));
+                grid.rowBegin = rowBegin;
+                grid.rowEnd = rowEnd;
+            }
+            if (gather || rowTable)
+                k_gather_rows<<<gb, kBlock, 0, st>>>(ctl, gather ? m.pos[cur] : nullptr, ids.Current(), m.sortedPos, keys.Current(), rowBegin, rowEnd);
+            spareKeys64 = keys.Alternate();
+            spareIds = ids.Alternate();
         }
-        CF_CUDA(cub::DeviceRadixSort::SortPairs(m.cubTemp, sortBytes, keys, ids, launch, 0, endBit, st));
-        m.phase(m.times.sort, t0);
-        grid = GridView{};
-        grid.sortedPos = m.sortedPos;
-        if (i == 0 && m.renumber_due(n0, step)) {
-            // Renumber: every cell moves to the slot the sort has just given it. Asynchronous
-            // snapshots still reading the arrays have to finish first. Only the first step of a
-            // batch can do this (the host has to know the cell count); the policy only decides
-            // how soon the cells are back in order, not what is computed.
-            if (m.topoPending) CF_CUDA(cudaEventSynchronize(m.evTopo));
-            if (m.geomPending) CF_CUDA(cudaEventSynchronize(m.evGeom));
-            m.topoPending = false;
-            m.geomPending = false;
-            const unsigned gb0 = grid_blocks(n0);
-            const std::uint32_t* perm = ids.Current();
-            std::uint32_t* inverse = ids.Alternate();
-            k_invert<<<gb0, kBlock, 0, st>>>(perm, inverse, n0);
-            // Positions, normals and food go to the other half of their double buffers; the small
-            // arrays go through spare buffers and back.
-            std::uint32_t* spareKeys = reinterpret_cast<std::uint32_t*>(keys.Alternate());  // 2 words per cell
-            std::uint32_t* spareSorted = reinterpret_cast<std::uint32_t*>(m.sortedPos);     // 3 words per cell
-            const std::size_t words = static_cast<std::size_t>(n0) * sizeof(std::uint32_t);
-            k_permute_cells<<<gb0, kBlock, 0, st>>>(perm, n0, m.pos[cur], m.pos[nxt], m.normal[cur], m.normal[nxt], m.food[cur], m.food[nxt],
-                                                    m.birth, spareKeys, m.gen, spareKeys + n0, m.deg, m.pair, m.uid, spareSorted);
-            CF_CUDA(cudaMemcpyAsync(m.birth, spareKeys, words, cudaMemcpyDeviceToDevice, st));
-            CF_CUDA(cudaMemcpyAsync(m.gen, spareKeys + n0, words, cudaMemcpyDeviceToDevice, st));
-            CF_CUDA(cudaMemcpyAsync(m.deg, m.pair, n0, cudaMemcpyDeviceToDevice, st));
-            CF_CUDA(cudaMemcpyAsync(m.uid, spareSorted, words, cudaMemcpyDeviceToDevice, st));
-            // The rings are parked in the halves the cells have just left, and in the two spares.
-            std::uint32_t* a = reinterpret_cast<std::uint32_t*>(m.pos[cur]);
-            std::uint32_t* b = reinterpret_cast<std::uint32_t*>(m.normal[cur]);
-            std::uint32_t* e1 = reinterpret_cast<std::uint32_t*>(m.food[cur]);
-            if (m.morphPresent) k_permute_pair<<<gb0, kBlock, 0, st>>>(perm, n0, m.morphA[cur], m.morphA[nxt], m.morphB[cur], m.morphB[nxt]);
-            k_permute_rings_out<<<gb0, kBlock, 0, st>>>(perm, inverse, n0, m.nbr, a, b, spareSorted, spareKeys, e1);
-            k_permute_rings_back<<<gb0, kBlock, 0, st>>>(n0, m.nbr, a, b, spareSorted, spareKeys, e1);
-            k_after_permute<<<gb0, kBlock, 0, st>>>(m.uid, m.slotOf, ids.Current(), n0);
-            // The cells now live in the other halves. This is committed at once: the state is the
-            // same state, whatever becomes of this step.
-            cur = nxt;
-            nxt = 1 - cur;
-            m.cur = cur;
-            curStart = cur;
-            m.permuted = true;
-            m.cellsAtRenumber = n0;
-            m.stepAtRenumber = step;
-            ++m.renumberings;
-            grid.sortedPos = m.pos[cur];  // slot order is grid order now
-        }
-        const bool gather = grid.sortedPos == m.sortedPos;
-        grid.invCell = inv;
-        grid.sortedKey = keys.Current();
-        grid.sortedId = ids.Current();
-        std::uint32_t* rowBegin = nullptr;
-        std::uint32_t* rowEnd = nullptr;
-        if (rowTable) {
-            rowBegin = reinterpret_cast<std::uint32_t*>(keys.Alternate());
-            rowEnd = rowBegin + rowsCap;
-            CF_CUDA(cudaMemsetAsync(rowBegin, 0, static_cast<std::size_t>(rowsCap) * 2 * sizeof(std::uint32_t), st));
-            grid.rowBegin = rowBegin;
-            grid.rowEnd = rowEnd;
-        }
-        if (gather || rowTable)
-            k_gather_rows<<<gb, kBlock, 0, st>>>(ctl, gather ? m.pos[cur] : nullptr, ids.Current(), m.sortedPos, keys.Current(), rowBegin, rowEnd);
         m.phase(m.times.gather, t0);
 
         // ---- 2, 4, 5. Normals from the rings (fallback: the previous normal), move and clamp.
-        k_move<<<gb, kBlock, 0, st>>>(ctl, m.pos[cur], m.normal[cur], m.normal[nxt], m.nbr, m.deg, m.uid, m.pos[nxt], grid, kp, fp,
-                                      normal_eps2(p.linkRestLength), mp, morph ? m.morphB[cur] : nullptr, counters);
+        if (single) {
+            // The host knows the grid of a single step: the kernel gets it as arguments.
+            grid.origin = box.lo;
+            grid.nx = nx;
+            grid.ny = ny;
+            grid.nz = nz;
+            grid.count = n0;
+            k_move<false><<<gb, kBlock, 0, st>>>(ctl, m.pos[cur], m.normal[cur], m.normal[nxt], m.nbr, m.deg, m.uid, m.pos[nxt], grid, n0, kp, fp,
+                                                 normal_eps2(p.linkRestLength), mp, morph ? m.morphB[cur] : nullptr, counters);
+        } else {
+            k_move<true><<<gb, kBlock, 0, st>>>(ctl, m.pos[cur], m.normal[cur], m.normal[nxt], m.nbr, m.deg, m.uid, m.pos[nxt], grid, 0u, kp, fp,
+                                                normal_eps2(p.linkRestLength), mp, morph ? m.morphB[cur] : nullptr, counters);
+        }
         m.phase(m.times.move, t0);
 
         // ---- 1 + 6. Food, then the division candidates, priorities and the independent set.
@@ -1414,9 +1700,9 @@ BatchEnd CudaSim::Impl::run_batch(std::uint32_t steps, std::uint32_t stopCells, 
         // with it), so this phase works in the sort's spare buffers: priorities over the row
         // table, which is no longer needed, winner flags and the winner list in the spare id
         // buffer.
-        std::uint64_t* prio = keys.Alternate();
-        std::uint8_t* win = reinterpret_cast<std::uint8_t*>(ids.Alternate());
-        std::uint32_t* winners = ids.Alternate() + (launch + 3u) / 4u;  // after the flag bytes; winners are at most a quarter of the cells
+        std::uint64_t* prio = spareKeys64;
+        std::uint8_t* win = reinterpret_cast<std::uint8_t*>(spareIds);
+        std::uint32_t* winners = spareIds + (launch + 3u) / 4u;  // after the flag bytes; winners are at most a quarter of the cells
         grid.rowBegin = nullptr;
         grid.rowEnd = nullptr;
         if (fp.flags & kFoodLight) {
@@ -1429,7 +1715,7 @@ BatchEnd CudaSim::Impl::run_batch(std::uint32_t steps, std::uint32_t stopCells, 
         // concentrations into the new buffers. The iterations before the last alternate through
         // a spare buffer (the row table's, free after the move), never over the current values.
         if (morph) {
-            float* scratchA = reinterpret_cast<float*>(keys.Alternate());
+            float* scratchA = reinterpret_cast<float*>(spareKeys64);
             float* scratchB = scratchA + launch;
             const float* srcA = m.morphA[cur];
             const float* srcB = m.morphB[cur];
@@ -1465,35 +1751,43 @@ BatchEnd CudaSim::Impl::run_batch(std::uint32_t steps, std::uint32_t stopCells, 
         orient.amount = p.orientAmount;
         orient.axis = unit_or_zero(Vec3{p.orientAxisX, p.orientAxisY, p.orientAxisZ});
         k_food_candidates<<<gb, kBlock, 0, st>>>(ctl, tv, fp, m.food[cur], m.pos[cur], m.shadow, morph ? m.morphB[cur] : nullptr, m.uid, p.foodThreshold,
-                                                 prio, m.pair, win, launch, seed, step, orient, counters);
-        k_winners<<<gb, kBlock, 0, st>>>(ctl, prio, m.nbr, m.deg, m.uid, win);
-        {
-            const thrust::counting_iterator<std::uint32_t> first(0);
-            if (i == 0) {
-                CF_CUDA(cub::DeviceSelect::Flagged(nullptr, selectBytes, first, win, winners, &counters->winners, launch, st));
-                m.ensure_temp(selectBytes);
+                                                 prio, m.pair, win, lean ? m.perRun : nullptr, launch, seed, step, orient, counters);
+        if (lean) {
+            // Winners, their split and the bounds of the new positions, without the library.
+            k_s_winners<<<gb, kBlock, 0, st>>>(ctl, prio, m.nbr, m.deg, m.uid, win, m.perRun, m.pos[nxt], &m.out->acc, counters);
+            if (single) m.wait_topo();  // an asynchronous snapshot may still be reading the rings
+            k_s_split<<<gb, kBlock, 0, st>>>(ctl, tv, win, m.perRun, m.pair, m.uid, m.slotOf, counters, &m.out->acc, limit, room, step);
+            k_s_commit<<<1, 1, 0, st>>>(ctl, &m.out->acc, so, limit, room, stopCells, inv, maxNx, maxNy, maxNz);
+        } else {
+            k_winners<<<gb, kBlock, 0, st>>>(ctl, prio, m.nbr, m.deg, m.uid, win);
+            {
+                const thrust::counting_iterator<std::uint32_t> first(0);
+                if (i == 0) {
+                    CF_CUDA(cub::DeviceSelect::Flagged(nullptr, selectBytes, first, win, winners, &counters->winners, launch, st));
+                    m.ensure_temp(selectBytes);
+                }
+                CF_CUDA(cub::DeviceSelect::Flagged(m.cubTemp, selectBytes, first, win, winners, &counters->winners, launch, st));
             }
-            CF_CUDA(cub::DeviceSelect::Flagged(m.cubTemp, selectBytes, first, win, winners, &counters->winners, launch, st));
-        }
-        // ---- 7. Commit on the device, before the host knows the outcome: every winner splits
-        // (unless the step is not going to stand), then the bounds of the new positions, then
-        // the decision (k_commit).
-        if (single) m.wait_topo();  // an asynchronous snapshot may still be reading the rings
-        k_split<<<grid_blocks(launch / 4u + 1u), kBlock, 0, st>>>(ctl, tv, winners, m.pair, m.uid, m.slotOf, counters, limit, room, step);
-        {
-            Box init;
-            init.lo = Vec3{FLT_MAX, FLT_MAX, FLT_MAX};
-            init.hi = Vec3{-FLT_MAX, -FLT_MAX, -FLT_MAX};
-            init.bad = kInvalid;
-            const thrust::counting_iterator<std::uint32_t> first(0);
-            const BoxOfLive boxOf{m.pos[nxt], m.uid, ctl, counters, limit, room};
-            if (i == 0) {
-                CF_CUDA(cub::DeviceReduce::TransformReduce(nullptr, reduceBytes, first, &so->box, room, BoxMerge{}, boxOf, init, st));
-                m.ensure_temp(reduceBytes);
+            // ---- 7. Commit on the device, before the host knows the outcome: every winner splits
+            // (unless the step is not going to stand), then the bounds of the new positions, then
+            // the decision (k_commit).
+            if (single) m.wait_topo();  // an asynchronous snapshot may still be reading the rings
+            k_split<<<grid_blocks(launch / 4u + 1u), kBlock, 0, st>>>(ctl, tv, winners, m.pair, m.uid, m.slotOf, counters, limit, room, step);
+            {
+                Box init;
+                init.lo = Vec3{FLT_MAX, FLT_MAX, FLT_MAX};
+                init.hi = Vec3{-FLT_MAX, -FLT_MAX, -FLT_MAX};
+                init.bad = kInvalid;
+                const thrust::counting_iterator<std::uint32_t> first(0);
+                const BoxOfLive boxOf{m.pos[nxt], m.uid, ctl, counters, limit, room};
+                if (i == 0) {
+                    CF_CUDA(cub::DeviceReduce::TransformReduce(nullptr, reduceBytes, first, &so->box, room, BoxMerge{}, boxOf, init, st));
+                    m.ensure_temp(reduceBytes);
+                }
+                CF_CUDA(cub::DeviceReduce::TransformReduce(m.cubTemp, reduceBytes, first, &so->box, room, BoxMerge{}, boxOf, init, st));
             }
-            CF_CUDA(cub::DeviceReduce::TransformReduce(m.cubTemp, reduceBytes, first, &so->box, room, BoxMerge{}, boxOf, init, st));
+            k_commit<<<1, 1, 0, st>>>(ctl, so, limit, room, stopCells, inv, maxNx, maxNy, maxNz);
         }
-        k_commit<<<1, 1, 0, st>>>(ctl, so, limit, room, stopCells, inv, maxNx, maxNy, maxNz);
         if (i + 1u < K) {
             // The next step is queued as if this one stands. If it does not, the batch has
             // ended on the device and the kernels queued after it do nothing.
@@ -1553,6 +1847,7 @@ BatchEnd CudaSim::Impl::run_batch(std::uint32_t steps, std::uint32_t stopCells, 
     result.applied = done;
     ++m.stats.batches;
     m.stats.steps += done;
+    if (lean) m.stats.leanSteps += done;
     if (done > m.stats.longest) m.stats.longest = done;
     if (end.end == kEndRoom) ++m.stats.outOfRoom;
     if (end.end == kEndGrid && !single) ++m.stats.gridOutgrown;

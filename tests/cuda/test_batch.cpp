@@ -93,6 +93,56 @@ CF_TEST(cuda_batched_run_matches_cpu_step_for_step) {
     cftest::note(std::to_string(cpu.cell_count()) + " cells after 170 steps, checksum " + hex(reference) + " for every batch length. " + note);
 }
 
+// Small forms run on a pipeline of fewer, simpler kernels (a counting sort by grid row, winners
+// that find their own rank, bounds by atomics). It has to give the same state as the library
+// pipeline and the CPU, step for step, in single steps and in batches.
+CF_TEST(cuda_lean_pipeline_matches_the_library_pipeline_and_the_cpu) {
+    Params p;
+    p.foodMax = 0.05f;
+    p.maxCells = 400000u;
+    p.repulsionStrength = 0.2f;  // folding: crowded grid rows
+    const State s = start(2, p, 21);
+    CpuSim cpu(s, 0);
+    CudaOptions leanSingle = batch_of(1), leanBatch = batch_of(64), librarySingle = batch_of(1), libraryBatch = batch_of(64);
+    librarySingle.leanPipeline = false;
+    libraryBatch.leanPipeline = false;
+    CudaSim a(s, leanSingle), b(s, leanBatch), c(s, librarySingle), d(s, libraryBatch);
+    std::uint64_t compared = 0;
+    for (int round = 0; round < 30; ++round) {
+        const std::uint64_t steps = round < 10 ? 1 : 9;
+        for (std::uint64_t k = 0; k < steps; ++k) CF_CHECK(cpu.step().ok());
+        const std::uint64_t want = checksum(cpu.state());
+        RunLimits lim;
+        lim.maxSteps = steps;
+        for (CudaSim* sim : {&a, &b, &c, &d}) {
+            CF_CHECK_EQ(sim->run(lim), steps);
+            CF_CHECK_MSG(checksum_of(*sim) == want, "differs from the CPU at step " << cpu.step_count());
+        }
+        ++compared;
+    }
+    CF_CHECK_EQ(a.batch_stats().leanSteps, a.batch_stats().steps);
+    CF_CHECK_EQ(b.batch_stats().leanSteps, b.batch_stats().steps);
+    CF_CHECK_EQ(c.batch_stats().leanSteps, std::uint64_t{0});
+    CF_CHECK_EQ(d.batch_stats().leanSteps, std::uint64_t{0});
+    // A refused step leaves the lean pipeline's state untouched too.
+    Params tight = p;
+    tight.maxCells = a.cell_count() + 3u;
+    CF_CHECK(a.set_params(tight).ok());
+    CF_CHECK(cpu.set_params(tight).ok());
+    StepReport ra, rc;
+    for (int k = 0; k < 500; ++k) {
+        ra = a.step();
+        rc = cpu.step();
+        if (!ra.ok() || !rc.ok()) break;
+    }
+    CF_CHECK(ra.status == StepStatus::CapacityReached);
+    CF_CHECK(rc.status == StepStatus::CapacityReached);
+    CF_CHECK_EQ(ra.step, rc.step);
+    CF_CHECK_EQ(checksum_of(a), checksum(cpu.state()));
+    cftest::note(std::to_string(compared) + " comparisons up to " + std::to_string(b.cell_count()) + " cells: lean and library pipelines, single steps and batches, all equal to the CPU (" +
+                 std::to_string(b.batch_stats().leanSteps) + " lean steps in " + std::to_string(b.batch_stats().batches) + " round trips)");
+}
+
 CF_TEST(cuda_batched_run_stops_at_the_step_that_reaches_a_cell_count) {
     Params p;
     p.foodMax = 0.03f;

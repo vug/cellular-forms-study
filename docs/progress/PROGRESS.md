@@ -21,6 +21,7 @@ Newest entries at the bottom. Times are local (America/New_York).
 | M5 Food sources | exit criterion observed (local session, 01:30) | uniform versus light contrast at 600k cells; CUDA equals CPU with every source on; reaction-diffusion and inherited coordinates not built |
 | M7 Rendering modes | done (local session, 01:38 and 03:50) | PLY export tested; imported and rendered in Blender 5.2; viewer x-ray, membrane and membrane-with-scattering modes render with validation clean. The scattering is a screen-space approximation |
 | M6 Exploration tools | built and run once (local session, 01:55) | descriptors tested against known shapes; a 320-run MAP-Elites search filled 27 of 48 bins; one form promoted to 1M cells. Picker is a static HTML page |
+| Small forms: batches of steps | growth to 30k cells 1.5 times faster, the stepping of a search 1.28 times, results unchanged (local session, 08:05) | 6 new tests against the CPU reference; the same 60 search runs identical with the old and new build; large forms unchanged. The 2 to 3 times estimated at 03:30 was not reached |
 | Speed investigation | CUDA backend 2 to 4 times faster, results unchanged (local session, 03:30) | 100M cells in 177 s (545 s before); every checksum identical, including all 21 snapshots of the 100M run; renumbering tested on every step against the CPU. More room listed in the entry |
 | M8 Model extensions | the first round of design.md: oriented division, per-cell parameters, morphogens (local session, 01:58 and 03:50) | CUDA equals CPU bit for bit for each, also with renumbering on every step; default model unchanged. Lineage, differentiation and the later rows of the table not built |
 
@@ -1369,3 +1370,119 @@ now a test that grows from the 162-cell sphere and requires a pattern at the end
   above are the first three tried after the fix.
 
 ![morphogens](img/m8_morphogens_300k.png)
+
+## 2026-11-21 08:05 · Local session: small forms step 1.5 times faster (batches of steps, a lean pipeline)
+
+Uğur asked for the step driver to be reworked so that small forms run several steps per GPU
+round trip (item 2 of "the room that is left" in the 03:30 entry). Done, with the same results
+bit for bit. The gain is 1.5 times for growth runs and 1.28 times for the stepping of a
+search, not the 2 to 3 times I estimated: see "What I had wrong".
+
+**What was built**
+
+1. **`Simulation::run(limits, each)`** (`src/core/sim.hpp`): advance by up to `maxSteps` steps,
+   stop after the step that reaches `stopAtCells`, when `maxSeconds` have passed, or at the
+   first step that is not applied; `each` gets every step's report. The default runs `step()`
+   in a loop, so the CPU reference and the ports behave as before.
+2. **Batches in the CUDA backend** (`src/cuda/sim_cuda.cu`, "Batches of steps"). The cell count
+   and the grid of the current positions live on the device (`Ctl`). The last kernel of a step
+   (`k_commit`) decides there whether the step stands and prepares the next, so the host can
+   queue up to 64 steps and wait once. The device ends a batch itself when a step is not
+   applied (failed move, capacity), when the cell count the caller asked to stop at is
+   reached, or when the form outgrows what the batch was sized for (cells or grid); the
+   kernels still queued then do nothing. A step that was not applied inside a batch is run
+   again alone, to be reported exactly as before. One code path: `step()` is a batch of one.
+3. **A lean pipeline for small forms** (same file, "The lean pipeline"). Up to 262,144 cells
+   the grid is built by a counting sort over grid rows (four small kernels), each dividing
+   cell finds its own rank among the dividing cells, and the bounds are kept with atomics.
+   That replaces the library radix sort, selection and reduction: 9 kernels per step instead
+   of 17. The sorted arrays, the daughters' ids and the bounds are the same, so nothing else
+   changes.
+
+**How the number of steps per round trip is chosen** (`plan_batch`): as many steps as fit in
+about 8 ms at the measured time per step, at most 64, and only while the form has at most
+262,144 cells. One step at a time when the host is needed in every step: per-phase timing, the
+light food source (its shadow map is sized on the host from the bounds), an asynchronous
+snapshot still copying, a renumbering that is due, or a step that has to be reported. Callers
+pass what needs a particular step as limits (`cf_gpu`: the next log row, the last step, and the
+cell counts of the stop, the next snapshot and the next milestone), so a run stops and takes
+its snapshots after exactly the same steps as before.
+
+**Measured** (the commit before this work, `a7c5cee`, built in a temporary worktree, against
+this one; both measured this morning on the same machine, default parameters, growth from the
+162-cell sphere, `cf_gpu --milestones`)
+
+| Growth to | Before | Now |
+|---|---|---|
+| 1,000 cells | 0.15 s | 0.10 s |
+| 10,000 cells | 0.35 s | 0.23 s |
+| 30,000 cells | 0.47 s | 0.31 s |
+| 100,000 cells | 0.61 s | 0.43 s |
+| 300,000 cells | 0.82 s | 0.61 s |
+| 1,000,000 cells | 1.28 s | 1.08 s |
+
+The 60-run search to 30,000 cells (`scripts/explore.py`, the same 60 runs with both builds,
+189,458 steps): stepping 24.9 s before, 19.4 s now (0.131 and 0.102 ms per step); the runs
+35 s and 29 s; the whole search with the atlas 49.8 s and 44.6 s.
+
+Large forms are unchanged (`cf_bench`, 90 steps, before / now): 1M default 1.01 / 0.92 ms,
+1M crowding 0.81 / 0.82 ms, 10M default 15.43 / 15.42 ms, 10M crowding 9.09 / 8.57 ms (the
+last pair differs by more than the others; run-to-run noise at that size is about 5%).
+
+**What I had wrong.** The 03:30 entry said the fixed cost of a step was half kernel launches
+and half waiting, and that queueing steps would give 2 to 3 times. Queueing alone gave 10%
+(growth to 30,000 cells: 0.507 s one step at a time, 0.455 s in batches of 64). Timing the
+host showed why: with 64 steps queued it spent 0.37 s queueing and 0.09 s waiting. The cost is
+per kernel, about 5 µs each on the host (and the GPU keeps up), so what helps is fewer
+kernels per step, which is what the lean pipeline does. With it the same run takes 0.31 s, of
+which 0.19 s is the host queueing 9 kernels per step.
+
+**A slowdown found and fixed on the way.** With the grid's origin and size read from device
+memory, the move kernel was 16% slower at 10M cells (12.3 to 14.3 ms): kernel arguments cost
+no registers in the neighbour search, values read from memory do. A single step therefore
+still gets them as arguments (`k_move<false>`), and batches are limited to small forms, where
+this does not matter.
+
+**Verified**
+
+- `cf_cuda_tests` 32 of 32, 6 of them new (`tests/cuda/test_batch.cpp`): a batched run against
+  the CPU reference step for step (every report and the final checksum) for batches of 64, 7,
+  2 and 1, in a run where batches run out of room and outgrow their grid; stopping after
+  exactly the step that reaches a cell count; every food source, both model extensions and
+  morphogens (on, off, on again) in batches, and the fall-back to single steps with the
+  light; a capacity stop inside a batch (state untouched, same report); a state that cannot
+  be stepped; asynchronous snapshots between batches with renumbering forced on; the lean
+  pipeline against the library pipeline and the CPU, in single steps and batches.
+- `cf_tests` 55 of 55.
+- `cf_bench` checksums after 110 steps unchanged on the four large checkpoints
+  (`33ab56fda65ff8df`, `e5214b0843a780f5`, `f944bb5add49ebd5`, `72254b5851a90ea2`).
+- The 60 search runs give the same step count, cell count and shape descriptors with the old
+  and the new build, run by run.
+- `cf_view --live-selftest --backend cuda`: four runs, three passed (one of them with
+  `--validate`); the first run, with `--validate`, had one frame of 60 ms in 2,369 and so
+  failed its no-stall check. 0 validation errors in both validated runs. Single steps still advance by exactly the number
+  asked for. Frames were paced at 20.0 ms again.
+
+**Not verified, and limits**
+
+- Whether that one 60 ms frame has anything to do with this change: it did not repeat in
+  three more runs, and I did not find its cause.
+- Nothing by hand in the viewer. The CPU backend's live path now goes through the default
+  `run` loop; it was not re-run.
+- Renumbering now happens only at the start of a batch (or in a step of its own for small
+  forms). Results do not depend on when it happens; speed above 65,536 cells might, slightly.
+- The Vulkan compute and WebGPU ports are unchanged: they have neither batches nor the lean
+  pipeline.
+- Other GPUs. The lean pipeline's row counting assumes short grid rows (a sheet); a form with
+  very long rows would be slow on it, not wrong.
+
+**Room that is left for small forms.** The step is now 9 kernel launches, about 5 µs each on
+the host. The next step would be one kernel that runs a whole batch, with barriers between the
+phases (CUDA cooperative groups) instead of launches. I have not tried it and do not know what
+a barrier costs on this machine, so I give no number. Folding the decision kernel into the
+first kernel of the next step would save one launch of nine.
+
+**New switches.** `cf_gpu --max-batch <n>` (1 = one step per round trip) and five summary
+lines (`gpu_round_trips` and so on); `cf_bench --max-batch <n>` and `--no-lean`;
+`CudaOptions::maxBatch`, `batchMilliseconds`, `leanPipeline`; `CF_BIN_DIR` for
+`scripts/explore.py`, to run a search with the tools of another build.

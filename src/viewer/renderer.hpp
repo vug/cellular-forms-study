@@ -48,6 +48,7 @@ struct RenderSettings {
     // otherwise spheres are drawn).
     int drawMode = 0;
     float xrayDensity = 0.06f;  // brightness per unit of accumulated density
+    float sssRadius = 1.5f;     // draw mode 3 (membrane with subsurface scattering): scatter radius, world units
 };
 
 // Per-instance vertex buffers, one per attribute (the simulation's structure-of-arrays layout).

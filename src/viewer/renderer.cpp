@@ -401,7 +401,7 @@ FrameUniforms Renderer::makeUniforms(const OrbitCamera& camera, const RenderSett
     u.misc[0] = static_cast<float>(frameIndex % 1024);
     u.misc[1] = static_cast<float>(s.debugView);
     u.misc[2] = static_cast<float>(s.drawMode);
-    u.misc[3] = s.xrayDensity;
+    u.misc[3] = s.drawMode == 3 ? s.sssRadius : s.xrayDensity;
     return u;
 }
 
@@ -420,7 +420,7 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
     beginPass(cmd, extent_, {albedo_.view, normalDepth_.view}, true, depth_.view);
     if (points.count > 0 && points.pos && points.birth && points.food) {
         const int mode = static_cast<int>(uniforms.misc[2] + 0.5f);
-        const bool membrane = mode == 2 && points.normal && points.index && points.indexCount > 0;
+        const bool membrane = (mode == 2 || mode == 3) && points.normal && points.index && points.indexCount > 0;
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &setGeometry_, 0, nullptr);
         const VkBuffer buffers[4] = {points.pos, points.birth, points.food, points.normal};
         const VkDeviceSize offsets[4] = {0, 0, 0, 0};

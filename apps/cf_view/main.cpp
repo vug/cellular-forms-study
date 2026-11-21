@@ -39,7 +39,8 @@ void usage() {
         "  --ssaa <1..4>          supersampling for captures (default 2)\n"
         "\n"
         "Look:\n"
-        "  --mode <cells|xray|mesh>  spheres (default), additive x-ray, or the membrane mesh (checkpoint files only)\n"
+        "  --mode <cells|xray|mesh|sss>  spheres (default), additive x-ray, the membrane mesh, or the membrane\n"
+        "                         with subsurface scattering (the last two need checkpoint files)\n"
         "  --xray-density <x>     brightness of the x-ray mode (default 0.06)\n"
         "  --color <age|food|birth|uniform>\n"
         "  --yaw <deg> --pitch <deg> --zoom <factor>\n"
@@ -125,6 +126,7 @@ int main(int argc, char** argv) {
                 if (v == "cells") o.settings.drawMode = 0;
                 else if (v == "xray") o.settings.drawMode = 1;
                 else if (v == "mesh" || v == "membrane") o.settings.drawMode = 2;
+                else if (v == "sss") o.settings.drawMode = 3;
                 else throw std::runtime_error("--mode expects cells, xray or mesh");
             } else if (a == "--xray-density") {
                 o.settings.xrayDensity = static_cast<float>(std::atof(next()));

@@ -191,3 +191,43 @@ I commit only those paths plus this log. Notes for the local session:
   without CMake edits. Submodules so far: GLFW 3.5.1, Dear ImGui 1.93.0 (docking), stb.
 - Next for the local session: the Vulkan snapshot viewer (M2). It needs the state/snapshot file
   format from `src/core`; until that lands it is developed against `make_icosphere`.
+
+## 2026-11-21 00:02 · Cloud session: step, state files and `cf_run` are in
+
+Commits `4a6b284` (step) and the one after it (state files, CLI). Thanks for the MSVC run; good
+to know MSVC and GCC even agree on the checksum.
+
+**For the viewer (local session): how to read files**
+
+- `#include "core/io.hpp"`, link `cf_core`. `cf::load_snapshot(path)` returns a `cf::Snapshot`
+  (`n`, `step`, `params`, `boundsMin/Max`, `pos`, `food` in 0..1, `birth`, `gen`). It reads both
+  kinds of file: `snap_*.cfs` (16-bit quantised positions, 12 B per cell) and checkpoints
+  (`ckpt_*.cfs`, `latest.cfs`: exact, 85 B per cell). The byte layout is the comment at the top
+  of `io.hpp`. `cf::load_checkpoint(path)` gives the full `cf::State` including the rings, if
+  you want to draw the mesh.
+- Age for colouring is `snapshot.step - birth[v]`.
+- A run directory holds `snap_c<cells>_s<step>.cfs` (sorted by name = growth order),
+  `ckpt_*.cfs`, `latest.cfs`, `log.csv`, `snapshots.jsonl` (per-snapshot checker result,
+  checksum, link-length histogram, degree histogram, bounds), `run.txt`.
+- `cf::AsyncWriter` (same header) is the writer thread; `cf::Simulation` in `core/sim.hpp` is
+  the backend interface I would suggest the CUDA backend implements (`step`, `download`,
+  `cell_count`, `step_count`, `set_params`). Change it if it does not fit; tell me here.
+
+**Built**
+
+- `src/core/sim_cpu.*`: the step (food, normals, grid, Jacobi move, clamp, divide, commit).
+  All-or-nothing: a failed step leaves the state bit-identical to before it.
+- `src/core/grid.*`: uniform grid, stable LSD radix sort, 27 cells visited as 9 key ranges.
+- `src/core/io.*`, `src/core/stats.*`, `apps/cf_run/main.cpp` (`cf_run --help`).
+
+**Verified (GCC 11.4 in the sandbox)**
+
+- `cf_tests`: 26 of 26 pass (the 22 you ran plus 4 file-format tests).
+- `cf_run --new icosphere:2 --seed 1 --param foodMax=0.02 --until-cells 20000`: 20,146 cells in
+  371 steps, checksum `81fff16eef83df8f` with 2 threads, again with 1 thread, and again when
+  stopped at 5,032 cells and resumed from `latest.cfs`. 20 invariant checks, all ok.
+
+**Not verified / not done yet**
+
+- Parameters are still the first guesses; the fast food rate above compresses the sheet (mean
+  link 0.73). Tuning for folding growth and the 100k exit run are next, then `cf_render`.

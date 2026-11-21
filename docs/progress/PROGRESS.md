@@ -17,7 +17,7 @@ Newest entries at the bottom. Times are local (America/New_York).
 | M2 Snapshot viewer (Vulkan 1.4) | exit criteria observed (local session, 00:25) | timed scrub of a 100k-cell run, headless captures, validation layer clean; mouse interaction not tried by hand |
 | M3 CUDA backend | exit criteria observed (local session, 00:40) | bit-identical to the CPU reference at every snapshot of a 100k run and in 9 tests; 100M-cell benchmark with 21 invariant checks ok. Open point: the default growth rate compresses the sheet above about 500k cells (see the M3 entry) |
 | M4 Live viewer | exit criteria observed (local session, 00:40) | scripted run: parameters changed mid-run, pause, single steps, reset; no frame over 15 ms, 0 validation errors, CUDA and CPU backends. Not tried by hand |
-| M9 Ports | not started | blocked / last by plan |
+| M9 Ports | Vulkan compute done and verified (local session, 01:00); WebGPU in progress | step-by-step agreement with the CPU over 106 steps, reruns identical; 1.3 to 1.6 times slower than CUDA up to 10M cells |
 
 ## Decisions made unattended
 
@@ -688,3 +688,65 @@ have taken most of an hour to reproduce.
 - `scripts/sandbox.mk` only matters for a machine without CMake.
 
 ![other starts](img/m1_other_starts.png)
+
+## 2026-11-21 01:00 · Local session: M9 part 1, Vulkan compute backend
+
+**Built** (`shaders/sim`, `src/vkcompute`, `apps/cf_vkc`)
+
+- `cf::VkComputeSim` implements `cf::Simulation`: the step as twelve GLSL compute shaders, one
+  command buffer per step, submitted to the device's dedicated compute queue (the "async
+  compute" queue: on the RTX 4090 a queue family with compute but without graphics), so it can
+  run next to rendering.
+- Two things CUDA gets from CUB had to be written:
+  - the grid: a counting sort into hashed buckets (integer atomics for the counts and the
+    fill), after which one invocation per bucket sorts its cells by id. That gives the order a
+    stable sort would give, whatever the thread timing was, without writing a radix sort;
+  - prefix sums (bucket starts; winner ranks for the daughter ids): a blocked three-pass scan.
+- No float atomics, so it is reproducible. Failure and capacity handling as in the other
+  backends: the split shader does nothing unless the step succeeded and fits.
+- 166 bytes per cell (degrees are 32-bit here; no 8-bit storage was used).
+
+**Verified**
+
+- Step-by-step agreement with the CPU reference, `cf_vkc --new icosphere:2 --seed 1 --param
+  foodMax=0.02 --until-cells 150000 --verify 5 --validate`: 106 steps compared while the CPU run
+  grew to 151,737 cells (29,834 divisions inside the compared steps). In every one: same cell
+  count, same rings and degrees, same food / birth / generation, same step counters; largest
+  position difference 3.8e-6, largest normal difference 1.8e-7. 0 validation errors.
+- Reruns: `--until-cells 300000 --rerun`: checksum `0daed332d9b08f4f` twice; 12 invariant
+  checks ok.
+- Invariant checker ok at the end of every run below.
+
+**Not bit-identical to the CPU, and why.** After one step 12 of 162 normals were one ulp off.
+A diagnostic that recomputed the normals on the CPU with different rounding variants matched
+all 12 with "1/sqrt as one correctly rounded operation": the driver's compiler merges `sqrt`
+and the following reciprocal into a reciprocal square root, even across `precise` statements.
+Forcing the two apart (an XOR with a run-time zero in between) left 56 cells differing, 32 of
+which match `sqrt(x) = x * rsqrt(x)`: a shader's `sqrt` is not the correctly rounded IEEE
+root on this driver. Vulkan allows both (a few ulp for sqrt and division), so there is nothing
+to fix on our side; CUDA's `sqrtf` is IEEE, which is why that backend can match bit for bit.
+The no-contraction marks are present in the SPIR-V (checked in the disassembly). The
+experiment code was removed again; the finding is in the header of `shaders/sim/common.glsl`.
+
+**Benchmark against CUDA** (default parameters, `icosphere:2`, seed 1, no snapshots; same PC)
+
+| Cells | CUDA wall time | Vulkan compute wall time | CUDA ms/step | Vulkan ms/step |
+| --- | --- | --- | --- | --- |
+| 100k | 1.8 s | 1.5 s | 0.37 | 0.50 |
+| 1M | 3.2 s | 4.2 s | 2.6 | 4.0 |
+| 4M | 9.8 s | 15.7 s | 13.2 | 21.1 |
+| 10M | 25.3 s | 42.3 s | 41 | 65 |
+
+Vulkan compute is about 1.3 to 1.6 times slower than CUDA here. Not profiled per pass yet;
+likely contributors are the per-bucket insertion sort, the hashed bucket order (CUDA walks a
+spatially ordered key list) and one fence wait plus a readback per step. (The 100k row
+includes start-up differently on the two sides, so only the ms/step column is comparable
+there.) The CUDA figures are the ones from the benchmark entry above, which had snapshots and
+phase timing on, so if anything they are slightly pessimistic for CUDA.
+
+**Not verified / not done**
+
+- Not wired into the live viewer yet (it could render straight from its own buffers, with no
+  interop at all).
+- Only up to 10M cells; no asynchronous snapshot path for this backend.
+- One driver, one GPU.

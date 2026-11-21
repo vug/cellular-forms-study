@@ -430,7 +430,7 @@ const BASE_PARAMS = ["springFactor", "planarFactor", "bulgeFactor", "repulsionSt
 const TABLE_METRICS = ["structure", "relief_total", "relief_evenness", "relief_micro", "relief_meso", "relief_macro", "area_ratio", "buried_fraction", "thickness_p50", "reach", "elongation", "lobe_degree"];
 const SOURCE_ORDER = ["light", "field", "crowd", "pulse", "diffusion", "orient", "morph"];
 const GROUPS = [
-  ["Structure and relief", ["structure", "relief_total", "relief_evenness", "relief_micro", "relief_meso", "relief_macro", "relief_peak_sigma", "relief_patchiness", "growth_unevenness", "skew_s4", "skew_s8"]],
+  ["Structure and relief", ["structure", "folds_later", "relief_total", "relief_evenness", "relief_micro", "relief_meso", "relief_macro", "relief_peak_sigma", "relief_patchiness", "growth_unevenness", "skew_s4", "skew_s8"]],
   ["Body plan", ["reach", "lobe_degree", "lobe_2", "lobe_3", "lobe_4", "elongation", "flatness", "ellipsoid_fill"]],
   ["Thickness and folds", ["thickness_p50", "thickness_p10", "buried_fraction", "gap_median", "area_ratio", "sphericity", "curvature_mean", "curvature_std", "concave_fraction", "box_dimension"]],
   ["Size and health", ["radius", "sheet_radius", "link_mean", "link_std", "fold_ratio", "close_pairs_per_cell"]],
@@ -1532,6 +1532,16 @@ function renderStop() {
       mistakes.length ? h("p", {class: "note", style: "margin-top:8px", text: "These were grown to the end; the test only replays where the rule would have cut them."}) : null));
     const se = D.stop.settled;
     if (se && se.settled) kids.push(h("p", {class: "note", text: "A second, simpler test asks whether a form has stopped changing in kind (its scale-free numbers change by less than a tenth per half decade of cells): " + stages.map((s) => fmt(se.settled[s] || 0) + " at stage " + s).join(", ") + ", of " + fmt(se.runs) + " runs."}));
+  }
+  const lg = D.stop.long, lt = D.stop.later;
+  if (lg) {
+    const worth = S.runs.filter((r) => r.m && r.m.folds_later != null).sort((a, b) => b.m.folds_later - a.m.folds_later).slice(0, 24);
+    kids.push(h("div", null, h("h3", {text: "Dull at this size, folded ten times larger"}),
+      h("p", {class: "note", text: "The rule above answers for " + fmt(stageCells(18)) + " cells. Forms were also grown on to " + fmt(lg.target) + " cells: of " + fmt(lg.dull) +
+        " that were dull at the small size, " + fmt(lg.bloomed) + " have structure at the large one, and of " + fmt(lg.structured) + " with structure, " + fmt(lg.faded) +
+        " lost it. A sheet that is already compressed or has begun to fold at the small size folds later." +
+        (lt ? " A second model gives every dull form its chance of folding later (the metric folds_later); on forms it was not fitted on it is right for " + fmt(lt.right) + " of " + fmt(lt.forms) + "." : "")}),
+      worth.length ? h("div", {class: "picks"}, worth.map((r) => runCard(r, h("span", {text: "folds later: " + pc(r.m.folds_later)})))) : null));
   }
   kids.push(h("div", null, h("h3", {text: "Runs the rule has stopped"}),
     stopped.length ? [h("div", {class: "tools", style: "padding-top:0"}, h("span", {text: fmt(stopped.length) + " runs have the status stopped early."}), h("button", {class: "btn", type: "button", id: "stop-show"}, "Show them in the gallery")),

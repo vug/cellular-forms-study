@@ -57,6 +57,15 @@ METRICS = [
 ]
 
 
+def healthy(d):
+    """False for a form whose sheet is badly stretched, badly compressed or lies on itself:
+    the mean link is outside 0.6 to 1.6 rest lengths, or more than one cell in twenty has
+    another, unconnected cell within its own radius. 2.4 % of the survey. Such forms are kept
+    and shown, but a search does not count them as finds and does not breed from them: left
+    alone, a search for what is new drifts into crumpled sheets, which are unlike everything."""
+    return 0.6 < d.get("link_mean", 1.0) < 1.6 and d.get("close_pairs_per_cell", 0.0) < 0.05
+
+
 def raw(d, name):
     """The value of a feature or metric in a descriptor dict, or None when the form has none
     (a band the form is too small for)."""
@@ -137,6 +146,9 @@ def measure(finals, pairs):
         centre.append(statistics.median(values))
         spread = (values[int(0.9 * (len(values) - 1))] - values[int(0.1 * (len(values) - 1))]) / 2.563  # 10th to 90th percentile, as a standard deviation
         population.append(spread if spread > 1e-9 else 1.0)
-        differences = [a[k] - b[k] for a, b in pairs if a[k] is not None and b[k] is not None]
-        seed.append(math.sqrt(sum(x * x for x in differences) / (2.0 * len(differences))) if differences else 0.0)
+        # The spread between seeds from the median difference of the pairs, not from the mean
+        # square: a few parameter sets sit between two kinds of form, where one seed in ten
+        # gives another form, and they would set the scale for all the rest.
+        differences = sorted(abs(a[k] - b[k]) for a, b in pairs if a[k] is not None and b[k] is not None)
+        seed.append(1.0483 * differences[len(differences) // 2] if differences else 0.0)
     return Scales(seed, population, centre)

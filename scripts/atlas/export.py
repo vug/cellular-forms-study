@@ -28,6 +28,8 @@ def _round(x, digits=4):
 def build(store):
     scales = features.Scales.load(store)
     rule = stop.StopRule.from_json(store.meta("stop_rule"))
+    later = store.meta("later_rule")  # which dull forms have structure when grown ten times larger
+    long_check = store.meta("long_check")
     stages = store.all_stages()
     images = store.images()
     labels = store.labels()
@@ -62,6 +64,12 @@ def build(store):
                 if verdict and verdict["expected"] is not None:
                     chance[str(stage)] = _round(verdict["expected"], 3)
         label = labels.get(r["id"], {})
+        metrics = {name: _round(features.raw(final, name)) for name, _about in features.METRICS}
+        metrics["folds_later"] = None
+        if later and r["status"] == "ok" and r["target_cells"] == 31623 and final.get("structure", 1.0) < later["threshold"]:
+            row = stop.inputs(by_stage, 18)
+            if row is not None:
+                metrics["folds_later"] = _round(stop.chance(later["model"], row), 3)
         genome = r["genome"] or {}
         runs.append({
             "id": r["id"], "status": r["status"], "origin": r["origin"], "parent": r["parent"], "parent2": r["parent2"], "seed": r["seed"],
@@ -69,7 +77,7 @@ def build(store):
             "params": {k: _round(v, 9) for k, v in r["params"].items()},  # nine digits, as they are passed to the tools
             "cells": r["cells"], "step": r["step"], "target": r["target_cells"], "wall": _round(r["wall_s"], 3), "stopped_at": r["stopped_at"],
             "predicted": _round(r["predicted"], 3), "kind": r["cluster"], "x": _round(r["map_x"], 4), "y": _round(r["map_y"], 4),
-            "m": {name: _round(features.raw(final, name)) for name, _about in features.METRICS},
+            "m": metrics,
             "z": [_round(v, 3) for v in scales.standard(features.vector(final))] if scales is not None and final else None,
             "relief": {"sigma": final.get("relief_sigma", []), "value": [_round(v) for v in final.get("relief", [])],
                        "skew": [_round(v, 3) for v in final.get("relief_skew", [])], "rest": _round(final.get("relief_rest"))},
@@ -78,15 +86,21 @@ def build(store):
                          **{name: [_round(d.get(name)) for d in s] for name in TRAJECTORY}),
             "img": {v: img[v] for v in ("a", "b") if v in img}, "tile": tile, "thumb": thumb,
             "rating": label.get("rating"), "category": label.get("category"), "note": label.get("note"),
+            "healthy": features.healthy(final) if final else None,
         })
     for kind in kinds:
         kind["given"] = kind_names.get(str(kind["id"]))
     return {
-        "generated": time.strftime("%Y-%m-%d %H:%M"), "metrics": [{"key": k, "about": about} for k, about in features.METRICS], "features": features.NAMES,
+        "generated": time.strftime("%Y-%m-%d %H:%M"),
+        "metrics": [{"key": k, "about": about} for k, about in features.METRICS] +
+                   [{"key": "folds_later", "about": "for a form that is dull at this size: the chance that it has structure when grown ten times larger"}],
+        "features": features.NAMES,
         "params": parameter_names, "trajectory": list(TRAJECTORY), "runs": runs, "kinds": kinds,
         "sheets": {"files": sheets["tile"], "tile": [240, 180], "columns": 8},
         "thumbs": {"files": sheets["thumb"], "tile": [120, 90], "columns": 8},
-        "stop": {"report": store.meta("stop_report"), "settled": store.meta("settled_report"), "decision_stages": list(stop.DECISION_STAGES)},
+        "stop": {"report": store.meta("stop_report"), "settled": store.meta("settled_report"), "decision_stages": list(stop.DECISION_STAGES),
+                 "long": {k: v for k, v in long_check.items() if k != "rows"} if long_check else None,
+                 "later": {k: v for k, v in later.items() if k != "model"} if later else None},
         "scales": store.meta("feature_scales"), "distance": store.meta("distance_scale"), "kinds_report": store.meta("kinds_report"),
     }
 

@@ -26,7 +26,12 @@ std::vector<std::uint8_t> renderSequence(Context& ctx, int frames, const std::fu
                                          const RenderSettings& settings, Vec3 sceneCentre, float sceneRadius, float currentStep, int width,
                                          int height, int ssaa);
 
-// Writes an RGBA8 image as PNG. Returns false when the file could not be written.
+// Writes an RGBA8 image as PNG, or as JPEG when the name ends in .jpg or .jpeg. Returns false
+// when the file could not be written.
 bool writePng(const std::filesystem::path& file, int width, int height, const std::vector<std::uint8_t>& rgba);
+
+// Reads an image file (PNG, JPEG, ...) and writes it again under another name, in the format
+// that name asks for (cf_view --convert-image). Returns false when either step fails.
+bool convertImage(const std::filesystem::path& from, const std::filesystem::path& to);
 
 }  // namespace cfv

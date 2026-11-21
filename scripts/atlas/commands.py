@@ -8,12 +8,19 @@ from . import features, kinds, stop
 from .store import Store
 
 
-def grown(store, origins=None):
-    """Runs that were grown to their target without a stop rule: [(run dict, stages)]."""
+STANDARD_TARGET = 31623  # the size at which forms are compared (stage 18)
+
+
+def grown(store, origins=None, target=STANDARD_TARGET):
+    """Runs that were grown to their target without a stop rule: [(run dict, stages)]. Only
+    runs with the standard target, unless another (or None for any) is given: the features
+    of a form move with its size, so forms of different sizes are not compared."""
     stages = store.all_stages()
     out = []
     for r in store.runs("WHERE status = 'ok' AND stopped_at IS NULL ORDER BY id"):
         if origins and r["origin"] not in origins:
+            continue
+        if target is not None and r["target_cells"] != target:
             continue
         s = stages.get(r["id"], [])
         if s and s[-1]["cells"] >= 0.9 * r["target_cells"]:
@@ -92,6 +99,27 @@ def cmd_kinds(args):
     runs = grown(store)
     ids = [r["id"] for r, _s in runs]
     points = [scales.standard(features.vector(s[-1])) for _r, s in runs]
+    if args.assign:
+        # Forms that came after the sorting go to the kind whose centre is nearest; the kinds
+        # themselves, their names and the map stay as they are.
+        found, report = store.meta("kinds"), store.meta("kinds_report")
+        if not found or "map_axes" not in (report or {}):
+            raise SystemExit("atlas: sort the forms first (kinds without --assign)")
+        placed = 0
+        for (r, _s), point in zip(runs, points):
+            if r["cluster"] is None:
+                kind, (x, y) = kinds.place(point, found, report)
+                store.update_run(r["id"], cluster=kind, map_x=x, map_y=y)
+                placed += 1
+        store.commit()
+        counts = {}
+        for row in store.db.execute("SELECT cluster, COUNT(*) AS n FROM runs WHERE cluster IS NOT NULL GROUP BY cluster"):
+            counts[row["cluster"]] = row["n"]
+        for kind in found:
+            kind["count"] = counts.get(kind["id"], 0)
+        store.set_meta("kinds", found)
+        print(f"{placed} forms placed in the {len(found)} kinds there are")
+        return
     assignment, positions, found, report = kinds.sort_into_kinds(ids, points, args.count)
     store.db.execute("UPDATE runs SET cluster = NULL, map_x = NULL, map_y = NULL")
     for run in ids:
@@ -105,15 +133,34 @@ def cmd_kinds(args):
         print(f"  kind {kind['id']:2d}: {kind['count']:5d} forms, typical run {kind['typical']:5d}: {kind['name']}")
 
 
+def long_rows(store, target):
+    """Every form that was grown on to `target` (origin "long"), with the form it came from:
+    [{run, long_run, structure_small, structure_large or None, status, cells}]."""
+    stages = store.all_stages()
+    by_id = {r["id"]: r for r in store.runs("")}
+    rows = []
+    for big in by_id.values():
+        if big["origin"] != "long" or big["target_cells"] != target or big["parent"] not in by_id:
+            continue
+        small = stages.get(big["parent"], [])
+        s_big = stages.get(big["id"], [])
+        reached = big["status"] == "ok" and s_big and s_big[-1]["cells"] >= 0.9 * target
+        rows.append({"run": big["parent"], "long_run": big["id"], "structure_small": small[-1]["structure"] if small else None,
+                     "structure_large": s_big[-1]["structure"] if reached else None, "status": big["status"], "cells": big["cells"]})
+    return rows
+
+
 def cmd_long_check(args):
-    """Do dull forms stay dull when they are grown ten times larger? Picks forms of the survey
-    across the whole range of structure, two thirds of them below the threshold, grows each to
-    --target and compares the structure at both sizes."""
+    """Do dull forms stay dull when they are grown ten times larger? Grows forms of the survey on
+    to --target: either --count forms across the whole range of structure (two thirds of them
+    below the threshold), or --dull forms drawn at random from the dull ones. Then reports on
+    every form that was ever grown on."""
+    import random
     from .runner import Job, Runner
     store = Store(args.root)
     rule = store.meta("stop_rule")
     if not rule:
-        raise SystemExit("atlas: run 'stop-fit' first")
+        raise SystemExit("atlas: run stop-fit first")
     threshold = rule["structure_threshold"]
     runs = sorted(((s[-1]["structure"], r) for r, s in grown(store, {"survey"}) if r["seed"] == 1), key=lambda x: x[0])
     dull = [x for x in runs if x[0] < threshold]
@@ -122,22 +169,13 @@ def cmd_long_check(args):
     def spread(items, count):
         return [items[int(k * (len(items) - 1) / max(count - 1, 1))] for k in range(min(count, len(items)))]
 
-    picked = spread(dull, args.count * 2 // 3) + spread(structured, args.count - args.count * 2 // 3)
-    jobs = []
-    for _structure, r in picked:
-        job = Job(r["genome"], seed=r["seed"], origin="long", parent=r["id"], target=args.target)
-        jobs.append(job)
-    runner = Runner(store, max_steps=250000, max_seconds=900.0)
-    ids = runner.run_many(jobs)
-    rows = []
-    for (small, r), run in zip(picked, ids):
-        if run is None:
-            continue
-        big = store.runs("WHERE id = ?", (run,))[0]
-        stages = store.stages(run)
-        reached = stages and stages[-1]["cells"] >= 0.9 * args.target
-        rows.append({"run": r["id"], "long_run": run, "structure_small": small, "structure_large": stages[-1]["structure"] if reached else None,
-                     "status": big["status"], "cells": big["cells"]})
+    if args.dull:
+        picked = random.Random(args.seed).sample(dull, min(args.dull, len(dull)))
+    else:
+        picked = spread(dull, args.count * 2 // 3) + spread(structured, args.count - args.count * 2 // 3)
+    jobs = [Job(r["genome"], seed=r["seed"], origin="long", parent=r["id"], target=args.target) for _structure, r in picked]
+    Runner(store, max_steps=250000, max_seconds=900.0).run_many(jobs)
+    rows = long_rows(store, args.target)
     done = [x for x in rows if x["structure_large"] is not None]
     was_dull = [x for x in done if x["structure_small"] < threshold]
     bloomed = [x for x in was_dull if x["structure_large"] >= threshold]
@@ -147,14 +185,64 @@ def cmd_long_check(args):
     report = {"target": args.target, "threshold": threshold, "picked": len(rows), "reached": len(done), "dull": len(was_dull), "bloomed": len(bloomed),
               "structured": len(was_structured), "faded": len(faded), "median_factor": factors[len(factors) // 2] if factors else None, "rows": rows}
     store.set_meta("long_check", report)
-    print(f"{len(rows)} forms grown on to {args.target} cells, {len(done)} reached it (the others: " +
-          ", ".join(sorted({x['status'] for x in rows if x['structure_large'] is None})) + ")" if len(done) < len(rows) else f"{len(rows)} forms grown on to {args.target} cells, all reached it")
+    print(f"{len(rows)} forms have been grown on to {args.target} cells, {len(done)} reached it")
     print(f"  dull at the small size (structure below {threshold:.4f}): {len(was_dull)}; of those, with structure at the large size: {len(bloomed)}")
-    for x in sorted(bloomed, key=lambda x: -x["structure_large"]):
-        print(f"    run {x['run']} -> {x['long_run']}: structure {x['structure_small']:.4f} -> {x['structure_large']:.4f}")
     print(f"  with structure at the small size: {len(was_structured)}; of those, dull at the large size: {len(faded)}")
     if factors:
         print(f"  structure at the large size over structure at the small size: median {factors[len(factors) // 2]:.2f}, from {factors[0]:.2f} to {factors[-1]:.2f}")
+
+
+def later_examples(store):
+    """The dull forms that were grown ten times larger, as examples for the model of which dull
+    forms fold later: (inputs at the standard size, folded later or not, run id)."""
+    report = store.meta("long_check")
+    if not report:
+        return [], None
+    threshold = report["threshold"]
+    stages = store.all_stages()
+    out = []
+    for x in long_rows(store, report["target"]):
+        if x["structure_large"] is None or x["structure_small"] is None or x["structure_small"] >= threshold:
+            continue
+        row = stop.inputs({d["stage"]: d for d in stages.get(x["run"], [])}, 18)
+        if row is not None:
+            out.append((row, 1.0 if x["structure_large"] >= threshold else 0.0, x["run"]))
+    return out, report
+
+
+def cmd_later_fit(args):
+    """Which dull forms are worth growing on? Fits, on the dull forms that were grown ten times
+    larger (long-check), the chance that a form that is dull at the standard size has structure
+    at the large one, from what it looks like at the standard size; tests it on held-out forms."""
+    import random
+    store = Store(args.root)
+    examples, report = later_examples(store)
+    if len(examples) < 40:
+        raise SystemExit(f"atlas: only {len(examples)} dull forms were grown on (long-check); too few to fit")
+    rows = [e[0] for e in examples]
+    labels = [e[1] for e in examples]
+    order = list(range(len(rows)))
+    random.Random(1).shuffle(order)
+    folds = 5
+    right = missed = false_alarm = 0
+    for fold in range(folds):
+        held = set(order[fold::folds])
+        model = stop.fit_logistic([rows[i] for i in order if i not in held], [labels[i] for i in order if i not in held], ridge=2.0)
+        for i in held:
+            says = stop.chance(model, rows[i]) >= 0.5
+            right += says == (labels[i] > 0.5)
+            missed += (not says) and labels[i] > 0.5
+            false_alarm += says and labels[i] < 0.5
+    model = stop.fit_logistic(rows, labels, ridge=2.0)
+    bloomers = int(sum(labels))
+    weights = dict(zip(["constant"] + stop.INPUTS, [round(w, 3) for w in model["weights"]]))
+    result = {"model": model, "inputs": stop.INPUTS, "forms": len(rows), "bloomers": bloomers, "right": right, "missed": missed, "false_alarm": false_alarm,
+              "target": report["target"], "threshold": report["threshold"], "weights": weights}
+    store.set_meta("later_rule", result)
+    print(f"{len(rows)} forms that are dull at the standard size were grown on to {report['target']} cells; {bloomers} of them have structure there")
+    print(f"  on held-out forms the model is right for {right} of {len(rows)}: it misses {missed} of the {bloomers} that fold later and expects folds of {false_alarm} that stay dull")
+    strongest = sorted(((abs(w), n, w) for n, w in weights.items() if n != "constant"), reverse=True)[:5]
+    print("  what counts: " + ", ".join(f"{n} {w:+.2f}" for _a, n, w in strongest))
 
 
 def cmd_inits(args):
@@ -245,9 +333,14 @@ def register(sub):
     p.set_defaults(run=cmd_inits)
 
     p = sub.add_parser("long-check", help="grow forms of the survey ten times larger: do dull forms stay dull?")
-    p.add_argument("--count", type=int, default=60)
+    p.add_argument("--count", type=int, default=60, help="forms across the whole range of structure")
+    p.add_argument("--dull", type=int, default=0, help="instead: this many of the dull forms, drawn at random")
+    p.add_argument("--seed", type=int, default=1)
     p.add_argument("--target", type=int, default=316228)
     p.set_defaults(run=cmd_long_check)
+
+    p = sub.add_parser("later-fit", help="fit and test which dull forms will have structure when grown ten times larger")
+    p.set_defaults(run=cmd_later_fit)
 
     p = sub.add_parser("features", help="measure the spread between seeds and between forms of every feature")
     p.set_defaults(run=cmd_features)
@@ -260,6 +353,7 @@ def register(sub):
 
     p = sub.add_parser("kinds", help="sort the forms into kinds and lay out the map")
     p.add_argument("--count", type=int, default=None, help="number of kinds (default: the best separated between 4 and 12)")
+    p.add_argument("--assign", action="store_true", help="keep the kinds there are and place the forms that came since in the nearest one")
     p.set_defaults(run=cmd_kinds)
 
     for name in ("search", "export", "serve"):

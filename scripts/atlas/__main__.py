@@ -71,6 +71,48 @@ def cmd_photos(args):
     print(f"done in {time.time() - t0:.0f} s")
 
 
+def cmd_sheet(args):
+    """One picture of chosen runs, or (--kinds) of the typical form and three more of every kind."""
+    store = Store(args.root)
+    if args.kinds:
+        ids = [run for kind in store.meta("kinds", []) for run in [kind["typical"]] + [m for m in kind["middle"] if m != kind["typical"]][:args.columns - 1]]
+    else:
+        ids = [int(x) for x in args.runs.split(",")]
+    by_id = {r["id"]: r for r in store.runs("")}
+    count = Runner(store, photos=False).contact_sheet([by_id[i] for i in ids], os.path.abspath(args.out), args.columns, args.size)
+    print(f"{args.out}: {count} forms, runs {ids}")
+
+
+def cmd_sheets_to_jpeg(args):
+    """Writes every contact sheet that is still a PNG again as a JPEG (cf_view --convert-image)
+    and points the runs at the new files. For databases made before the sheets were JPEGs."""
+    import subprocess
+    import explore
+    store = Store(args.root)
+    done = {}
+    rows = store.db.execute("SELECT run, view, path FROM images WHERE view IN ('tile', 'thumb')").fetchall()
+    for row in rows:
+        path, where = row["path"].split("#")
+        if not path.endswith(".png"):
+            continue
+        if path not in done:
+            new = path[:-4] + ".jpg"
+            proc = subprocess.run([explore.tool("cf_view"), "--convert-image", os.path.join(store.root, path), os.path.join(store.root, new)], capture_output=True, text=True)
+            done[path] = new if proc.returncode == 0 and os.path.exists(os.path.join(store.root, new)) else None
+            if done[path] is None:
+                print("atlas: could not convert", path, (proc.stderr or proc.stdout)[-200:])
+        if done[path]:
+            store.set_image(row["run"], row["view"], done[path] + "#" + where)
+    store.commit()
+    before = after = 0
+    for path, new in done.items():
+        if new:
+            before += os.path.getsize(os.path.join(store.root, path))
+            after += os.path.getsize(os.path.join(store.root, new))
+            os.remove(os.path.join(store.root, path))
+    print(f"{sum(1 for v in done.values() if v)} sheets: {before / 1e6:.1f} MB as PNG, {after / 1e6:.1f} MB as JPEG")
+
+
 def cmd_status(args):
     store = Store(args.root)
     print(f"{store.count()} runs in {store.root}")
@@ -96,6 +138,17 @@ def main():
 
     p = sub.add_parser("status", help="what is in the database")
     p.set_defaults(run=cmd_status)
+
+    p = sub.add_parser("sheet", help="one picture of chosen runs, or of every kind's typical forms")
+    p.add_argument("--runs", default="", help="run ids, comma separated")
+    p.add_argument("--kinds", action="store_true", help="a row per kind: its typical form and the next from its middle")
+    p.add_argument("--columns", type=int, default=4)
+    p.add_argument("--size", default="320x240")
+    p.add_argument("--out", required=True)
+    p.set_defaults(run=cmd_sheet)
+
+    p = sub.add_parser("sheets-to-jpeg", help="write contact sheets that are still PNGs again as JPEGs")
+    p.set_defaults(run=cmd_sheets_to_jpeg)
 
     p = sub.add_parser("photos", help="take the screenshots that are missing (each run is grown again for it)")
     p.add_argument("--all", action="store_true", help="every screenshot again")

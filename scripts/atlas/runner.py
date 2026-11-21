@@ -106,6 +106,18 @@ class Runner:
         return ["--load", os.path.join(start, "latest.cfs")]
 
     def _simulate(self, job, run_dir, until_cells, resume):
+        """One cf_gpu run. Exit code 1 is bad usage, a file or the GPU, not the simulation (a
+        file that Windows would not let go of, once in thousands of runs): tried once more, and
+        if it fails again the run is not entered as anything."""
+        summary = self._simulate_once(job, run_dir, until_cells, resume)
+        if summary["exit_code"] == 1:
+            time.sleep(0.5)
+            summary = self._simulate_once(job, run_dir, until_cells, resume)
+        if summary["exit_code"] == 1:
+            raise RuntimeError("cf_gpu could not run: " + summary["tail"].strip()[-240:])
+        return summary
+
+    def _simulate_once(self, job, run_dir, until_cells, resume):
         start = ["--load", os.path.join(run_dir, "latest.cfs")] if resume else self._start_args(job, run_dir)
         cmd = [explore.tool("cf_gpu")] + start + ["--capacity", str(int(job.target * 1.5) + 4096), "--until-cells", str(until_cells), "--until-step", str(self.max_steps),
                                                   "--max-seconds", str(self.max_seconds), "--out", run_dir, "--snapshot-factor", f"{STAGE_FACTOR:.9g}",
@@ -261,7 +273,7 @@ class Runner:
                 cmd = [explore.tool("cf_view")]
                 for run, run_dir in part:
                     cmd += ["--snapshot", os.path.join(run_dir, "latest.cfs")]
-                name = f"{'sheet' if kind == 'tile' else 'thumbs'}_{part[0][0]:06d}.png"
+                name = f"{'sheet' if kind == 'tile' else 'thumbs'}_{part[0][0]:06d}.jpg"  # JPEG: a tenth of the size of a PNG
                 cmd += ["--frame", "all", "--sheet", "--sheet-columns", str(SHEET_COLUMNS), "--size", size, "--screenshot", os.path.join(self.store.root, "img", name)] + LOOK
                 proc = subprocess.run(cmd, capture_output=True, text=True)
                 if proc.returncode != 0:
@@ -270,6 +282,29 @@ class Runner:
                 for k, (run, run_dir) in enumerate(part):
                     self.store.set_image(run, kind, f"img/{name}#{k % SHEET_COLUMNS},{k // SHEET_COLUMNS}")
         shutil.rmtree(out_dir, ignore_errors=True)
+
+    def contact_sheet(self, runs, out_png, columns=4, size=THUMB):
+        """One picture of the given runs (run dicts), row by row: each is grown again and drawn."""
+        states = []
+        for r in runs:
+            job = Job.__new__(Job)
+            job.init, job.seed, job.params, job.target = r["init"], r["seed"], r["params"], r["target_cells"]
+            self.sequence += 1
+            run_dir = os.path.join(self.work, f"c{self.sequence:06d}")
+            os.makedirs(run_dir, exist_ok=True)
+            self._simulate(job, run_dir, r["stopped_at"] or r["target_cells"], False)
+            if os.path.exists(os.path.join(run_dir, "latest.cfs")):
+                states.append(run_dir)
+        cmd = [explore.tool("cf_view")]
+        for run_dir in states:
+            cmd += ["--snapshot", os.path.join(run_dir, "latest.cfs")]
+        cmd += ["--frame", "all", "--sheet", "--sheet-columns", str(columns), "--size", size, "--screenshot", out_png] + LOOK
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        for run_dir in states:
+            shutil.rmtree(run_dir, ignore_errors=True)
+        if proc.returncode != 0:
+            raise RuntimeError("cf_view failed: " + (proc.stderr or proc.stdout)[-300:])
+        return len(states)
 
     def retake(self, runs, batch=48):
         """Screenshots of runs that are in the store already: each is grown again (the same
@@ -284,13 +319,18 @@ class Runner:
             pending.clear()
 
         for r in runs:
-            job = Job({"base": {}, "sources": {}, "init": r["init"]}, seed=r["seed"], target=r["target_cells"])
-            job.params = r["params"]
+            job = Job.__new__(Job)  # (only what growing needs: the start, the seed, the parameters as they were passed)
+            job.init, job.seed, job.params, job.target = r["init"], r["seed"], r["params"], r["target_cells"]
             self.sequence += 1
             run_dir = os.path.join(self.work, f"s{self.sequence:06d}")
             os.makedirs(run_dir, exist_ok=True)
             until = r["stopped_at"] or r["target_cells"]
-            summary = self._simulate(job, run_dir, until, False)
+            try:
+                summary = self._simulate(job, run_dir, until, False)
+            except RuntimeError as e:
+                print("atlas:", e, flush=True)
+                shutil.rmtree(run_dir, ignore_errors=True)
+                continue
             if os.path.exists(os.path.join(run_dir, "latest.cfs")) and abs((summary.get("cells") or 0) - (r["cells"] or 0)) <= 0.02 * max(r["cells"] or 1, 1):
                 pending.append((r["id"], run_dir))
             else:

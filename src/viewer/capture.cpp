@@ -1,6 +1,7 @@
 #include "capture.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -101,6 +102,11 @@ bool writePng(const std::filesystem::path& file, int width, int height, const st
         std::error_code ec;
         std::filesystem::create_directories(file.parent_path(), ec);
     }
+    // A name that ends in .jpg or .jpeg gets a JPEG (quality 88, no alpha): about a tenth of
+    // the size of a PNG for rendered forms, whose dithered shading a PNG cannot pack well.
+    std::string ext = file.extension().string();
+    for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (ext == ".jpg" || ext == ".jpeg") return stbi_write_jpg(file.string().c_str(), width, height, 4, rgba.data(), 88) != 0;
     return stbi_write_png(file.string().c_str(), width, height, 4, rgba.data(), width * 4) != 0;
 }
 

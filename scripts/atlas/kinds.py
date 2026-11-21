@@ -168,8 +168,18 @@ def sort_into_kinds(ids, points, k=None, seed=1):
             if len(words) == 3:
                 break
         kinds.append({"id": rank[g], "name": ", ".join(words) if words else "middling", "count": len(members), "typical": members[0][1],
-                      "middle": [m[1] for m in members[:12]], "edge": [m[1] for m in members[-6:]], "profile": profile})
+                      "middle": [m[1] for m in members[:12]], "edge": [m[1] for m in members[-6:]], "profile": profile, "centre": [round(x, 4) for x in centres[g]]})
     assignment = {ids[i]: rank[group[i]] for i in range(len(ids))}
     report = {"forms": len(ids), "kinds": len(kinds), "silhouette_by_count": tried, "map_shares": [round(s, 3) for s in shares],
+              "map_mean": [round(x, 5) for x in mean], "map_axes": [[round(x, 5) for x in d] for d in directions],
               "map_directions": [{name: round(v, 2) for name, v in zip(NAMES, d) if abs(v) >= 0.25} for d in directions]}
     return assignment, positions, kinds, report
+
+
+def place(point, kinds, report):
+    """The kind whose centre is nearest to a form, and the form's position on the map, for
+    forms that came after the sorting."""
+    best = min(kinds, key=lambda k: sum((x - y) ** 2 for x, y in zip(point, k["centre"])))
+    centred = [a - m for a, m in zip(point, report["map_mean"])]
+    return best["id"], (_dot(centred, report["map_axes"][0]), _dot(centred, report["map_axes"][1]))
+

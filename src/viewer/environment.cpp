@@ -1,5 +1,7 @@
 #include "environment.hpp"
 
+#include "capture.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -16,6 +18,16 @@
 #endif
 
 namespace cfv {
+
+// (Here because this file has the image reader; declared in capture.hpp.)
+bool convertImage(const std::filesystem::path& from, const std::filesystem::path& to) {
+    int w = 0, h = 0, channels = 0;
+    unsigned char* data = stbi_load(from.string().c_str(), &w, &h, &channels, 4);
+    if (data == nullptr) return false;
+    const std::vector<std::uint8_t> pixels(data, data + static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4u);
+    stbi_image_free(data);
+    return writePng(to, w, h, pixels);
+}
 
 namespace {
 

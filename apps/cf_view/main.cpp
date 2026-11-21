@@ -6,6 +6,7 @@
 #include <string>
 
 #include "app.hpp"
+#include "capture.hpp"
 #include "core/params.hpp"
 #include "cloud.hpp"
 #include "environment.hpp"
@@ -69,6 +70,8 @@ void usage() {
         "  --no-vsync\n"
         "  --play [--play-fps <n>]  start with snapshot playback running\n"
         "  --spin <deg/s>         turn the camera slowly around the form\n"
+        "  --convert-image <from> <to>  write an image file again in the format of the new name (.png, .jpg)\n"
+        "                         and exit; a screenshot whose name ends in .jpg is written as JPEG as well\n"
         "  --motion-test <frames> headless check of the blending of frames on a moving form: the form turns\n"
         "                         and swells from frame to frame, and the last frame is compared with a still\n"
         "                         image, with and without the cells' own motion (exit code 4 when following\n"
@@ -145,6 +148,11 @@ int main(int argc, char** argv) {
             } else if (a == "--material") {
                 const std::string v = next();
                 if (!cfv::setRenderSetting(o.settings, "material", v).empty()) throw std::runtime_error("unknown material " + v + " (see --list-materials)");
+            } else if (a == "--convert-image") {
+                const std::string from = next();
+                const std::string to = next();
+                if (!cfv::convertImage(from, to)) throw std::runtime_error("could not convert " + from + " to " + to);
+                return 0;
             } else if (a == "--list-materials") {
                 for (const cfv::Material& m : cfv::materials()) std::printf("%-16s %s%s", m.name, m.note, "\n");
                 return 0;

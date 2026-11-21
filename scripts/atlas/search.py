@@ -39,18 +39,22 @@ class Archive:
         self.dead = [2.0 * a / p for a, p in zip(s.seed, s.population)]
         scale = store.meta("distance_scale") or {}
         self.new_from = max(1.0, scale.get("same_p90", 1.0))
-        self.ids, self.points, self.genomes, self.structure = [], [], [], []
+        self.ids, self.points, self.genomes, self.structure, self.healthy = [], [], [], [], []
         for r, stages in grown(store):
             self.add(r["id"], r["genome"], stages[-1])
 
     def point(self, descriptors):
-        return [x * u for x, u in zip(self.scales.fill(features.vector(descriptors)), self.unit)]
+        # (No feature counts for more than four spreads from the median form: one runaway
+        # number, the curvature of a crumpled sheet for one, would otherwise be all the distance.)
+        s = self.scales
+        return [(c + max(-4.0 * p, min(4.0 * p, x - c))) * u for x, c, p, u in zip(s.fill(features.vector(descriptors)), s.centre, s.population, self.unit)]
 
     def add(self, run, genome, descriptors):
         self.ids.append(run)
         self.points.append(self.point(descriptors))
         self.genomes.append(genome)
         self.structure.append(descriptors.get("structure", 0.0))
+        self.healthy.append(features.healthy(descriptors))
 
     def distance(self, a, b):
         total = 0.0
@@ -95,7 +99,9 @@ def _enter(archive, store, ids):
             out.append((run, 0.0))
             continue
         point = archive.point(stages[-1])
-        out.append((run, archive.nearest(point, range(before))[0]))
+        # (An unhealthy form joins the archive, so that the search does not come back to it,
+        # but counts as nothing new.)
+        out.append((run, archive.nearest(point, range(before))[0] if features.healthy(stages[-1]) else 0.0))
         archive.add(run, r["genome"], stages[-1])
     return out
 
@@ -138,7 +144,8 @@ def cmd_novelty(store, args):
     for generation in range(args.generations):
         t0 = time.time()
         sample = rng.sample(range(len(archive.points)), min(600, len(archive.points)))
-        candidates = rng.sample(range(len(archive.points)), min(160, len(archive.points)))
+        fit = [i for i in range(len(archive.points)) if archive.healthy[i]]
+        candidates = rng.sample(fit, min(160, len(fit)))
         ranked = sorted(candidates, key=lambda i: -archive.sparseness(archive.points[i], sample))
         parents = ranked[:max(args.batch // 2, 4)]
         children = []
@@ -223,7 +230,8 @@ def cmd_emitter(store, args):
 
     def start():
         sample = rng.sample(range(len(archive.points)), min(600, len(archive.points)))
-        candidates = rng.sample(range(len(archive.points)), min(120, len(archive.points)))
+        fit = [i for i in range(len(archive.points)) if archive.healthy[i]]
+        candidates = rng.sample(fit, min(120, len(fit)))
         return max(candidates, key=lambda i: archive.sparseness(archive.points[i], sample))
 
     emitters = [Emitter(k + 1, archive, start(), rng) for k in range(args.emitters)]
@@ -338,6 +346,35 @@ def cmd_breed(store, args):
     print(f"breed: {sum(1 for i in ids if i is not None)} children of {len(parents)} parents in {time.time() - t0:.0f} s: runs {min(i for i in ids if i)} to {max(i for i in ids if i)}")
 
 
+def cmd_yield(args):
+    """How many of the runs of each origin were new forms when they were made: further from
+    every earlier form of the database than the 'new' distance. For the survey, a sample."""
+    store = Store(args.root)
+    archive = Archive(store)
+    rng = random.Random(1)
+    origin = {r["id"]: r["origin"] for r in store.runs("")}
+    made = {}
+    for r in store.runs(""):
+        made.setdefault(r["origin"], []).append(r["id"])
+    place = {run: k for k, run in enumerate(archive.ids)}
+    report = {}
+    print(f"a form is new when it is healthy and at a distance of {archive.new_from:.2f} or more from every earlier form")
+    print(f"  {'origin':16s} {'runs':>6s} {'grown to the end':>17s} {'new forms':>10s} {'new per 100 runs':>17s}")
+    for name, runs in sorted(made.items()):
+        grown_ = [run for run in runs if run in place]
+        checked = grown_ if name != "survey" else rng.sample(grown_, min(300, len(grown_)))
+        new = 0
+        for run in checked:
+            k = place[run]
+            if archive.healthy[k] and (k == 0 or archive.nearest(archive.points[k], range(k))[0] >= archive.new_from):
+                new += 1
+        share = new / len(checked) if checked else 0.0
+        per_run = share * len(grown_) / len(runs) if runs else 0.0
+        report[name] = {"runs": len(runs), "grown": len(grown_), "new_share_of_grown": share, "new_per_run": per_run}
+        print(f"  {name:16s} {len(runs):6d} {len(grown_):17d} {round(share * len(grown_)):10d} {100 * per_run:17.1f}" + ("   (from a sample of 300)" if name == "survey" else ""))
+    store.set_meta("yield_report", report)
+
+
 def cmd_search(args):
     store = Store(args.root)
     {"novelty": cmd_novelty, "emitter": cmd_emitter, "ascent": cmd_ascent, "breed": cmd_breed}[args.driver](store, args)
@@ -364,3 +401,6 @@ def register(sub):
     p.add_argument("--min-rating", type=int, default=4)
     p.add_argument("--no-early-stop", action="store_true", help="grow every form to the end (default: the early-stop rule of the database is used when there is one)")
     p.set_defaults(run=cmd_search)
+
+    p = sub.add_parser("yield", help="how many new forms each origin (survey, novelty, emitter, ...) gave per run")
+    p.set_defaults(run=cmd_yield)

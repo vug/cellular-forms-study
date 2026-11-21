@@ -23,6 +23,8 @@ void usage() {
         "Headless capture (no window; works with the screen locked):\n"
         "  --screenshot <out.png> render one frame offscreen and exit\n"
         "  --frame <index|all>    which file of the run (default: the last; 'all' writes out_0000.png ...)\n"
+        "                         or a list such as 3,10,-1 (negative counts from the end)\n"
+        "  --sheet [--sheet-columns <n>]  tile the captured frames into one PNG\n"
         "  --size <W>x<H>         image or window size (default 1600x1000)\n"
         "  --ssaa <1..4>          supersampling for captures (default 2)\n"
         "\n"
@@ -37,7 +39,8 @@ void usage() {
         "  --validate             enable the Vulkan validation layer; exit code 3 on any error\n"
         "  --no-vsync\n"
         "  --play [--play-fps <n>]  start with snapshot playback running\n"
-        "  --exit-after <frames>  close the window after this many frames and print frame times\n");
+        "  --exit-after <frames>  close the window after this many frames and print frame times\n"
+        "  --window-capture <png> [--window-capture-frame <n>]  save the window, UI included, at frame n\n");
 }
 
 }  // namespace
@@ -67,8 +70,24 @@ int main(int argc, char** argv) {
                 o.screenshot = next();
             } else if (a == "--frame") {
                 const std::string v = next();
-                if (v == "all") o.allFrames = true;
-                else o.frame = std::atoi(v.c_str());
+                if (v == "all") {
+                    o.allFrames = true;
+                } else if (v.find(',') != std::string::npos) {
+                    std::size_t at = 0;
+                    while (at <= v.size()) {
+                        const std::size_t comma = v.find(',', at);
+                        const std::string item = v.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+                        if (!item.empty()) o.frames.push_back(std::atoi(item.c_str()));
+                        if (comma == std::string::npos) break;
+                        at = comma + 1;
+                    }
+                } else {
+                    o.frame = std::atoi(v.c_str());
+                }
+            } else if (a == "--sheet") {
+                o.sheet = true;
+            } else if (a == "--sheet-columns") {
+                o.sheetColumns = std::atoi(next());
             } else if (a == "--size") {
                 if (std::sscanf(next(), "%dx%d", &o.width, &o.height) != 2 || o.width < 16 || o.height < 16)
                     throw std::runtime_error("--size expects <W>x<H>");
@@ -104,6 +123,10 @@ int main(int argc, char** argv) {
                 o.playFps = static_cast<float>(std::atof(next()));
             } else if (a == "--exit-after") {
                 o.exitAfterFrames = std::atoi(next());
+            } else if (a == "--window-capture") {
+                o.windowCapture = next();
+            } else if (a == "--window-capture-frame") {
+                o.windowCaptureFrame = std::atoi(next());
             } else {
                 throw std::runtime_error("unknown option " + a + " (try --help)");
             }

@@ -60,9 +60,32 @@ Cloud loadCloud(const std::filesystem::path& file) {
 std::vector<std::filesystem::path> listRun(const std::filesystem::path& dir) {
     std::vector<std::filesystem::path> files;
     if (!std::filesystem::is_directory(dir)) throw std::runtime_error("not a directory: " + dir.string());
-    for (const auto& e : std::filesystem::directory_iterator(dir))
-        if (e.is_regular_file() && isCloudFile(e.path())) files.push_back(e.path());
-    std::sort(files.begin(), files.end());
+    // A run directory holds snapshots (snap_c<cells>_s<step>.cfs) next to checkpoints and
+    // latest.cfs; scrubbing goes through the snapshots. Without any, take every state file.
+    std::vector<std::filesystem::path> others;
+    for (const auto& e : std::filesystem::directory_iterator(dir)) {
+        if (!e.is_regular_file() || !isCloudFile(e.path())) continue;
+        const std::string name = e.path().filename().string();
+        (name.rfind("snap_", 0) == 0 ? files : others).push_back(e.path());
+    }
+    if (files.empty()) files = std::move(others);
+    // Order by the cell count in the name when there is one (growth order), then by name.
+    auto cellsOf = [](const std::filesystem::path& p) -> long long {
+        const std::string name = p.filename().string();
+        const std::size_t at = name.find("_c");
+        if (at == std::string::npos) return -1;
+        long long v = 0;
+        bool any = false;
+        for (std::size_t i = at + 2; i < name.size() && name[i] >= '0' && name[i] <= '9'; ++i) {
+            v = v * 10 + (name[i] - '0');
+            any = true;
+        }
+        return any ? v : -1;
+    };
+    std::sort(files.begin(), files.end(), [&](const std::filesystem::path& a, const std::filesystem::path& b) {
+        const long long ca = cellsOf(a), cb = cellsOf(b);
+        return ca != cb ? ca < cb : a.filename().string() < b.filename().string();
+    });
     return files;
 }
 

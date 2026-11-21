@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -97,13 +98,25 @@ int runHeadless(const ViewOptions& o) {
     CloudGpu gpu(ctx);
 
     std::vector<int> indices;
+    auto resolve = [&](int f) { return f < 0 ? std::max(source.count() + f, 0) : std::min(f, source.count() - 1); };
     if (o.allFrames) {
         for (int i = 0; i < source.count(); ++i) indices.push_back(i);
+    } else if (!o.frames.empty()) {
+        for (int f : o.frames) indices.push_back(resolve(f));
     } else {
-        indices.push_back(o.frame < 0 ? source.count() - 1 : std::min(o.frame, source.count() - 1));
+        indices.push_back(resolve(o.frame));
     }
 
-    for (int index : indices) {
+    const int n = static_cast<int>(indices.size());
+    int columns = o.sheetColumns > 0 ? o.sheetColumns : 1;
+    if (o.sheetColumns <= 0)
+        while (columns * columns < n) ++columns;
+    const int rows = (n + columns - 1) / columns;
+    std::vector<std::uint8_t> sheet;
+    if (o.sheet) sheet.assign(static_cast<size_t>(columns) * o.width * rows * o.height * 4, 0);
+
+    for (int k = 0; k < n; ++k) {
+        const int index = indices[static_cast<size_t>(k)];
         const Cloud& cloud = source.get(index);
         gpu.upload(cloud);
         RenderSettings settings = o.settings;
@@ -112,19 +125,33 @@ int runHeadless(const ViewOptions& o) {
         const std::vector<std::uint8_t> pixels =
             renderOffscreen(ctx, gpu.buffers(), cam, settings, cloud.radius, static_cast<float>(cloud.step), o.width,
                             o.height, o.ssaa);
+        std::printf("frame %d: %u cells, step %llu%s", index, cloud.count(), static_cast<unsigned long long>(cloud.step), "\n");
 
+        if (o.sheet) {
+            const int cx = k % columns, cy = k / columns;
+            for (int y = 0; y < o.height; ++y)
+                std::memcpy(sheet.data() + ((static_cast<size_t>(cy) * o.height + y) * columns * o.width + static_cast<size_t>(cx) * o.width) * 4,
+                            pixels.data() + static_cast<size_t>(y) * o.width * 4, static_cast<size_t>(o.width) * 4);
+            continue;
+        }
         std::filesystem::path out = o.screenshot;
-        if (o.allFrames) {
+        if (n > 1) {
             char suffix[32];
             std::snprintf(suffix, sizeof suffix, "_%04d", index);
             out.replace_filename(o.screenshot.stem().string() + suffix + o.screenshot.extension().string());
         }
         if (!writePng(out, o.width, o.height, pixels)) {
-            std::fprintf(stderr, "could not write %s\n", out.string().c_str());
+            std::fprintf(stderr, "could not write %s%s", out.string().c_str(), "\n");
             return 2;
         }
-        std::printf("wrote %s  (%u cells, step %llu, %s)\n", out.string().c_str(), cloud.count(),
-                    static_cast<unsigned long long>(cloud.step), ctx.gpuName.c_str());
+        std::printf("wrote %s  (%s)%s", out.string().c_str(), ctx.gpuName.c_str(), "\n");
+    }
+    if (o.sheet) {
+        if (!writePng(o.screenshot, columns * o.width, rows * o.height, sheet)) {
+            std::fprintf(stderr, "could not write %s%s", o.screenshot.string().c_str(), "\n");
+            return 2;
+        }
+        std::printf("wrote %s  (%d x %d tiles, %s)%s", o.screenshot.string().c_str(), columns, rows, ctx.gpuName.c_str(), "\n");
     }
     if (o.validate) {
         std::printf("validation: %u errors, %u warnings\n", ctx.validationErrorCount(), ctx.validationWarningCount());
@@ -291,7 +318,7 @@ void Window::createSwapchain() {
     ci.imageColorSpace = chosen.colorSpace;
     ci.imageExtent = extent;
     ci.imageArrayLayers = 1;
-    ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;  // TRANSFER_SRC: window captures
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ci.preTransform = caps.currentTransform;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -516,9 +543,27 @@ void Window::drawFrame() {
                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
     renderer_->record(cmd_, swapViews_[imageIndex], gpu_->buffers(), uniforms,
                       [](VkCommandBuffer c) { ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), c); });
-    transition(cmd_, swapImages_[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-               VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-               VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_NONE, 0);
+    const bool captureWindow = !o_.windowCapture.empty() && frameCounter_ == static_cast<std::uint64_t>(o_.windowCaptureFrame);
+    Buffer captureBuffer;
+    if (captureWindow) {
+        captureBuffer = ctx_->createBuffer(static_cast<VkDeviceSize>(swapExtent_.width) * swapExtent_.height * 4,
+                                           VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
+        transition(cmd_, swapImages_[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        VkBufferImageCopy region{};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageExtent = {swapExtent_.width, swapExtent_.height, 1};
+        vkCmdCopyImageToBuffer(cmd_, swapImages_[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, captureBuffer.buffer, 1, &region);
+        transition(cmd_, swapImages_[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                   VK_PIPELINE_STAGE_2_NONE, 0);
+    } else {
+        transition(cmd_, swapImages_[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                   VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_NONE, 0);
+    }
     vk_check(vkEndCommandBuffer(cmd_), "vkEndCommandBuffer");
 
     VkSemaphoreSubmitInfo wait{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
@@ -546,6 +591,19 @@ void Window::drawFrame() {
     const VkResult presented = vkQueuePresentKHR(ctx_->queue, &present);
     if (presented == VK_ERROR_OUT_OF_DATE_KHR || presented == VK_SUBOPTIMAL_KHR) swapchainDirty_ = true;
     else vk_check(presented, "vkQueuePresentKHR");
+
+    if (captureWindow) {
+        vk_check(vkWaitForFences(ctx_->device, 1, &frameFence_, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+        const size_t pixels = static_cast<size_t>(swapExtent_.width) * swapExtent_.height;
+        std::vector<std::uint8_t> rgba(pixels * 4);
+        std::memcpy(rgba.data(), captureBuffer.mapped, rgba.size());
+        if (swapFormat_ == VK_FORMAT_B8G8R8A8_UNORM)
+            for (size_t i = 0; i < pixels; ++i) std::swap(rgba[i * 4], rgba[i * 4 + 2]);
+        for (size_t i = 0; i < pixels; ++i) rgba[i * 4 + 3] = 255;
+        const bool ok = writePng(o_.windowCapture, static_cast<int>(swapExtent_.width), static_cast<int>(swapExtent_.height), rgba);
+        std::printf("%s %s\n", ok ? "wrote" : "could not write", o_.windowCapture.string().c_str());
+        ctx_->destroy(captureBuffer);
+    }
     ++frameCounter_;
 }
 

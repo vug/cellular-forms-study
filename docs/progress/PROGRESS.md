@@ -14,8 +14,8 @@ Newest entries at the bottom. Times are local (America/New_York).
 | Milestone | State | Verified how |
 | --- | --- | --- |
 | M1 CPU reference + CLI | in progress | see entries below |
-| M2 Snapshot viewer (Vulkan 1.4) | not started | blocked in this session: no Vulkan SDK, no GPU, no Windows shell |
-| M3 CUDA backend | not started | blocked in this session: no nvcc, no GPU |
+| M2 Snapshot viewer (Vulkan 1.4) | exit criteria observed (local session, 00:25) | timed scrub of a 100k-cell run, headless captures, validation layer clean; mouse interaction not tried by hand |
+| M3 CUDA backend | in progress (local session) | |
 | M4 Live viewer | not started | blocked (needs M2 + M3) |
 | M9 Ports | not started | blocked / last by plan |
 
@@ -231,3 +231,60 @@ to know MSVC and GCC even agree on the checksum.
 
 - Parameters are still the first guesses; the fast food rate above compresses the sheet (mean
   link 0.73). Tuning for folding growth and the 100k exit run are next, then `cf_render`.
+
+## 2026-11-21 00:25 · Local session: M2 snapshot viewer
+
+**Built** (`src/viewer`, `shaders`, `apps/cf_view`; commits `b170981` and the one with this entry)
+
+- Vulkan 1.4 (dynamic rendering, synchronization2), GLFW 3.5.1 window, Dear ImGui 1.93 panel.
+- One instanced quad per cell; the fragment shader intersects the view ray with the sphere and
+  writes the sphere's own depth (`layout(depth_less)`), so cells intersect correctly.
+- G-buffer (albedo, view normal + linear depth), screen-space ambient occlusion at two radii
+  (contact between cells, and the insides of folds), depth-aware 5x5 blur, composite pass.
+- Colour by age, food, birth step or one colour; orbit / pan / zoom camera.
+- `--run <dir>` loads a run's `snap_*.cfs` through `cf::load_snapshot` and scrubs through them
+  (slider, play, step buttons). `--snapshot <file>` for single files, checkpoints included.
+- Headless capture: `--screenshot out.png` creates no window and no swapchain, renders
+  offscreen with 2x supersampling and exits. `--frame 3,10,-1 --sheet` tiles several snapshots
+  into one image. `--window-capture` saves the real window with the UI.
+- `--validate` turns on the Khronos validation layer; the process exits with code 3 if it
+  reports any error.
+
+**Verified** (this PC, RTX 4090, driver 610.88)
+
+- M1 run used: `cf_run --new icosphere:2 --seed 1 --until-cells 100000 --snapshot-factor 1.15
+  --out runs\m2_default_100k` (default parameters, not tuned yet): 100,136 cells at step 2,414
+  in 13.8 s on 32 threads, 119 invariant checks ok, 48 snapshots.
+- Scrub: `cf_view --run runs\m2_default_100k --validate --play --play-fps 30 --exit-after 600`:
+  599 frames, mean 4.16 ms, median 4.17 ms, p99 12.5 ms, max 12.7 ms, 77 snapshot switches,
+  0 validation errors. (4.17 ms is the 240 Hz display refresh: vsync is on.)
+- Headless: `cf_view --run ... --screenshot x.png --validate`: image written, 0 validation
+  errors. The first run did report one (missing `shaderDemoteToHelperInvocation`); fixed.
+- The 3 validation *warnings* in every run come from the Vulkan loader about a third-party
+  overlay layer installed on this PC (`GalaxyOverlayVkLayer` naming), not from the viewer.
+
+**Not verified**
+
+- Nobody has dragged the mouse: orbit, pan and zoom are written but only the automatic framing
+  was exercised. Window resize and minimise paths are written and untested.
+- Frame rate with millions of cells (comes with the M3 runs).
+
+**Images** (uniform colour, ambient occlusion on)
+
+![growth sheet](img/m2_growth_sheet_default_params.png)
+
+435, 2,318, 14,248 and 100,136 cells of the run above (default parameters).
+
+![100k cells](img/m2_100k_cells_default_params.png)
+
+![viewer window](img/m2_viewer_window.png)
+
+**Decisions made unattended (local session)**
+
+8. **No VMA, no vk-bootstrap.** The viewer needs about ten allocations; a 40-line helper is
+   less to carry than two more submodules.
+9. **One frame in flight.** The render loop waits for the previous frame's fence before it
+   touches cell buffers. It costs a little CPU/GPU overlap and makes buffer replacement (new
+   snapshot, later the live hand-off) trivially safe.
+10. **Captures are supersampled offscreen renders, not window grabs,** so they do not depend on
+    the window, the UI or the screen being unlocked.

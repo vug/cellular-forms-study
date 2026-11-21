@@ -6,11 +6,15 @@ float hash12(vec2 p) {
     return fract((p3.x + p3.y) * p3.z);
 }
 
-// View-space position of the surface at `uv` with linear depth `depth`.
-vec3 viewPos(vec2 uv, float depth) {
+// Direction of the view ray through `uv`, scaled so that z is -1 (view space). The third column
+// of the projection is not zero for a stereo eye, whose frustum is skewed.
+vec3 viewRay(vec2 uv) {
     vec2 ndc = uv * 2.0 - 1.0;
-    return vec3(ndc.x * depth / F.proj[0][0], ndc.y * depth / F.proj[1][1], -depth);
+    return vec3((ndc.x + F.proj[2][0]) / F.proj[0][0], (ndc.y + F.proj[2][1]) / F.proj[1][1], -1.0);
 }
+
+// View-space position of the surface at `uv` with linear depth `depth`.
+vec3 viewPos(vec2 uv, float depth) { return viewRay(uv) * depth; }
 
 // Behind the form: a vertical gradient with a soft vignette.
 vec3 backgroundColor(vec2 uv) {

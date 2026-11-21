@@ -75,6 +75,7 @@ private:
     bool swapchainDirty_ = false;
 
     std::unique_ptr<Renderer> renderer_;
+    std::unique_ptr<Renderer> rendererRight_;  // the second eye, once a stereo mode has been chosen
 
     // Snapshot mode.
     std::unique_ptr<CloudGpu> gpu_;
@@ -185,6 +186,7 @@ Window::~Window() {
         ImGui::DestroyContext();
         gpu_.reset();
         renderer_.reset();
+        rendererRight_.reset();
         destroySwapchain();
         if (imageReady_) vkDestroySemaphore(ctx_->device, imageReady_, nullptr);
         if (frameFence_) vkDestroyFence(ctx_->device, frameFence_, nullptr);
@@ -719,6 +721,13 @@ void Window::buildUi() {
         ImGui::TextDisabled("lit by the key light and the sky and ground colours");
     }
 
+    if (ImGui::CollapsingHeader("Stereo")) {
+        const char* stereoModes[] = {"off", "side by side", "side by side, crossed eyes", "red and cyan glasses"};
+        ImGui::Combo("stereo", &settings_.stereoMode, stereoModes, 4);
+        ImGui::SliderFloat("eye separation", &settings_.stereoSeparation, 0.0f, 0.12f, "%.3f");
+        ImGui::TextDisabled("as a share of the distance to the form");
+    }
+
     if (ImGui::CollapsingHeader("Output", live_ ? 0 : ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::SliderFloat("exposure", &settings_.exposure, 0.2f, 3.0f);
         const char* toneMaps[] = {"none", "Reinhard", "filmic"};
@@ -893,7 +902,7 @@ void Window::drawFrame() {
     handleCamera();
     ImGui::Render();
 
-    const FrameSetup frame = renderer_->makeUniforms(camera_, shading, sc.centre, sc.radius, static_cast<float>(sc.step), frameCounter_);
+    if (shading.stereoMode != 0 && !rendererRight_) rendererRight_ = std::make_unique<Renderer>(*ctx_, swapFormat_);
 
     vk_check(vkResetCommandBuffer(cmd_, 0), "vkResetCommandBuffer");
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -902,8 +911,8 @@ void Window::drawFrame() {
     transition(cmd_, swapImages_[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-    renderer_->record(cmd_, swapViews_[imageIndex], sc.buffers, frame, shading,
-                      [](VkCommandBuffer c) { ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), c); });
+    renderView(cmd_, swapViews_[imageIndex], swapExtent_, *renderer_, rendererRight_.get(), sc.buffers, camera_, shading, sc.centre, sc.radius,
+               static_cast<float>(sc.step), frameCounter_, [](VkCommandBuffer c) { ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), c); });
 
     const bool captureWindow = !o_.windowCapture.empty() && frameCounter_ == static_cast<std::uint64_t>(o_.windowCaptureFrame);
     Buffer captureBuffer;

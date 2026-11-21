@@ -17,8 +17,8 @@ float hash12(vec2 p) {
 }
 
 vec3 viewPos(vec2 uv, float depth) {
-    vec2 ndc = uv * 2.0 - 1.0;
-    return vec3(ndc.x * depth / F.proj[0][0], ndc.y * depth / F.proj[1][1], -depth);
+    vec2 ndc = uv * 2.0 - 1.0;  // (the third column of the projection is not zero for a stereo eye)
+    return vec3((ndc.x + F.proj[2][0]) * depth / F.proj[0][0], (ndc.y + F.proj[2][1]) * depth / F.proj[1][1], -depth);
 }
 
 float occlusionAt(vec3 p, vec3 n, mat3 tbn, float radius, float seed) {

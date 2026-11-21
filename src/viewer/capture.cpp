@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
 
 #ifdef _MSC_VER
 #pragma warning(push, 0)
@@ -23,6 +24,9 @@ std::vector<std::uint8_t> renderOffscreen(Context& ctx, const PointBuffers& poin
 
     Renderer renderer(ctx, format);
     renderer.resize(extent);
+    // The second eye of a stereo capture has a renderer of its own.
+    std::unique_ptr<Renderer> second;
+    if (settings.stereoMode != 0) second = std::make_unique<Renderer>(ctx, format);
     Image target = ctx.createImage(extent, format, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                                    VK_IMAGE_ASPECT_COLOR_BIT);
     const VkDeviceSize bytes = static_cast<VkDeviceSize>(extent.width) * extent.height * 4;
@@ -34,7 +38,9 @@ std::vector<std::uint8_t> renderOffscreen(Context& ctx, const PointBuffers& poin
     s.minPixelRadius = settings.minPixelRadius * static_cast<float>(ssaa);
     s.wallWidth = settings.wallWidth * static_cast<float>(ssaa);
     s.outlineWidth = settings.outlineWidth * static_cast<float>(ssaa);
-    const FrameSetup frame = renderer.makeUniforms(camera, s, sceneCentre, sceneRadius, currentStep, 0);
+    auto draw = [&](VkCommandBuffer cmd) {
+        renderView(cmd, target.view, extent, renderer, second.get(), points, camera, s, sceneCentre, sceneRadius, currentStep, 0, {});
+    };
 
     // The path tracer refines its image frame by frame: render until it has all its samples.
     if (s.drawMode >= kDrawPathTraced && renderer.rayTracing()) {
@@ -45,7 +51,7 @@ std::vector<std::uint8_t> renderOffscreen(Context& ctx, const PointBuffers& poin
                 transition(cmd, target.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
                            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-                renderer.record(cmd, target.view, points, frame, s, {});
+                draw(cmd);
             });
         }
     }
@@ -54,7 +60,7 @@ std::vector<std::uint8_t> renderOffscreen(Context& ctx, const PointBuffers& poin
         transition(cmd, target.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-        renderer.record(cmd, target.view, points, frame, s, {});
+        draw(cmd);
         transition(cmd, target.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);

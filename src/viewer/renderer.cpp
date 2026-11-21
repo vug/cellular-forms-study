@@ -92,6 +92,7 @@ struct PipelineDesc {
     Blend blend = Blend::Opaque;
     std::vector<VkFormat> colorFormats;
     VkFormat depthFormat = VK_FORMAT_UNDEFINED;
+    VkColorComponentFlags colorMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 };
 
 VkPipeline makePipeline(Context& ctx, VkPipelineLayout layout, const PipelineDesc& d) {
@@ -162,7 +163,7 @@ VkPipeline makePipeline(Context& ctx, VkPipelineLayout layout, const PipelineDes
     for (size_t i = 0; i < blendAttachments.size(); ++i) {
         VkPipelineColorBlendAttachmentState& a = blendAttachments[i];
         const bool integer = d.colorFormats[i] == kIdFormat;  // integer targets cannot blend
-        a.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        a.colorWriteMask = d.colorMask;
         if (d.blend == Blend::Additive) {
             if (integer) {
                 a.colorWriteMask = 0;  // the x-ray pass has no single cell per pixel
@@ -248,6 +249,25 @@ void beginPass(VkCommandBuffer cmd, VkExtent2D extent, const std::vector<VkImage
     const VkRect2D scissor{{0, 0}, extent};
     vkCmdSetViewport(cmd, 0, 1, &vp);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
+}
+
+// The last pass of a view, into a rectangle of the target.
+void beginRegionPass(VkCommandBuffer cmd, VkRect2D rect, VkImageView target, bool keep) {
+    VkRenderingAttachmentInfo attachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    attachment.imageView = target;
+    attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    attachment.loadOp = keep ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo info{VK_STRUCTURE_TYPE_RENDERING_INFO};
+    info.renderArea = rect;
+    info.layerCount = 1;
+    info.colorAttachmentCount = 1;
+    info.pColorAttachments = &attachment;
+    vkCmdBeginRendering(cmd, &info);
+    const VkViewport vp{static_cast<float>(rect.offset.x), static_cast<float>(rect.offset.y), static_cast<float>(rect.extent.width),
+                        static_cast<float>(rect.extent.height), 0.0f, 1.0f};
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &rect);
 }
 
 void toAttachment(VkCommandBuffer cmd, const Image& img) {
@@ -463,7 +483,8 @@ Renderer::~Renderer() {
     ctx_.destroy(shadowMap_);
     ctx_.destroy(env_);
     destroyCellTree();
-    for (VkPipeline p : {impostorPipeline_, ssaoPipeline_, blurPipeline_, compositePipeline_, xrayPipeline_, meshPipeline_, shadowCellsPipeline_,
+    for (VkPipeline p : {impostorPipeline_, ssaoPipeline_, blurPipeline_, compositePipeline_, compositeRedPipeline_, compositeCyanPipeline_,
+                         xrayPipeline_, meshPipeline_, shadowCellsPipeline_,
                          shadowMeshPipeline_, rtaoPipeline_, pathTracePipeline_, boxPipeline_, denoisePipeline_})
         if (p) vkDestroyPipeline(ctx_.device, p, nullptr);
     if (envSampler_) vkDestroySampler(ctx_.device, envSampler_, nullptr);
@@ -524,6 +545,11 @@ void Renderer::createPipelines() {
     PipelineDesc composite{kFullscreenVert, std::size(kFullscreenVert), kCompositeFrag, std::size(kCompositeFrag)};
     composite.colorFormats = {targetFormat_};
     compositePipeline_ = makePipeline(ctx_, pipelineLayout_, composite);
+    // The two halves of a red and cyan stereo image: each eye writes only its colours.
+    composite.colorMask = VK_COLOR_COMPONENT_R_BIT;
+    compositeRedPipeline_ = makePipeline(ctx_, pipelineLayout_, composite);
+    composite.colorMask = VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    compositeCyanPipeline_ = makePipeline(ctx_, pipelineLayout_, composite);
 
     PipelineDesc denoise{kFullscreenVert, std::size(kFullscreenVert), kDenoiseFrag, std::size(kDenoiseFrag)};
     denoise.colorFormats = {kDisplayFormat};
@@ -791,7 +817,7 @@ void Renderer::syncEnvironment(const RenderSettings& settings) {
 }
 
 FrameSetup Renderer::makeUniforms(const OrbitCamera& camera, const RenderSettings& s, Vec3 sceneCentre, float sceneRadius, float currentStep,
-                                  uint64_t frameIndex) const {
+                                  uint64_t frameIndex, float eyeOffset) const {
     FrameSetup frame{};
     FrameUniforms& u = frame.uniforms;
     const float w = static_cast<float>(extent_.width), h = static_cast<float>(extent_.height);
@@ -800,8 +826,14 @@ FrameSetup Renderer::makeUniforms(const OrbitCamera& camera, const RenderSetting
     float zNear = camera.distance - reach;
     if (zNear < zFar * 2.0e-4f) zNear = zFar * 2.0e-4f;
 
-    const Mat4 view = camera.view();
-    const Mat4 proj = perspective(camera.fovy, w / h, zNear, zFar);
+    Mat4 view = camera.view();
+    Mat4 proj = perspective(camera.fovy, w / h, zNear, zFar);
+    if (eyeOffset != 0.0f) {
+        // A stereo eye: moved sideways, with the frustum skewed so that both eyes frame the
+        // same rectangle at the distance of the orbit point (no toe-in, so no vertical shift).
+        view.m[12] -= eyeOffset;
+        proj.m[8] = -proj.m[0] * eyeOffset / std::max(camera.distance, 1.0e-6f);
+    }
     const Mat4 invView = rigidInverse(view);
     std::memcpy(u.view, view.m, sizeof u.view);
     std::memcpy(u.proj, proj.m, sizeof u.proj);
@@ -1086,7 +1118,7 @@ void Renderer::updateCellTree(VkCommandBuffer cmd, const PointBuffers& points, f
 }
 
 void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBuffers& points, const FrameSetup& frame,
-                      const RenderSettings& settings, const std::function<void(VkCommandBuffer)>& overlay) {
+                      const RenderSettings& settings, const std::function<void(VkCommandBuffer)>& overlay, const Region* region) {
     syncEnvironment(settings);
     FrameUniforms u = frame.uniforms;
     u.misc2[3] = static_cast<float>(envLevels_ - 1u);
@@ -1272,12 +1304,53 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
     }
 
     // --- composite into the target, then the overlay (UI) on top
-    beginPass(cmd, extent_, {targetView}, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_NULL_HANDLE);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, compositePipeline_);
+    if (region != nullptr) beginRegionPass(cmd, region->rect, targetView, region->keep);
+    else beginPass(cmd, extent_, {targetView}, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_NULL_HANDLE);
+    const int channels = region != nullptr ? region->channels : 0;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                      channels == 1 ? compositeRedPipeline_ : channels == 2 ? compositeCyanPipeline_ : compositePipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &setComposite_, 0, nullptr);
     vkCmdDraw(cmd, 3, 1, 0, 0);
     if (overlay) overlay(cmd);
     vkCmdEndRendering(cmd);
+}
+
+void renderView(VkCommandBuffer cmd, VkImageView target, VkExtent2D targetExtent, Renderer& left, Renderer* right, const PointBuffers& points,
+                const OrbitCamera& camera, const RenderSettings& settings, Vec3 sceneCentre, float sceneRadius, float currentStep,
+                uint64_t frameIndex, const std::function<void(VkCommandBuffer)>& overlay) {
+    const int mode = right != nullptr ? settings.stereoMode : 0;
+    if (mode < 1 || mode > 3) {
+        left.resize(targetExtent);
+        left.record(cmd, target, points, left.makeUniforms(camera, settings, sceneCentre, sceneRadius, currentStep, frameIndex), settings, overlay);
+        return;
+    }
+    // Half the distance between the eyes; the left eye sits at minus that.
+    const float half = 0.5f * settings.stereoSeparation * camera.distance;
+    const bool sideBySide = mode != 3;
+    const VkExtent2D eyeExtent{sideBySide ? std::max(targetExtent.width / 2u, 1u) : targetExtent.width, targetExtent.height};
+    left.resize(eyeExtent);
+    right->resize(eyeExtent);
+    Renderer::Region leftRegion, rightRegion;
+    leftRegion.rect = VkRect2D{{0, 0}, eyeExtent};
+    rightRegion.rect = leftRegion.rect;
+    if (sideBySide) {
+        // Side by side: the left eye on the left, or swapped for viewing with crossed eyes.
+        const int32_t second = static_cast<int32_t>(eyeExtent.width);
+        (mode == 1 ? rightRegion : leftRegion).rect.offset.x = second;
+    } else {
+        leftRegion.channels = 1;
+        rightRegion.channels = 2;
+        rightRegion.keep = true;  // the red of the left eye is already there
+    }
+    left.record(cmd, target, points, left.makeUniforms(camera, settings, sceneCentre, sceneRadius, currentStep, frameIndex, -half), settings, {},
+                &leftRegion);
+    right->record(cmd, target, points, right->makeUniforms(camera, settings, sceneCentre, sceneRadius, currentStep, frameIndex, half), settings, {},
+                  &rightRegion);
+    if (overlay) {
+        beginRegionPass(cmd, VkRect2D{{0, 0}, targetExtent}, target, true);
+        overlay(cmd);
+        vkCmdEndRendering(cmd);
+    }
 }
 
 // ------------------------------------------------------------------ settings by name
@@ -1415,6 +1488,17 @@ const std::vector<Entry>& entries() {
              st.envFile = v;
              return true;
          }},
+        {"stereo",
+         [](RenderSettings& st, const std::string& v) {
+             const char* names[] = {"off", "sidebyside", "crosseyed", "anaglyph"};
+             for (int i = 0; i < 4; ++i)
+                 if (v == names[i]) {
+                     st.stereoMode = i;
+                     return true;
+                 }
+             return false;
+         }},
+        number("stereoSeparation", &RenderSettings::stereoSeparation),
         number("exposure", &RenderSettings::exposure),
         whole("toneMap", &RenderSettings::toneMap),
         triple("background", &RenderSettings::background),

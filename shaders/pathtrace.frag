@@ -75,8 +75,7 @@ void main() {
     for (int s = 0; s < samples; ++s) {
         // A point inside the pixel, and for a lens with an opening, a point on the lens.
         vec2 uv = (gl_FragCoord.xy - 0.5 + vec2(rnd(), rnd())) * F.viewport.zw;
-        vec2 ndc = uv * 2.0 - 1.0;
-        vec3 dirView = normalize(vec3(ndc.x / F.proj[0][0], ndc.y / F.proj[1][1], -1.0));
+        vec3 dirView = normalize(viewRay(uv));
         vec3 originView = vec3(0.0);
         if (F.pt.y > 0.0) {
             vec3 focal = dirView * (F.pt.z / -dirView.z);

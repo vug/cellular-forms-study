@@ -16,7 +16,5 @@ vec3 envLight(vec3 dir, float lod) {
 // What is behind the form at `uv`: the environment, or the plain background.
 vec3 sceneBackground(vec2 uv) {
     if (F.env.w < 0.5) return backgroundColor(uv);
-    vec2 ndc = uv * 2.0 - 1.0;
-    vec3 dirView = normalize(vec3(ndc.x / F.proj[0][0], ndc.y / F.proj[1][1], -1.0));
-    return envLight(mat3(F.invView) * dirView, 0.0);
+    return envLight(mat3(F.invView) * normalize(viewRay(uv)), 0.0);
 }

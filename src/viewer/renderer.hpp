@@ -157,6 +157,11 @@ struct RenderSettings {
     bool envBackground = false;  // show the map behind the form
     std::string envFile;
 
+    // --- stereo: two views a little apart, for depth. 1: side by side (left eye on the left),
+    // 2: side by side for crossed eyes, 3: red and cyan for glasses.
+    int stereoMode = 0;
+    float stereoSeparation = 0.03f;  // distance between the eyes, as a share of the distance to the form
+
     // --- output
     float exposure = 1.0f;
     int toneMap = 0;  // 0 none, 1 Reinhard, 2 filmic
@@ -201,14 +206,23 @@ public:
     VkExtent2D extent() const { return extent_; }
 
     // Fills the uniform block from a camera, the settings and the bounding sphere of the scene.
+    // `eyeOffset` moves the eye sideways (world units, positive to the right) for a stereo view;
+    // the two views meet at the distance of the point the camera orbits.
     FrameSetup makeUniforms(const OrbitCamera& camera, const RenderSettings& settings, Vec3 sceneCentre, float sceneRadius,
-                            float currentStep, uint64_t frameIndex) const;
+                            float currentStep, uint64_t frameIndex, float eyeOffset = 0.0f) const;
+
+    // Where in the target the last pass draws, when it is not the whole of it (stereo).
+    struct Region {
+        VkRect2D rect{};
+        int channels = 0;   // 0 all, 1 red only, 2 green and blue only
+        bool keep = false;  // keep what the target already holds there
+    };
 
     // Records every pass. The last pass renders into `targetView`, which must be in
     // COLOR_ATTACHMENT_OPTIMAL layout; `overlay` (may be empty) is called inside that pass so the
     // UI can draw on top. No frame using this renderer may still be executing.
     void record(VkCommandBuffer cmd, VkImageView targetView, const PointBuffers& points, const FrameSetup& frame,
-                const RenderSettings& settings, const std::function<void(VkCommandBuffer)>& overlay);
+                const RenderSettings& settings, const std::function<void(VkCommandBuffer)>& overlay, const Region* region = nullptr);
 
     // Path tracer: samples per pixel gathered for the current view so far.
     uint32_t accumulatedSamples() const { return accumSamples_; }
@@ -256,7 +270,8 @@ private:
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE, rtLayout_ = VK_NULL_HANDLE, denoiseLayout_ = VK_NULL_HANDLE;
     VkPipeline denoisePipeline_ = VK_NULL_HANDLE;
     VkPipeline impostorPipeline_ = VK_NULL_HANDLE, ssaoPipeline_ = VK_NULL_HANDLE, blurPipeline_ = VK_NULL_HANDLE,
-               compositePipeline_ = VK_NULL_HANDLE, xrayPipeline_ = VK_NULL_HANDLE, meshPipeline_ = VK_NULL_HANDLE,
+               compositePipeline_ = VK_NULL_HANDLE, compositeRedPipeline_ = VK_NULL_HANDLE, compositeCyanPipeline_ = VK_NULL_HANDLE,
+               xrayPipeline_ = VK_NULL_HANDLE, meshPipeline_ = VK_NULL_HANDLE,
                shadowCellsPipeline_ = VK_NULL_HANDLE, shadowMeshPipeline_ = VK_NULL_HANDLE, rtaoPipeline_ = VK_NULL_HANDLE,
                pathTracePipeline_ = VK_NULL_HANDLE, boxPipeline_ = VK_NULL_HANDLE;
 
@@ -280,5 +295,14 @@ private:
     PFN_vkCmdBuildAccelerationStructuresKHR buildAs_ = nullptr;
     PFN_vkGetAccelerationStructureDeviceAddressKHR asAddress_ = nullptr;
 };
+
+// One frame into `target`: one view, or with settings.stereoMode set, the views of two eyes
+// (side by side, or as the red and the cyan part of one image). The second view needs a
+// renderer of its own, `right`; without one a single view is drawn. The renderers are resized
+// to what each view needs; no frame using them may still be executing. `overlay` is drawn once,
+// over the whole target.
+void renderView(VkCommandBuffer cmd, VkImageView target, VkExtent2D targetExtent, Renderer& left, Renderer* right, const PointBuffers& points,
+                const OrbitCamera& camera, const RenderSettings& settings, Vec3 sceneCentre, float sceneRadius, float currentStep,
+                uint64_t frameIndex, const std::function<void(VkCommandBuffer)>& overlay);
 
 }  // namespace cfv

@@ -27,6 +27,13 @@ struct CudaOptions {
     double maxFractionOfFreeMemory = 0.92;
     // Speed-ups that do not change the result; the switches exist so tests can hold them to that.
     bool rowTable = true;  // per-row index of the grid instead of searching the whole sorted array
+    // Renumbering: from time to time the backend moves its cells into spatial order in memory
+    // (cells keep their ids, so results do not change; see sim_cuda.cu). It happens when the
+    // form has at least renumberMinCells cells and has grown by renumberGrowth since the last
+    // time, or renumberMaxSteps steps have passed. renumberMinCells = 0xFFFFFFFF switches it off.
+    std::uint32_t renumberMinCells = 65536u;
+    double renumberGrowth = 0.05;
+    std::uint32_t renumberMaxSteps = 512u;
 };
 
 struct CudaMemory {

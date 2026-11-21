@@ -25,10 +25,12 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "core/food.hpp"
 #include "core/hash.hpp"
 #include "core/kernels.hpp"
+#include "core/parallel.hpp"
 #include "core/topology.hpp"
 #include "topo_kernels.hpp"
 
@@ -55,7 +57,8 @@ inline unsigned grid_blocks(std::uint32_t n) { return n == 0 ? 1u : (n + kBlock 
 // Device memory per cell, in bytes (see Impl::allocate).
 constexpr double kBytesPerCell = 2 * 12 + 2 * 12 + 2 * 4   // pos, normal, food (double-buffered)
                                  + 4 + 4 + 1 + 4 * kMaxDeg  // birth, gen, deg, nbr
-                                 + 2 * 8 + 2 * 4 + 12 + 1;  // grid keys, ids, sorted positions, cleavage pair
+                                 + 2 * 8 + 2 * 4 + 12 + 1   // grid keys, ids, sorted positions, cleavage pair
+                                 + 2 * 4;                   // cell ids and their inverse (renumbering)
 constexpr std::size_t kFixedBytes = std::size_t{96} << 20;  // CUB temporaries and slack
 
 struct Counters {
@@ -74,12 +77,13 @@ struct Box {
 
 struct BoxOf {
     const Vec3* pos;
+    const std::uint32_t* uid;
     __host__ __device__ Box operator()(std::uint32_t v) const {
         const Vec3 p = pos[v];
         Box b;
         b.lo = p;
         b.hi = p;
-        b.bad = dev_finite(p) ? kInvalid : v;
+        b.bad = dev_finite(p) ? kInvalid : uid[v];
         return b;
     }
 };
@@ -142,14 +146,17 @@ __global__ void k_shadow_build(FoodParams fp, const Vec3* pos, std::int32_t* sha
     atomicMax(&shadow[shadow_texel(fp, pos[v])], ordered_bits(shadow_depth(fp, pos[v])));
 }
 
-__global__ void k_keys(const Vec3* pos, std::uint64_t* key, std::uint32_t* id, std::uint32_t n, Vec3 origin, float inv,
-                       std::uint32_t nx, std::uint32_t ny, std::uint32_t nz) {
-    const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
-    if (v >= n) return;
+// Grid keys, listed in cell-id order (the stable sort then keeps cells with equal keys in id
+// order, which the model's summation order asks for), each with the slot the cell lives in.
+__global__ void k_keys(const Vec3* pos, const std::uint32_t* slotOf, std::uint64_t* key, std::uint32_t* slot, std::uint32_t n, Vec3 origin,
+                       float inv, std::uint32_t nx, std::uint32_t ny, std::uint32_t nz) {
+    const std::uint32_t u = blockIdx.x * blockDim.x + threadIdx.x;
+    if (u >= n) return;
+    const std::uint32_t v = slotOf[u];
     const Vec3 p = pos[v];
-    key[v] = grid_key(grid_coord(p.x, origin.x, inv, nx), grid_coord(p.y, origin.y, inv, ny),
+    key[u] = grid_key(grid_coord(p.x, origin.x, inv, nx), grid_coord(p.y, origin.y, inv, ny),
                       grid_coord(p.z, origin.z, inv, nz), nx, ny);
-    id[v] = v;
+    slot[u] = v;
 }
 
 __global__ void k_gather(const Vec3* pos, const std::uint32_t* sortedId, Vec3* sortedPos, std::uint32_t n) {
@@ -171,8 +178,9 @@ __global__ void k_rows(const std::uint64_t* key, std::uint32_t n, std::uint32_t 
 // Normal, move and clamp of every cell (Jacobi: reads the old positions, writes the new buffers).
 // The normal is computed here and not in a pass of its own because both need the positions of
 // the cell's ring: one pass fetches them once.
-__global__ void k_move(const Vec3* pos, const Vec3* prevNrm, Vec3* nrmOut, const std::uint32_t* nbr, const std::uint8_t* deg, Vec3* out,
-                       std::uint32_t n, GridView grid, KernelParams kp, FoodParams fp, float eps2, Counters* c) {
+__global__ void k_move(const Vec3* pos, const Vec3* prevNrm, Vec3* nrmOut, const std::uint32_t* nbr, const std::uint8_t* deg,
+                       const std::uint32_t* uid, Vec3* out, std::uint32_t n, GridView grid, KernelParams kp, FoodParams fp, float eps2,
+                       Counters* c) {
     // The two counters are summed per block first: when most cells hit the displacement cap,
     // one atomic per cell on a single address is a bottleneck.
     __shared__ std::uint32_t blockClamped, blockFallbacks;
@@ -201,7 +209,7 @@ __global__ void k_move(const Vec3* pos, const Vec3* prevNrm, Vec3* nrmOut, const
         if (clamp_displacement(delta, kp.maxMove)) atomicAdd(&blockClamped, 1u);
         const Vec3 Pn = P + delta;
         out[v] = Pn;
-        if (!dev_finite(Pn)) atomicMin(&c->firstBadMove, v);
+        if (!dev_finite(Pn)) atomicMin(&c->firstBadMove, uid[v]);
     }
     __syncthreads();
     if (threadIdx.x == 0) {
@@ -212,7 +220,8 @@ __global__ void k_move(const Vec3* pos, const Vec3* prevNrm, Vec3* nrmOut, const
 
 // Which term of one cell is not finite: bit 0 spring, 1 planar, 2 bulge, 3 repulsion.
 __global__ void k_diagnose(const Vec3* pos, const Vec3* nrm, const std::uint32_t* nbr, const std::uint8_t* deg,
-                           std::uint32_t v, GridView grid, KernelParams kp, FoodParams fp, std::uint32_t* out) {
+                           const std::uint32_t* slotOf, std::uint32_t id, GridView grid, KernelParams kp, FoodParams fp, std::uint32_t* out) {
+    const std::uint32_t v = slotOf[id];
     const Vec3 P = pos[v];
     const std::uint32_t* ring = nbr + static_cast<std::size_t>(v) * kMaxDeg;
     const std::uint32_t d = deg[v];
@@ -225,22 +234,24 @@ __global__ void k_diagnose(const Vec3* pos, const Vec3* nrm, const std::uint32_t
 
 // Food (core/food.hpp: uniform random food scaled by the sources that are switched on), then
 // the division candidates: cells with food above the threshold and a cleavage pair inside the cap.
-// `oldPos` and `oldFood` are the values before this step; s holds the new buffers.
+// `oldPos` and `oldFood` are the values before this step; s holds the new buffers. Random numbers
+// are drawn by cell id (uid), not by the slot the cell happens to live in.
 __global__ void k_food_candidates(TopoView s, FoodParams fp, const float* oldFood, const Vec3* oldPos, const std::int32_t* shadow,
-                                  float threshold, std::uint64_t* prio, std::uint8_t* pair, std::uint32_t n, std::uint64_t seed,
-                                  std::uint64_t step, Orientation orient, Counters* c) {
+                                  const std::uint32_t* uid, float threshold, std::uint64_t* prio, std::uint8_t* pair, std::uint32_t n,
+                                  std::uint64_t seed, std::uint64_t step, Orientation orient, Counters* c) {
     const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
     if (v >= n) return;
-    const float f = food_update(fp, v, step, oldFood, oldPos, s.normal, s.nbr + static_cast<std::size_t>(v) * kMaxDeg, s.deg[v], shadow);
+    const std::uint32_t id = uid[v];
+    const float f = food_update(fp, v, id, step, oldFood, oldPos, s.normal, s.nbr + static_cast<std::size_t>(v) * kMaxDeg, s.deg[v], shadow);
     s.food[v] = f;
     std::uint64_t p = 0;
     std::uint8_t pr = kNoPair;
     if (f > threshold) {
         atomicAdd(&c->ready, 1u);
         // Geometry for the tie-break comes from the positions just computed (s.pos is the new buffer).
-        pr = tv_choose_cleavage_pair(s, v, hash_u64(seed, step, v, Stream::Pair), s.pos, s.normal, orient);
+        pr = tv_choose_cleavage_pair(s, v, hash_u64(seed, step, id, Stream::Pair), s.pos, s.normal, orient);
         if (pr == kNoPair) atomicAdd(&c->postponed, 1u);
-        else p = tv_division_priority(seed, step, v);
+        else p = tv_division_priority(seed, step, id);
     }
     prio[v] = p;
     pair[v] = pr;
@@ -249,35 +260,138 @@ __global__ void k_food_candidates(TopoView s, FoodParams fp, const float* oldFoo
 // The independent set (docs/model.md section 7): a candidate divides when no cell within two
 // links has a higher priority. That is the same set as "priority equals the maximum of the
 // priorities after two rounds of max-over-neighbours", but only candidates do any work, and
-// in a step there are few of them.
-__global__ void k_winners(const std::uint64_t* prio, const std::uint32_t* nbr, const std::uint8_t* deg, std::uint8_t* win, std::uint32_t n) {
+// in a step there are few of them. The flag is written at the cell id of the winner (the flag
+// array was zeroed), so the selection that follows lists the winners in increasing id.
+__global__ void k_winners(const std::uint64_t* prio, const std::uint32_t* nbr, const std::uint8_t* deg, const std::uint32_t* uid,
+                          std::uint8_t* winById, std::uint32_t n) {
     const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
     if (v >= n) return;
     const std::uint64_t p = prio[v];
-    bool wins = p != 0;
-    if (wins) {
-        const std::uint32_t* r = nbr + static_cast<std::size_t>(v) * kMaxDeg;
-        const std::uint32_t d = deg[v];
-        for (std::uint32_t k = 0; k < d && wins; ++k) {
-            const std::uint32_t u = r[k];
-            if (prio[u] > p) wins = false;
-            const std::uint32_t* ru = nbr + static_cast<std::size_t>(u) * kMaxDeg;
-            const std::uint32_t du = deg[u];
-            for (std::uint32_t j = 0; j < du && wins; ++j)
-                if (prio[ru[j]] > p) wins = false;
-        }
+    if (p == 0) return;
+    bool wins = true;
+    const std::uint32_t* r = nbr + static_cast<std::size_t>(v) * kMaxDeg;
+    const std::uint32_t d = deg[v];
+    for (std::uint32_t k = 0; k < d && wins; ++k) {
+        const std::uint32_t u = r[k];
+        if (prio[u] > p) wins = false;
+        const std::uint32_t* ru = nbr + static_cast<std::size_t>(u) * kMaxDeg;
+        const std::uint32_t du = deg[u];
+        for (std::uint32_t j = 0; j < du && wins; ++j)
+            if (prio[ru[j]] > p) wins = false;
     }
-    win[v] = wins ? 1 : 0;
+    if (wins) winById[uid[v]] = 1;
 }
 
 // Every winner splits. Winners are pairwise at graph distance >= 3, so no two threads touch
-// the same ring; daughter ids are n + rank (rank in increasing winner id).
-__global__ void k_split(TopoView s, const std::uint32_t* winners, const std::uint8_t* pair, std::uint32_t w,
-                        std::uint32_t n, std::uint64_t step) {
+// the same ring. `winners` holds cell ids in increasing order; the k-th daughter gets id n + k
+// and lives in slot n + k.
+__global__ void k_split(TopoView s, const std::uint32_t* winners, const std::uint8_t* pair, std::uint32_t* uid, std::uint32_t* slotOf,
+                        std::uint32_t w, std::uint32_t n, std::uint64_t step) {
     const std::uint32_t k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= w) return;
-    const std::uint32_t v = winners[k];
+    const std::uint32_t v = slotOf[winners[k]];
     tv_apply_division(s, v, pair[v], n + k, step);
+    uid[n + k] = n + k;
+    slotOf[n + k] = n + k;
+}
+
+// ---- Renumbering: the cells move to new slots in grid order (perm[q] = the old slot of the
+// cell that goes to slot q), so that cells near each other in space are near each other in
+// memory. Ids stay with the cells; nothing outside this backend can tell.
+
+__global__ void k_invert(const std::uint32_t* perm, std::uint32_t* inv, std::uint32_t n) {
+    const std::uint32_t q = blockIdx.x * blockDim.x + threadIdx.x;
+    if (q < n) inv[perm[q]] = q;
+}
+
+__global__ void k_permute_cells(const std::uint32_t* perm, std::uint32_t n, const Vec3* pos, Vec3* posOut, const Vec3* nrm, Vec3* nrmOut,
+                                const float* food, float* foodOut, const std::uint32_t* birth, std::uint32_t* birthOut,
+                                const std::uint32_t* gen, std::uint32_t* genOut, const std::uint8_t* deg, std::uint8_t* degOut,
+                                const std::uint32_t* uid, std::uint32_t* uidOut) {
+    const std::uint32_t q = blockIdx.x * blockDim.x + threadIdx.x;
+    if (q >= n) return;
+    const std::uint32_t v = perm[q];
+    posOut[q] = pos[v];
+    nrmOut[q] = nrm[v];
+    foodOut[q] = food[v];
+    birthOut[q] = birth[v];
+    genOut[q] = gen[v];
+    degOut[q] = deg[v];
+    uidOut[q] = uid[v];
+}
+
+// The rings, moved and renamed. A ring is 12 slots of 4 bytes and there is no spare buffer of
+// that size, so it is parked in five spare buffers (3 + 3 + 3 + 2 + 1 slots) and copied back.
+__global__ void k_permute_rings_out(const std::uint32_t* perm, const std::uint32_t* inv, std::uint32_t n, const std::uint32_t* nbr,
+                                    std::uint32_t* a, std::uint32_t* b, std::uint32_t* c, std::uint32_t* d2, std::uint32_t* e1) {
+    const std::uint32_t q = blockIdx.x * blockDim.x + threadIdx.x;
+    if (q >= n) return;
+    const std::uint32_t* r = nbr + static_cast<std::size_t>(perm[q]) * kMaxDeg;
+    std::uint32_t x[kMaxDeg];
+    for (std::uint32_t k = 0; k < kMaxDeg; ++k) x[k] = r[k] < n ? inv[r[k]] : r[k];
+    const std::size_t q3 = static_cast<std::size_t>(q) * 3;
+    a[q3] = x[0];
+    a[q3 + 1] = x[1];
+    a[q3 + 2] = x[2];
+    b[q3] = x[3];
+    b[q3 + 1] = x[4];
+    b[q3 + 2] = x[5];
+    c[q3] = x[6];
+    c[q3 + 1] = x[7];
+    c[q3 + 2] = x[8];
+    d2[static_cast<std::size_t>(q) * 2] = x[9];
+    d2[static_cast<std::size_t>(q) * 2 + 1] = x[10];
+    e1[q] = x[11];
+}
+
+__global__ void k_permute_rings_back(std::uint32_t n, std::uint32_t* nbr, const std::uint32_t* a, const std::uint32_t* b,
+                                     const std::uint32_t* c, const std::uint32_t* d2, const std::uint32_t* e1) {
+    const std::uint32_t q = blockIdx.x * blockDim.x + threadIdx.x;
+    if (q >= n) return;
+    std::uint32_t* r = nbr + static_cast<std::size_t>(q) * kMaxDeg;
+    const std::size_t q3 = static_cast<std::size_t>(q) * 3;
+    r[0] = a[q3];
+    r[1] = a[q3 + 1];
+    r[2] = a[q3 + 2];
+    r[3] = b[q3];
+    r[4] = b[q3 + 1];
+    r[5] = b[q3 + 2];
+    r[6] = c[q3];
+    r[7] = c[q3 + 1];
+    r[8] = c[q3 + 2];
+    r[9] = d2[static_cast<std::size_t>(q) * 2];
+    r[10] = d2[static_cast<std::size_t>(q) * 2 + 1];
+    r[11] = e1[q];
+}
+
+// After the move: every cell knows its slot again, and the id list of the grid is the identity.
+__global__ void k_after_permute(const std::uint32_t* uid, std::uint32_t* slotOf, std::uint32_t* sortedSlot, std::uint32_t n) {
+    const std::uint32_t q = blockIdx.x * blockDim.x + threadIdx.x;
+    if (q >= n) return;
+    slotOf[uid[q]] = q;
+    sortedSlot[q] = q;
+}
+
+// Fills `out` (already sized for n cells) in id order from arrays in slot order: the cell in
+// slot v goes to index uid[v], and the slots named in its ring become ids.
+void to_id_order(State& out, std::uint32_t n, const Vec3* pos, const Vec3* normal, const float* food, const std::uint32_t* birth,
+                 const std::uint32_t* gen, const std::uint8_t* deg, const std::uint32_t* nbr, const std::uint32_t* uid) {
+    unsigned threads = std::thread::hardware_concurrency();
+    threads = threads == 0 ? 1u : (threads > 16u ? 16u : threads);
+    parallel_for(n, threads, [&](std::uint32_t b, std::uint32_t e, unsigned) {
+        for (std::uint32_t v = b; v < e; ++v) {
+            const std::uint32_t u = uid[v];
+            out.pos[u] = pos[v];
+            out.normal[u] = normal[v];
+            out.food[u] = food[v];
+            out.birth[u] = birth[v];
+            out.gen[u] = gen[v];
+            out.deg[u] = deg[v];
+            const std::uint32_t* r = nbr + static_cast<std::size_t>(v) * kMaxDeg;
+            std::uint32_t* o = out.ring(u);
+            for (std::uint32_t k = 0; k < kMaxDeg; ++k) o[k] = r[k] < n ? uid[r[k]] : r[k];
+        }
+    });
 }
 
 }  // namespace
@@ -301,6 +415,21 @@ struct CudaSim::Impl {
     std::uint32_t* gen = nullptr;
     std::uint8_t* deg = nullptr;
     std::uint32_t* nbr = nullptr;
+
+    // Renumbering. The arrays above are indexed by slot. A cell keeps its id for life; uid[slot]
+    // is the id of the cell in a slot and slotOf[id] the slot of a cell. Rings hold slots.
+    // Until the first renumbering slot == id everywhere. Everything that leaves this class
+    // (downloads, snapshots, reported cells) is in id order, and every random number is drawn
+    // by id, so renumbering changes where cells sit in memory and nothing else.
+    std::uint32_t* uid = nullptr;
+    std::uint32_t* slotOf = nullptr;
+    bool permuted = false;
+    std::uint32_t renumberMinCells = 0;
+    std::uint32_t renumberMaxSteps = 0;
+    double renumberGrowth = 0.0;
+    std::uint32_t cellsAtRenumber = 0;
+    std::uint64_t stepAtRenumber = 0;
+    std::uint64_t renumberings = 0;
 
     // Scratch. The grid buffers are free again after the move kernel, so the division phase
     // reuses them: priorities and the two max rounds in the key/id blocks, the winner list in
@@ -332,6 +461,7 @@ struct CudaSim::Impl {
         std::uint32_t* gen = nullptr;
         std::uint8_t* deg = nullptr;
         std::uint32_t* nbr = nullptr;
+        std::uint32_t* uid = nullptr;
         std::uint32_t capacity = 0;
     } pinned;
     bool pinnedFailed = false;
@@ -341,6 +471,7 @@ struct CudaSim::Impl {
 
     struct Job {
         bool fromPinned = false;
+        bool permuted = false;  // the pinned copy is in slot order and needs pinned.uid
         std::uint32_t n = 0;
         std::uint64_t step = 0, seed = 0;
         Params params;
@@ -397,6 +528,8 @@ struct CudaSim::Impl {
         gen = alloc<std::uint32_t>(c, "generations");
         deg = alloc<std::uint8_t>(c, "degrees");
         nbr = alloc<std::uint32_t>(c * kMaxDeg, "neighbour rings");
+        uid = alloc<std::uint32_t>(c, "cell ids");
+        slotOf = alloc<std::uint32_t>(c, "cell slots");
         idBlock = alloc<std::uint32_t>(c * 2, "grid ids");
         sortedPos = alloc<Vec3>(c, "sorted positions");
         pair = alloc<std::uint8_t>(c, "cleavage pairs");
@@ -425,6 +558,15 @@ struct CudaSim::Impl {
         t0 = now;
     }
 
+    // True when this step should start with a renumbering: the form is large enough for memory
+    // locality to matter, and enough cells were added (they are appended, out of spatial order)
+    // or enough steps passed since the last one.
+    bool renumber_due(std::uint32_t cells, std::uint64_t atStep) const {
+        if (cells < renumberMinCells) return false;
+        if (static_cast<double>(cells) - static_cast<double>(cellsAtRenumber) > renumberGrowth * static_cast<double>(cellsAtRenumber)) return true;
+        return atStep - stepAtRenumber >= renumberMaxSteps;
+    }
+
     void download_into(State& out) {
         CF_CUDA(cudaStreamSynchronize(stream));
         State s;
@@ -433,20 +575,37 @@ struct CudaSim::Impl {
         s.seed = seed;
         s.params = params;
         const std::size_t c = n;
-        CF_CUDA(cudaMemcpy(s.pos.data(), pos[cur], c * sizeof(Vec3), cudaMemcpyDeviceToHost));
-        CF_CUDA(cudaMemcpy(s.normal.data(), normal[cur], c * sizeof(Vec3), cudaMemcpyDeviceToHost));
-        CF_CUDA(cudaMemcpy(s.food.data(), food[cur], c * sizeof(float), cudaMemcpyDeviceToHost));
-        CF_CUDA(cudaMemcpy(s.birth.data(), birth, c * sizeof(std::uint32_t), cudaMemcpyDeviceToHost));
-        CF_CUDA(cudaMemcpy(s.gen.data(), gen, c * sizeof(std::uint32_t), cudaMemcpyDeviceToHost));
-        CF_CUDA(cudaMemcpy(s.deg.data(), deg, c * sizeof(std::uint8_t), cudaMemcpyDeviceToHost));
-        CF_CUDA(cudaMemcpy(s.nbr.data(), nbr, c * kMaxDeg * sizeof(std::uint32_t), cudaMemcpyDeviceToHost));
+        if (!permuted) {
+            CF_CUDA(cudaMemcpy(s.pos.data(), pos[cur], c * sizeof(Vec3), cudaMemcpyDeviceToHost));
+            CF_CUDA(cudaMemcpy(s.normal.data(), normal[cur], c * sizeof(Vec3), cudaMemcpyDeviceToHost));
+            CF_CUDA(cudaMemcpy(s.food.data(), food[cur], c * sizeof(float), cudaMemcpyDeviceToHost));
+            CF_CUDA(cudaMemcpy(s.birth.data(), birth, c * sizeof(std::uint32_t), cudaMemcpyDeviceToHost));
+            CF_CUDA(cudaMemcpy(s.gen.data(), gen, c * sizeof(std::uint32_t), cudaMemcpyDeviceToHost));
+            CF_CUDA(cudaMemcpy(s.deg.data(), deg, c * sizeof(std::uint8_t), cudaMemcpyDeviceToHost));
+            CF_CUDA(cudaMemcpy(s.nbr.data(), nbr, c * kMaxDeg * sizeof(std::uint32_t), cudaMemcpyDeviceToHost));
+        } else {
+            // Slot order on the device: fetch it as it is, then put every cell at its id.
+            State raw;
+            raw.resize(n);
+            std::vector<std::uint32_t> ids(c);
+            CF_CUDA(cudaMemcpy(raw.pos.data(), pos[cur], c * sizeof(Vec3), cudaMemcpyDeviceToHost));
+            CF_CUDA(cudaMemcpy(raw.normal.data(), normal[cur], c * sizeof(Vec3), cudaMemcpyDeviceToHost));
+            CF_CUDA(cudaMemcpy(raw.food.data(), food[cur], c * sizeof(float), cudaMemcpyDeviceToHost));
+            CF_CUDA(cudaMemcpy(raw.birth.data(), birth, c * sizeof(std::uint32_t), cudaMemcpyDeviceToHost));
+            CF_CUDA(cudaMemcpy(raw.gen.data(), gen, c * sizeof(std::uint32_t), cudaMemcpyDeviceToHost));
+            CF_CUDA(cudaMemcpy(raw.deg.data(), deg, c * sizeof(std::uint8_t), cudaMemcpyDeviceToHost));
+            CF_CUDA(cudaMemcpy(raw.nbr.data(), nbr, c * kMaxDeg * sizeof(std::uint32_t), cudaMemcpyDeviceToHost));
+            CF_CUDA(cudaMemcpy(ids.data(), uid, c * sizeof(std::uint32_t), cudaMemcpyDeviceToHost));
+            to_id_order(s, n, raw.pos.data(), raw.normal.data(), raw.food.data(), raw.birth.data(), raw.gen.data(), raw.deg.data(),
+                        raw.nbr.data(), ids.data());
+        }
         out = std::move(s);
     }
 
     void free_pinned() {
         for (void* p : {static_cast<void*>(pinned.pos), static_cast<void*>(pinned.normal), static_cast<void*>(pinned.food),
                         static_cast<void*>(pinned.birth), static_cast<void*>(pinned.gen), static_cast<void*>(pinned.deg),
-                        static_cast<void*>(pinned.nbr)})
+                        static_cast<void*>(pinned.nbr), static_cast<void*>(pinned.uid)})
             if (p) cudaFreeHost(p);
         pinned = Pinned{};
     }
@@ -476,6 +635,7 @@ struct CudaSim::Impl {
         pinned.gen = static_cast<std::uint32_t*>(get(c * sizeof(std::uint32_t)));
         pinned.deg = static_cast<std::uint8_t*>(get(c * sizeof(std::uint8_t)));
         pinned.nbr = static_cast<std::uint32_t*>(get(c * kMaxDeg * sizeof(std::uint32_t)));
+        pinned.uid = static_cast<std::uint32_t*>(get(c * sizeof(std::uint32_t)));
         if (!ok) {
             free_pinned();
             pinnedFailed = true;
@@ -503,13 +663,18 @@ struct CudaSim::Impl {
                     CF_CUDA(cudaEventSynchronize(evGeom));
                     s.resize(job.n);
                     const std::size_t c = job.n;
-                    std::memcpy(s.pos.data(), pinned.pos, c * sizeof(Vec3));
-                    std::memcpy(s.normal.data(), pinned.normal, c * sizeof(Vec3));
-                    std::memcpy(s.food.data(), pinned.food, c * sizeof(float));
-                    std::memcpy(s.birth.data(), pinned.birth, c * sizeof(std::uint32_t));
-                    std::memcpy(s.gen.data(), pinned.gen, c * sizeof(std::uint32_t));
-                    std::memcpy(s.deg.data(), pinned.deg, c * sizeof(std::uint8_t));
-                    std::memcpy(s.nbr.data(), pinned.nbr, c * kMaxDeg * sizeof(std::uint32_t));
+                    if (job.permuted) {
+                        to_id_order(s, job.n, pinned.pos, pinned.normal, pinned.food, pinned.birth, pinned.gen, pinned.deg, pinned.nbr,
+                                    pinned.uid);
+                    } else {
+                        std::memcpy(s.pos.data(), pinned.pos, c * sizeof(Vec3));
+                        std::memcpy(s.normal.data(), pinned.normal, c * sizeof(Vec3));
+                        std::memcpy(s.food.data(), pinned.food, c * sizeof(float));
+                        std::memcpy(s.birth.data(), pinned.birth, c * sizeof(std::uint32_t));
+                        std::memcpy(s.gen.data(), pinned.gen, c * sizeof(std::uint32_t));
+                        std::memcpy(s.deg.data(), pinned.deg, c * sizeof(std::uint8_t));
+                        std::memcpy(s.nbr.data(), pinned.nbr, c * kMaxDeg * sizeof(std::uint32_t));
+                    }
                     s.step = job.step;
                     s.seed = job.seed;
                     s.params = job.params;
@@ -567,6 +732,9 @@ CudaSim::CudaSim(State initial, const CudaOptions& options) : impl_(std::make_un
 
     m.device = options.device;
     m.useRowTable = options.rowTable;
+    m.renumberMinCells = options.renumberMinCells;
+    m.renumberMaxSteps = options.renumberMaxSteps;
+    m.renumberGrowth = options.renumberGrowth;
     CF_CUDA(cudaSetDevice(m.device));
     cudaDeviceProp prop;
     CF_CUDA(cudaGetDeviceProperties(&prop, m.device));
@@ -615,6 +783,12 @@ CudaSim::CudaSim(State initial, const CudaOptions& options) : impl_(std::make_un
     CF_CUDA(cudaMemcpy(m.gen, initial.gen.data(), n * sizeof(std::uint32_t), cudaMemcpyHostToDevice));
     CF_CUDA(cudaMemcpy(m.deg, initial.deg.data(), n * sizeof(std::uint8_t), cudaMemcpyHostToDevice));
     CF_CUDA(cudaMemcpy(m.nbr, initial.nbr.data(), n * kMaxDeg * sizeof(std::uint32_t), cudaMemcpyHostToDevice));
+    {
+        std::vector<std::uint32_t> identity(n);
+        for (std::size_t v = 0; v < n; ++v) identity[v] = static_cast<std::uint32_t>(v);
+        CF_CUDA(cudaMemcpy(m.uid, identity.data(), n * sizeof(std::uint32_t), cudaMemcpyHostToDevice));
+        CF_CUDA(cudaMemcpy(m.slotOf, identity.data(), n * sizeof(std::uint32_t), cudaMemcpyHostToDevice));
+    }
 
     if (initial.n > 0) {
         m.boundsLo = m.boundsHi = initial.pos[0];
@@ -689,7 +863,7 @@ StepReport CudaSim::step() {
     const Params& p = m.params;
     const KernelParams kp = kernel_params(p);
     const std::uint64_t seed = m.seed, step = m.step;
-    const int cur = m.cur, nxt = 1 - cur;
+    int cur = m.cur, nxt = 1 - cur;
     const unsigned gb = grid_blocks(n);
     const cudaStream_t st = m.stream;
     auto t0 = std::chrono::steady_clock::now();
@@ -709,9 +883,9 @@ StepReport CudaSim::step() {
         init.bad = kInvalid;
         const thrust::counting_iterator<std::uint32_t> first(0);
         std::size_t bytes = 0;
-        CF_CUDA(cub::DeviceReduce::TransformReduce(nullptr, bytes, first, m.boxOut, n, BoxMerge{}, BoxOf{m.pos[cur]}, init, st));
+        CF_CUDA(cub::DeviceReduce::TransformReduce(nullptr, bytes, first, m.boxOut, n, BoxMerge{}, BoxOf{m.pos[cur], m.uid}, init, st));
         m.ensure_temp(bytes);
-        CF_CUDA(cub::DeviceReduce::TransformReduce(m.cubTemp, bytes, first, m.boxOut, n, BoxMerge{}, BoxOf{m.pos[cur]}, init, st));
+        CF_CUDA(cub::DeviceReduce::TransformReduce(m.cubTemp, bytes, first, m.boxOut, n, BoxMerge{}, BoxOf{m.pos[cur], m.uid}, init, st));
         CF_CUDA(cudaStreamSynchronize(st));
         CF_CUDA(cudaMemcpy(&box, m.boxOut, sizeof(Box), cudaMemcpyDeviceToHost));
     }
@@ -742,7 +916,7 @@ StepReport CudaSim::step() {
     // Food parameters for this step (the light's shadow map needs the bounds).
     const FoodParams fp = make_food_params(p, seed, step, box.lo, box.hi);
 
-    k_keys<<<gb, kBlock, 0, st>>>(m.pos[cur], m.key[0], m.idBlock, n, origin, inv, nx, ny, nz);
+    k_keys<<<gb, kBlock, 0, st>>>(m.pos[cur], m.slotOf, m.key[0], m.idBlock, n, origin, inv, nx, ny, nz);
     cub::DoubleBuffer<std::uint64_t> keys(m.key[0], m.key[1]);
     cub::DoubleBuffer<std::uint32_t> ids(m.idBlock, m.idBlock + m.capacity);
     {
@@ -754,8 +928,49 @@ StepReport CudaSim::step() {
         m.ensure_temp(bytes);
         CF_CUDA(cub::DeviceRadixSort::SortPairs(m.cubTemp, bytes, keys, ids, n, 0, endBit, st));
     }
-    k_gather<<<gb, kBlock, 0, st>>>(m.pos[cur], ids.Current(), m.sortedPos, n);
     GridView grid;
+    grid.sortedPos = m.sortedPos;
+    if (m.renumber_due(n, step)) {
+        // Renumber: every cell moves to the slot the sort has just given it. Asynchronous
+        // snapshots still reading the arrays have to finish first.
+        if (m.topoPending) CF_CUDA(cudaEventSynchronize(m.evTopo));
+        if (m.geomPending) CF_CUDA(cudaEventSynchronize(m.evGeom));
+        m.topoPending = false;
+        m.geomPending = false;
+        const std::uint32_t* perm = ids.Current();
+        std::uint32_t* inverse = ids.Alternate();
+        k_invert<<<gb, kBlock, 0, st>>>(perm, inverse, n);
+        // Positions, normals and food go to the other half of their double buffers; the small
+        // arrays go through spare buffers and back.
+        std::uint32_t* spareKeys = reinterpret_cast<std::uint32_t*>(keys.Alternate());  // 2 words per cell
+        std::uint32_t* spareSorted = reinterpret_cast<std::uint32_t*>(m.sortedPos);     // 3 words per cell
+        const std::size_t words = static_cast<std::size_t>(n) * sizeof(std::uint32_t);
+        k_permute_cells<<<gb, kBlock, 0, st>>>(perm, n, m.pos[cur], m.pos[nxt], m.normal[cur], m.normal[nxt], m.food[cur], m.food[nxt],
+                                               m.birth, spareKeys, m.gen, spareKeys + n, m.deg, m.pair, m.uid, spareSorted);
+        CF_CUDA(cudaMemcpyAsync(m.birth, spareKeys, words, cudaMemcpyDeviceToDevice, st));
+        CF_CUDA(cudaMemcpyAsync(m.gen, spareKeys + n, words, cudaMemcpyDeviceToDevice, st));
+        CF_CUDA(cudaMemcpyAsync(m.deg, m.pair, n, cudaMemcpyDeviceToDevice, st));
+        CF_CUDA(cudaMemcpyAsync(m.uid, spareSorted, words, cudaMemcpyDeviceToDevice, st));
+        // The rings are parked in the halves the cells have just left, and in the two spares.
+        std::uint32_t* a = reinterpret_cast<std::uint32_t*>(m.pos[cur]);
+        std::uint32_t* b = reinterpret_cast<std::uint32_t*>(m.normal[cur]);
+        std::uint32_t* e1 = reinterpret_cast<std::uint32_t*>(m.food[cur]);
+        k_permute_rings_out<<<gb, kBlock, 0, st>>>(perm, inverse, n, m.nbr, a, b, spareSorted, spareKeys, e1);
+        k_permute_rings_back<<<gb, kBlock, 0, st>>>(n, m.nbr, a, b, spareSorted, spareKeys, e1);
+        k_after_permute<<<gb, kBlock, 0, st>>>(m.uid, m.slotOf, ids.Current(), n);
+        // The cells now live in the other halves. This is committed at once: the state is the
+        // same state, whatever becomes of this step.
+        cur = nxt;
+        nxt = 1 - cur;
+        m.cur = cur;
+        m.permuted = true;
+        m.cellsAtRenumber = n;
+        m.stepAtRenumber = step;
+        ++m.renumberings;
+        grid.sortedPos = m.pos[cur];  // slot order is grid order now
+    } else {
+        k_gather<<<gb, kBlock, 0, st>>>(m.pos[cur], ids.Current(), m.sortedPos, n);
+    }
     grid.origin = origin;
     grid.invCell = inv;
     grid.nx = nx;
@@ -764,7 +979,6 @@ StepReport CudaSim::step() {
     grid.count = n;
     grid.sortedKey = keys.Current();
     grid.sortedId = ids.Current();
-    grid.sortedPos = m.sortedPos;
     // Row table in the sort's spare key buffer, when the rows fit (they do unless the form is
     // far longer than it is wide; then the search falls back to the whole array).
     const std::uint64_t rows = static_cast<std::uint64_t>(ny) * nz;
@@ -779,7 +993,7 @@ StepReport CudaSim::step() {
     m.phase(m.times.grid, t0);
 
     // ---- 2, 4, 5. Normals from the rings (fallback: the previous normal), move and clamp.
-    k_move<<<gb, kBlock, 0, st>>>(m.pos[cur], m.normal[cur], m.normal[nxt], m.nbr, m.deg, m.pos[nxt], n, grid, kp, fp,
+    k_move<<<gb, kBlock, 0, st>>>(m.pos[cur], m.normal[cur], m.normal[nxt], m.nbr, m.deg, m.uid, m.pos[nxt], n, grid, kp, fp,
                                   normal_eps2(p.linkRestLength), m.counters);
     m.phase(m.times.move, t0);
 
@@ -812,9 +1026,10 @@ StepReport CudaSim::step() {
     Orientation orient;  // oriented division (M8)
     orient.amount = p.orientAmount;
     orient.axis = unit_or_zero(Vec3{p.orientAxisX, p.orientAxisY, p.orientAxisZ});
-    k_food_candidates<<<gb, kBlock, 0, st>>>(tv, fp, m.food[cur], m.pos[cur], m.shadow, p.foodThreshold, prio, m.pair, n, seed, step, orient,
+    k_food_candidates<<<gb, kBlock, 0, st>>>(tv, fp, m.food[cur], m.pos[cur], m.shadow, m.uid, p.foodThreshold, prio, m.pair, n, seed, step, orient,
                                              m.counters);
-    k_winners<<<gb, kBlock, 0, st>>>(prio, m.nbr, m.deg, win, n);
+    CF_CUDA(cudaMemsetAsync(win, 0, n, st));
+    k_winners<<<gb, kBlock, 0, st>>>(prio, m.nbr, m.deg, m.uid, win, n);
     {
         const thrust::counting_iterator<std::uint32_t> first(0);
         std::size_t bytes = 0;
@@ -832,7 +1047,7 @@ StepReport CudaSim::step() {
         // The move failed: name the term (the grid is still intact). Nothing has been committed.
         const std::uint32_t bad = host.firstBadMove;
         std::uint32_t bits = 0;
-        k_diagnose<<<1, 1, 0, st>>>(m.pos[cur], m.normal[nxt], m.nbr, m.deg, bad, grid, kp, fp, m.diagOut);
+        k_diagnose<<<1, 1, 0, st>>>(m.pos[cur], m.normal[nxt], m.nbr, m.deg, m.slotOf, bad, grid, kp, fp, m.diagOut);
         CF_CUDA(cudaStreamSynchronize(st));
         CF_CUDA(cudaMemcpy(&bits, m.diagOut, sizeof bits, cudaMemcpyDeviceToHost));
         rep.status = StepStatus::Failed;
@@ -865,7 +1080,7 @@ StepReport CudaSim::step() {
     m.cur = nxt;
     if (w > 0) {
         m.wait_topo();  // an asynchronous snapshot may still be reading the rings
-        k_split<<<grid_blocks(w), kBlock, 0, st>>>(tv, winners, m.pair, w, n, step);
+        k_split<<<grid_blocks(w), kBlock, 0, st>>>(tv, winners, m.pair, m.uid, m.slotOf, w, n, step);
     }
     m.n = n + w;
     m.step = step + 1;
@@ -910,6 +1125,8 @@ void CudaSim::snapshot_async(std::function<void(State&&)> done) {
         CF_CUDA(cudaMemcpyAsync(m.pinned.gen, m.gen, c * sizeof(std::uint32_t), cudaMemcpyDeviceToHost, cs));
         CF_CUDA(cudaMemcpyAsync(m.pinned.deg, m.deg, c * sizeof(std::uint8_t), cudaMemcpyDeviceToHost, cs));
         CF_CUDA(cudaMemcpyAsync(m.pinned.nbr, m.nbr, c * kMaxDeg * sizeof(std::uint32_t), cudaMemcpyDeviceToHost, cs));
+        if (m.permuted) CF_CUDA(cudaMemcpyAsync(m.pinned.uid, m.uid, c * sizeof(std::uint32_t), cudaMemcpyDeviceToHost, cs));
+        job.permuted = m.permuted;
         CF_CUDA(cudaMemcpyAsync(m.pinned.birth, m.birth, c * sizeof(std::uint32_t), cudaMemcpyDeviceToHost, cs));
         CF_CUDA(cudaEventRecord(m.evTopo, cs));
         // Positions, normals and food live in the current half of the double buffers, which the

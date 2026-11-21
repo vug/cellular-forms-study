@@ -94,6 +94,9 @@ int main(int argc, char** argv) {
     std::string path, order = "none";
     int steps = 200, warmup = 20;
     bool phases = true, rowTable = true;
+    const cf::CudaOptions defaults;
+    std::uint32_t renumberMin = defaults.renumberMinCells, renumberMaxSteps = defaults.renumberMaxSteps;
+    double renumberGrowth = defaults.renumberGrowth;
     std::vector<std::string> overrides;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -107,10 +110,13 @@ int main(int argc, char** argv) {
         else if (a == "--param") overrides.push_back(next());
         else if (a == "--no-phases") phases = false;
         else if (a == "--no-row-table") rowTable = false;
+        else if (a == "--no-renumber") renumberMin = 0xFFFFFFFFu;
+        else if (a == "--renumber-growth") renumberGrowth = std::atof(next().c_str());
+        else if (a == "--renumber-max-steps") renumberMaxSteps = static_cast<std::uint32_t>(std::atoi(next().c_str()));
         else if (!a.empty() && a[0] != '-' && path.empty()) path = a;
-        else die("unknown option " + a + "\nusage: cf_bench <checkpoint.cfs> [--steps 200] [--warmup 20] [--order none|grid|morton] [--param k=v] [--no-phases] [--no-row-table]");
+        else die("unknown option " + a + "\nusage: cf_bench <checkpoint.cfs> [--steps 200] [--warmup 20] [--order none|grid|morton] [--param k=v] [--no-phases] [--no-row-table] [--no-renumber] [--renumber-growth f] [--renumber-max-steps n]");
     }
-    if (path.empty()) die("usage: cf_bench <checkpoint.cfs> [--steps 200] [--warmup 20] [--order none|grid|morton] [--param k=v] [--no-phases] [--no-row-table]");
+    if (path.empty()) die("usage: cf_bench <checkpoint.cfs> [--steps 200] [--warmup 20] [--order none|grid|morton] [--param k=v] [--no-phases] [--no-row-table] [--no-renumber] [--renumber-growth f] [--renumber-max-steps n]");
     if (order != "none" && order != "grid" && order != "morton") die("--order expects none, grid or morton");
     try {
         cf::State start = cf::load_checkpoint(path);
@@ -125,6 +131,9 @@ int main(int argc, char** argv) {
         const double grow = std::pow(2.0, 1.15 * doublings) + 0.05;
         cf::CudaOptions options;
         options.rowTable = rowTable;
+        options.renumberMinCells = renumberMin;
+        options.renumberGrowth = renumberGrowth;
+        options.renumberMaxSteps = renumberMaxSteps;
         options.capacity = static_cast<std::uint32_t>(std::min(4.0e9, static_cast<double>(start.n) * std::min(grow, 3.0)));
         start.params.maxCells = options.capacity;
 

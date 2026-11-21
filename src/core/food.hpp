@@ -157,10 +157,12 @@ CF_FN float crowd_factor(const FoodParams& fp, const Vec3* pos, const std::uint3
 }
 
 // ---------------------------------------------------------------- the food stage
-// New food of cell v. Reads the old food (Jacobi), the old positions and this step's normals.
-CF_FN float food_update(const FoodParams& fp, std::uint32_t v, std::uint64_t step, const float* food, const Vec3* pos, const Vec3* nrm,
-                        const std::uint32_t* ring, std::uint32_t d, const std::int32_t* shadow) {
-    const float base = fp.foodMin + fp.foodSpan * hash_u01(fp.seed, step, v, Stream::Food);
+// New food of the cell in slot v. Reads the old food (Jacobi), the old positions and this step's
+// normals. `id` is the cell's id, which picks its random number; it equals v unless a backend
+// keeps its cells in another order than their ids (the CUDA backend does, for memory locality).
+CF_FN float food_update(const FoodParams& fp, std::uint32_t v, std::uint32_t id, std::uint64_t step, const float* food, const Vec3* pos,
+                        const Vec3* nrm, const std::uint32_t* ring, std::uint32_t d, const std::int32_t* shadow) {
+    const float base = fp.foodMin + fp.foodSpan * hash_u01(fp.seed, step, id, Stream::Food);
     if (fp.flags == 0u) return food[v] + base;  // the uniform model, exactly
     float factor = fp.pulse;
     const Vec3 P = pos[v];

@@ -122,7 +122,7 @@ StepReport CpuSim::step() {
         const Vec3* nrm = normalNew_.data();
         const std::int32_t* shadow = shadow_.data();
         parallel_for(n, threads_, [&s, fp, step, food, out, nrm, shadow](std::uint32_t b, std::uint32_t e, unsigned) {
-            for (std::uint32_t v = b; v < e; ++v) out[v] = food_update(fp, v, step, food, s.pos.data(), nrm, s.ring(v), s.deg[v], shadow);
+            for (std::uint32_t v = b; v < e; ++v) out[v] = food_update(fp, v, v, step, food, s.pos.data(), nrm, s.ring(v), s.deg[v], shadow);
         });
     }
 

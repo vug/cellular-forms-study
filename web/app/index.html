@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Cellular Forms</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2316181d'/%3E%3Ccircle cx='12' cy='13' r='6' fill='%23e6dfd2'/%3E%3Ccircle cx='21' cy='19' r='6' fill='%23c9b89a'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app" data-view="viewer" data-panel="closed">
+  <header id="bar">
+    <h1>Cellular Forms</h1>
+    <nav id="tabs" aria-label="Views">
+      <button type="button" id="tab-viewer" aria-pressed="true">Viewer</button>
+      <button type="button" id="tab-gallery" aria-pressed="false">Gallery</button>
+    </nav>
+    <div id="bar-actions">
+      <button type="button" id="copy-link" title="Copy a link that opens this setup: parameters, start, seed, look and camera">Copy link</button>
+      <button type="button" id="save-picture" title="Save the view as a PNG file">Save picture</button>
+      <button type="button" id="toggle-panel" aria-expanded="false" aria-controls="panel">Controls</button>
+    </div>
+  </header>
+
+  <div id="viewer">
+    <div id="stage">
+      <canvas id="view" tabindex="0" aria-label="The form. Drag to turn it, scroll or pinch to zoom, drag with the right button or two fingers to move it."></canvas>
+      <div id="notices" role="status" aria-live="polite"></div>
+      <div id="stage-foot">
+        <div id="origin" hidden></div>
+        <div id="transport">
+          <button type="button" id="run" class="primary">Pause</button>
+          <button type="button" id="step" title="One step of the simulation">Step</button>
+          <button type="button" id="restart" title="Start again from the start shape, with the same seed">Restart</button>
+        </div>
+        <div id="status">Starting ...</div>
+      </div>
+    </div>
+    <aside id="panel" aria-label="Controls"></aside>
+  </div>
+
+  <section id="gallery" hidden aria-label="Gallery"></section>
+</div>
+<noscript><p class="plain">This page is an application and needs JavaScript and WebGPU.</p></noscript>
+<script>
+  // If the modules never load (the page was opened as a file, or a file is missing), say so.
+  setTimeout(function () {
+    if (!window.cellularFormsStarted) {
+      document.getElementById('status').textContent =
+        'The app did not start. It has to be served by a web server (https, or localhost), not opened as a file.';
+    }
+  }, 5000);
+</script>
+<script type="module" src="main.js"></script>
+</body>
+</html>

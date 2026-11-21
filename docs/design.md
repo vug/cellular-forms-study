@@ -580,6 +580,51 @@ can be reproduced exactly.
 
 Related work is listed under Sources ("Search and measures of form").
 
+## In the browser
+
+`web/app/` is the viewer as a WebGPU page that Uğur can put on his own web server and share
+(Nov 21): choose parameters and a start, watch the form evolve, change material and light, pick
+a form from a gallery to grow it again with its settings. `web/README.md` says how to deploy it:
+the whole `web/` folder is 1.8 MB of static files; the server needs https.
+
+**Simulation** (`web/sim.js`, `web/shaders.js`): the whole model of `src/core` as WGSL compute,
+with every mechanism: food field and bulge field, pulses, light with its shadow map, diffusion
+and decay, crowding, oriented division, morphogens. No shader binds more than the eight storage
+buffers WebGPU guarantees.
+
+The GPU's division and square root are not correctly rounded there (23 and 12 percent of the
+results differ from IEEE), subnormal numbers are flushed, and there are no doubles. With
+**exact arithmetic** on, the step uses arithmetic emulated on integers wherever that matters
+and is then bit for bit the step of the CPU and CUDA backends. It is on by default as soon as
+any mechanism is on; the base model alone runs without it, as before (positions agree to
+1.5e-5 per step, and a long run ends within a few percent of the same cell count).
+
+| Check (RTX 4090, the Claude app's Chromium) | Result |
+| --- | --- |
+| One step against CPU checkpoints: base model from 162 to 250,000 cells, every mechanism alone at 3,000 and 40,000, four parameter sets of the gallery, morphogens switched on and off mid-run, four start states | 82 comparisons pass; rings, food, birth, generation and morphogens identical everywhere, positions identical with exact arithmetic |
+| Many steps: every form of the gallery grown from its start, seed and parameters | All 120 reach CUDA's cell count and are identical to its checkpoint (479 to 33,621 steps each, 684,775 in all) |
+| The same run twice | Identical, base model and all mechanisms |
+| Steps per second at 30,000 / 100,000 cells | 1,050 / 786 base; 928 / 642 base with exact arithmetic; 799 / 569 with every mechanism on |
+
+**Page** (`web/app/`: no build step, no dependencies, nothing loaded from other hosts):
+
+| Desktop viewer | In the browser |
+| --- | --- |
+| Live simulation: run, pause, step, restart, seed, parameters while it runs | The same, with start shape (ten), first food, capacity up to 2 million cells, a speed limit and a time budget per frame, and "pause at step" |
+| Cells as sphere impostors; the membrane | Both. The membrane is drawn without an index buffer (each cell and neighbour slot pulls its triangle in the vertex shader) as flat triangles with smooth normals, not as the relaxed curved patches of the desktop |
+| Colour by age, generation, food, curvature, activator; palettes | The same, except by birth step |
+| Material library of fourteen, every control | The same presets. Subsurface is a wrap and tint in the shading (no scattering blur); glowing cells light their neighbours in screen space only |
+| Key light, sky and ground, shadow map, ambient occlusion, environment map | The same; the environment is an analytic version of the built-in studio |
+| Tone curve, exposure, background, render scale, fast edge smoothing | The same |
+| Path tracer, ray-traced occlusion, bloom, lens, blending of frames over time, x-ray, outlines and toon bands, stereo | Not there: WebGPU has no ray tracing, and the rest was left out |
+| Files and runs, playback | Not there: the page grows forms, it does not load state files |
+| | A gallery (`web/app/gallery`, written by `python scripts/atlas web-gallery`: 120 forms with their settings and pictures); choosing one grows it in the viewer and pauses at the step of its picture |
+| | A link is a setup: "Copy link" puts parameters, start, seed, capacity, look and camera into the address; `#g=<id>` opens a gallery form |
+
+The same start, seed and parameters give the same form as on the PC, with one exception: the
+two rough-sphere starts are the shapes of seed 1, where `cf_run` makes a different rough sphere
+for every seed.
+
 ## Milestones
 
 1. **M1: CPU reference sim + batch CLI.** State file format, initial shapes (icosphere first,
@@ -615,7 +660,7 @@ has the detail and the dates.
 | Rendering | A headset (stereo exists as side-by-side and red-cyan images, not through OpenXR; set aside by Uğur for later); the cells' motion for the path tracer (it keeps its samples through a move of the camera, and starts again when the cells change) and for recorded runs played back (only a live run publishes it); the random walk for cells drawn as spheres; the light map of the simulation for files (it is shown in live runs only) | The cell walls on the membrane take the nearest of the three cells of a triangle, which is the nearest cell of all only where the triangles are well shaped. The blending over time moves each point of the membrane with the nearest of those three cells, not with a mix of the three. While things move it is short (three frames): every lookup falls between pixels and softens the image a little, and a longer memory measured worse than no blending. Subsurface scattering and light through the sheet are approximations in the raster modes (a blur of the light on screen; thickness from the shadow map). Without ray tracing, glowing cells light only what is on screen with them. The membrane goes through the limit points of Loop subdivision, but between them it is a point-normal patch, which follows the limit surface closely, not exactly |
 | Model extensions | Growth without division, lineage and differentiation, plasticity, discrete bending energy, a 3D environment, per-cell controllers, topology changes | Seven of the ten rows of "Extending the model". Built: oriented division, per-cell parameters (through a field and through morphogens), morphogens |
 | Exploration | Convex-hull fill ratio (a stand-in exists), image-model embeddings, curvature kinds after smoothing, a model of Uğur's ratings, searches at sizes other than 31,623 cells, several simulations at once on the GPU | The atlas (Nov 21) has the database, the measures of structure, the early stop, the kinds, four search drivers and the page; no form has been rated yet, so nothing has been learned from ratings. The stop rule and the kinds hold for the parameter ranges of the survey |
-| Ports | The speed-ups of the CUDA backend (renumbering, the lean pipeline, batches of steps) and the model extensions | The Vulkan compute and WebGPU ports run the base model and do not reach CUDA speed |
+| Ports | The speed-ups of the CUDA backend (renumbering, the lean pipeline, batches of steps) in both ports; the food sources and model extensions in the Vulkan compute port | The WebGPU port has the whole model since Nov 21 (see "In the browser"); the Vulkan compute port runs the base model. Neither reaches CUDA speed. The browser page was run on one GPU and one browser only |
 | Speed | One kernel per batch of steps for small forms; a summation order that frees the neighbour search; a faster grid phase | The second changes every checksum |
 | From Lomas's own list (see below) | Other force formulations, external influences (flow, attracting surfaces, fields), cell death and holes, volumetric cells, forms larger than one GPU's memory, a tested path to 3D printing | Not in this document's plan either. The PLY mesh export could feed a printer; that has not been tried |
 

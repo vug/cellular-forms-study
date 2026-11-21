@@ -8,6 +8,10 @@ const kInvalid = 0xFFFFFFFF;
 // Parses a checkpoint (.cfs, kind 1). Returns
 //   { n, step, seed (BigInt), params {name: number}, pos, normal (Float32Array 3n), food,
 //     birth, gen (Uint32Array n), deg (Uint8Array n), nbr (Uint32Array 12n) }
+// and, when the state has morphogens (chunks MPHA and MPHB, which a checkpoint has once they
+// were switched on), morphA and morphB (Float32Array n): the substrate and the activator.
+// `params` holds what the file lists: the base parameters, and the others only where they
+// differ from their defaults.
 export function parseCheckpoint(buffer) {
   const view = new DataView(buffer);
   const magic = new TextDecoder().decode(new Uint8Array(buffer, 0, 7));
@@ -38,11 +42,15 @@ export function parseCheckpoint(buffer) {
     else if (tag === 'GEN ') state.gen = copy(Uint32Array, n);
     else if (tag === 'DEG ') state.deg = copy(Uint8Array, n);
     else if (tag === 'NBR ') state.nbr = copy(Uint32Array, kMaxDeg * n);
-    else if (tag === 'END ') break;
+    else if (tag === 'MPHA' || tag === 'MPHB') {
+      if (bytes !== 4 * n) throw new Error(`checkpoint chunk '${tag}' has ${bytes} bytes, expected ${4 * n}`);
+      state[tag === 'MPHA' ? 'morphA' : 'morphB'] = copy(Float32Array, n);
+    } else if (tag === 'END ') break;
     at = body + bytes;
   }
   for (const key of ['pos', 'normal', 'food', 'birth', 'gen', 'deg', 'nbr'])
     if (!state[key]) throw new Error(`checkpoint has no ${key} data`);
+  if (!state.morphA !== !state.morphB) throw new Error('checkpoint has only one of the two morphogen chunks');
   return state;
 }
 
@@ -101,6 +109,8 @@ export function checkInvariants(s) {
   if (reached !== n) return fail(`not connected: reached ${reached} of ${n} cells`);
   for (let i = 0; i < 3 * n; i++) if (!Number.isFinite(s.pos[i])) return fail(`position of cell ${Math.floor(i / 3)} is not finite`);
   for (let v = 0; v < n; v++) if (!Number.isFinite(s.food[v])) return fail(`food of cell ${v} is not finite`);
+  if (s.morphA && s.morphB)
+    for (let v = 0; v < n; v++) if (!Number.isFinite(s.morphA[v]) || !Number.isFinite(s.morphB[v])) return fail(`morphogens of cell ${v} are not finite`);
   return { ok: true, message: '' };
 }
 
@@ -147,6 +157,10 @@ export function fingerprint(s) {
   mix(fold(s.birth));
   mix(fold(s.gen));
   mix(fold(s.nbr));
+  if (s.morphA && s.morphB) {   // only when present, so states without morphogens keep their fingerprint
+    mix(fold(s.morphA));
+    mix(fold(s.morphB));
+  }
   mix(new Uint8Array(new Uint32Array([s.n]).buffer));
   return h.toString(16).padStart(16, '0');
 }

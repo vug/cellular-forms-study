@@ -19,6 +19,7 @@ Newest entries at the bottom. Times are local (America/New_York).
 | M4 Live viewer | exit criteria observed (local session, 00:40) | scripted run: parameters changed mid-run, pause, single steps, reset; no frame over 15 ms, 0 validation errors, CUDA and CPU backends. Not tried by hand |
 | M9 Ports | both ports done and verified (local session, 01:20) | Vulkan compute: step-by-step agreement with the CPU over 106 steps, reruns identical. WebGPU: one-step agreement with CPU checkpoints from 162 to 4.4M cells, reruns identical. At 10M cells: CUDA 41, Vulkan 65, WebGPU 75 ms per step |
 | M5 Food sources | exit criterion observed (local session, 01:30) | uniform versus light contrast at 600k cells; CUDA equals CPU with every source on; reaction-diffusion and inherited coordinates not built |
+| The viewer in the browser | built (local session, 17:30): `web/app`, a WebGPU page with the live simulation (the whole model), materials, light, a gallery of 120 forms and share links; static files for his own server | all 120 gallery forms grow in the page bit for bit as on CUDA; one-step check 82 of 82; run on one GPU and one browser only, not yet on a server, no phone |
 | The atlas | built (local session, 15:25): measures of structure per scale, a database of 5,492 runs with pictures, an early-stop rule, eight kinds, four search drivers, and a page that runs here and is published privately | 63 CPU tests and 34 CUDA tests pass; the stop rule ends 95 % of dull forms and 1.8 % of structured ones on held-out runs; 44 % of dull forms fold when grown ten times larger; the searches found few new forms after the survey. No form rated yet; rating from the phone not tried |
 | Viewer rendering, sixth round | built (local session, 13:08): where each cell was in the frame before, published by a live run as an option, and a blending of frames that follows the cells; cell walls in the path-traced modes; the path tracer keeps its samples when the camera moves; a measured check of the blending (`cf_view --motion-test`), which found two defects in the fifth round's blending (fixed) and that eight frames of memory were too many (now three) | 46 modes rendered headless with validation and synchronization checks clean, tests 34 of 34 and 55 of 55, the motion test passes in four looks, 17 of 18 live self-test runs pass without vsync, frame times measured. With vsync under the validation layer there are occasional 60 ms frames, which the previous commit has too. No control was moved by hand |
 | Viewer rendering, fifth round | built (local session, 11:55): the limits of the fourth round. The 50 ms frame found (patch buffers growing) and removed; the membrane through the limit points of Loop subdivision; anti-aliasing that blends frames while the camera moves; glowing cells light their neighbours without ray tracing; path-traced skin by a random walk, as bright as the raster skin | 46 modes rendered headless with validation and synchronization checks clean, tests 33 of 33 and 55 of 55, five live self-test runs with the validation layer pass, frame times measured. A running simulation gets only a two-frame blend. No control was moved by hand |
@@ -2307,3 +2308,88 @@ and verified.
 **Images** in `docs/progress/img/`: `s1_same_parameters_four_seeds.png` (four base parameter
 sets, four seeds each), `s2_kinds_first_sorting.png` (the eight kinds: the typical form and
 three from the middle of each), `s3_atlas_page.jpg` (the page's gallery, sorted by structure).
+
+## 2026-11-21 17:30 · Local session: the viewer as a WebGPU page (web/app), with the whole model in the browser
+
+Uğur asked for the ImGui viewer as a WebGPU single-page app for his own web server: choose
+parameters and start conditions and evolve, tweak materials, and a gallery from which an item
+brings its settings into the evolution viewer. `docs/design.md` has a new section, "In the
+browser", with the tables; `web/README.md` says how to deploy.
+
+**How it was built.** I wrote the shared pieces (the gallery and start shapes from the atlas,
+the parameter list, the start-state builder, the render hook in `sim.js`) and the briefs, and
+two helper agents built the two halves at the same time: one the simulation, one the page. I
+checked both afterwards in the browser, ran the simulation's checks myself, and had the page
+agent switch to the simulation's final interface.
+
+**What was built**
+
+1. **The whole model in the browser** (`web/sim.js`, `web/shaders.js`; the base model was
+   there since M9). Food field and bulge field, pulses, light with its shadow map, diffusion
+   and decay, crowding, oriented division, morphogens (their start, their start on the GPU when
+   switched on mid-run, inheritance). No shader binds more than eight storage buffers.
+   The GPU's division and square root are not correctly rounded (23 and 12 percent of results
+   differ), subnormals are flushed, and there are no doubles. An option, exact arithmetic,
+   emulates on integers what has to be exact, and then a step is the CPU's step bit for bit. It
+   is on by default once any mechanism is on; the base model alone runs as before.
+2. **The page** (`web/app/`, 3,100 lines, no build step, no dependencies, nothing from other
+   hosts): live simulation with every parameter and mechanism switch, ten start shapes, first
+   food, seed, capacity to 2 million cells, speed limit, pause at a step; cells as spheres and
+   the membrane; colour by material, age, generation, food, curvature or activator; the
+   fourteen materials with every control; key light, sky and ground, soft shadows, ambient
+   occlusion, tone curve, render scale; orbit, zoom, pan, follow, slow turn; save picture.
+   A gallery of 120 forms; choosing one grows it in the viewer and pauses at the step of its
+   picture. "Copy link" puts the whole setup into the address.
+3. **`python scripts/atlas web-gallery` and `web-starts`**: the page's gallery (rated forms
+   first, then the typical forms of every kind, then the extremes) and its start shapes.
+4. **Checks in the page** (`web/index.html?task=`): `verify` (one step against CPU
+   checkpoints, extended to every mechanism), `gallery` (many steps against CUDA checkpoints),
+   `rerun`, `floats` (the emulated arithmetic, two million cases), a speed task.
+   `scripts/web_verify_data.ps1` writes the reference data.
+
+**Verified** (RTX 4090, the Chromium of the Claude app; nothing else)
+
+- By me: `?task=verify`: 82 comparisons, pass (largest position difference 1.5e-5, without
+  exact arithmetic; 0 with it). `?task=gallery` on six forms that between them use every
+  mechanism (505, 2765, 2822, 95, 547, 53): each identical to its CUDA checkpoint in rings,
+  food, birth, generation, morphogens, positions and normals. In the page: forms 505 and 2822
+  paused at their pictured steps with exactly the PC's cell counts (31,628 and 31,657), drawn
+  as cells and as membrane with skin and jade; gallery and controls; no console errors.
+- By the simulation agent: all 120 gallery forms identical to CUDA checkpoints (684,775 steps);
+  the same run twice identical; a run with parameters changed twice mid-run identical; a
+  capacity stop leaves the last good state; the emulated arithmetic 0 wrong in 2 million
+  cases. Steps per second at 30,000 / 100,000 cells: 1,050 / 786 for the base model, 799 / 569
+  with every mechanism on and exact arithmetic.
+- By the page agent: fifteen gallery forms through the page itself, each with exactly the
+  gallery's cell count (none, each mechanism alone, combinations up to all seven, other start
+  shapes); 50 frames per second (the display's rate) up to 500,000 cells as spheres and 2
+  million as membrane; a copied link restored in a fresh tab and re-encoded identically; all
+  fourteen materials; the phone-sized layout; device loss and a browser without WebGPU.
+- I read the page's code only for what it talks to: its own gallery and start files, nothing
+  else, no storage. I did not read all of its lines.
+- `cf_tests` and `cf_cuda_tests` were not run again: no C++ changed.
+
+**Not verified, and limits**
+
+- One GPU and one browser. No phone, no Safari, no Firefox, no other GPU vendor. Exact
+  arithmetic relies on the driver not fusing a multiply and an add; `?task=floats` fails where
+  it does, but it has only run here.
+- It has not been put on a web server. Clipboard copy and the download of a picture were
+  blocked in the app's browser pane: the fallback (a selectable link) and the picture's data
+  were seen, the real clipboard and the download click were not. Pinch and two-finger pan
+  were not tried.
+- Left out: path tracer and ray-traced occlusion (WebGPU has no ray tracing), bloom, lens,
+  blending of frames over time, x-ray, outlines and toon bands, stereo, colour by birth step,
+  loading state files and playing back runs.
+- Approximated: subsurface as wrap and tint without the scattering blur; the environment as an
+  analytic studio; the membrane as flat triangles with smooth normals, not the relaxed curved
+  patches; glow lights neighbours on screen only.
+- The two rough-sphere starts are the shapes of seed 1.
+- Without exact arithmetic (the base model's default) a long run ends within a few percent of
+  the PC's cell count, not on it.
+- The reference data for the checks (`runs/web_verify`, 320 MB) is not committed; the script
+  makes it again.
+
+**Images** in `docs/progress/img/`: `w1_web_app_gallery_form_505_skin.jpg` (gallery form 505
+grown in the page, membrane, skin), `w2_web_app_gallery.jpg`,
+`w3_web_app_gallery_form_2822_jade.jpg`.

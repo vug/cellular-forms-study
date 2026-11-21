@@ -1,5 +1,10 @@
 // Page logic of the WebGPU port: rendering and the interactive run. The scripted tasks
-// (?task=verify | rerun | bench | all) run in a worker (worker.js) and only report back here.
+// (?task=verify | rerun | bench | floats | gallery | speed | all; web/tasks.js) run in a worker
+// (worker.js) and only report back here; with &thread=main they run on the page.
+//
+// The interactive run takes any parameter of the model in the address: p.<name>=<value>, for
+// example ?p.lightAmount=0.7&p.lightDirX=1&p.morphogens=1&p.morphBulge=0.6, and exact=1 or
+// exact=0 for the arithmetic (web/sim.js, `exact`; left out, the simulation chooses).
 import { Sim } from './sim.js';
 import { render as renderShader } from './shaders.js';
 import { fetchState, requestDevice, runTask } from './tasks.js';
@@ -93,8 +98,8 @@ async function interactive(device, renderer) {
   const capacity = Number(query.get('capacity') ?? 1200000);
   start.params.maxCells = capacity;
   for (const [k, v] of query) if (k.startsWith('p.')) start.params[k.slice(2)] = Number(v);
-  const sim = await Sim.create(device, capacity);
-  sim.upload(start);
+  const sim = await Sim.create(device, capacity, { exact: query.get('exact') === '1' ? true : query.get('exact') === '0' ? false : 'auto' });
+  sim.upload(start);   // throws, with the reasons, when the parameters are not valid
   window.__sim = sim;
   let running = true, busy = false, batch = 4;
   document.getElementById('run').onclick = (e) => { running = !running; e.target.textContent = running ? 'Pause' : 'Run'; };
@@ -117,7 +122,7 @@ async function interactive(device, renderer) {
       const g = await sim.readGlobals();
       const ms = (performance.now() - t) / batch;
       batch = Math.max(1, Math.min(200, Math.round(12 / Math.max(ms, 0.05))));
-      statusEl.textContent = `${g.n} cells, step ${g.step}, ${ms.toFixed(2)} ms/step` + (g.failed ? ` (stopped: ${FAIL[g.failCode]})` : '');
+      statusEl.textContent = `${g.n} cells, step ${g.step}, ${ms.toFixed(2)} ms/step` + (sim.exact ? ', exact' : '') + (g.failed ? ` (stopped: ${FAIL[g.failCode]})` : '');
       busy = false;
     }
     renderer.draw(sim, document.getElementById('age').checked);

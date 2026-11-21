@@ -34,6 +34,24 @@ struct CudaOptions {
     std::uint32_t renumberMinCells = 65536u;
     double renumberGrowth = 0.05;
     std::uint32_t renumberMaxSteps = 512u;
+    // Batches: run() queues up to maxBatch steps on the device before it looks at the results
+    // (see sim_cuda.cu, "Batches of steps"). The number is chosen so that a batch takes about
+    // batchMilliseconds, so large forms still run one step at a time. maxBatch = 1 switches it
+    // off. The result does not depend on either value.
+    std::uint32_t maxBatch = 64u;
+    double batchMilliseconds = 8.0;
+};
+
+// How the steps were queued, for tests and benchmarks (CudaSim::batch_stats).
+struct CudaBatchStats {
+    std::uint64_t batches = 0;       // round trips to the device
+    std::uint64_t steps = 0;         // steps applied
+    std::uint64_t outOfRoom = 0;     // batches cut short: the form outgrew the room reserved for the batch
+    std::uint64_t gridOutgrown = 0;  // batches cut short: the bounding box outgrew the grid planned for the batch
+    std::uint64_t repeated = 0;      // steps run a second time, alone, to report why they were not applied
+    std::uint32_t longest = 0;       // most steps applied in one batch
+    double queueSeconds = 0.0;       // host time spent queueing kernels
+    double waitSeconds = 0.0;        // host time spent waiting for the device after queueing
 };
 
 struct CudaMemory {
@@ -65,6 +83,9 @@ public:
     CudaSim& operator=(const CudaSim&) = delete;
 
     StepReport step() override;
+    // Several steps per round trip to the device when the form is small (CudaOptions::maxBatch).
+    std::uint64_t run(const RunLimits& limits, const StepCallback& each = {}) override;
+    CudaBatchStats batch_stats() const;
     std::uint32_t cell_count() const override;
     std::uint64_t step_count() const override;
     void download(State& out) const override;

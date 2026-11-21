@@ -122,6 +122,22 @@ CF_FN std::uint64_t grid_key(std::uint32_t x, std::uint32_t y, std::uint32_t z, 
     return static_cast<std::uint64_t>(x) + static_cast<std::uint64_t>(nx) * (static_cast<std::uint64_t>(y) + static_cast<std::uint64_t>(ny) * z);
 }
 
+// Grid cells per axis for a bounding box. False when an axis would need more than 2^21 cells
+// (the linear key has to stay below 2^63): the form has blown up or roi is far too small.
+// The CUDA backend runs this on the host and, when it queues several steps before looking at
+// the results, on the device: the same arithmetic in both places.
+constexpr double kGridMaxDim = 2097152.0;
+CF_FN bool grid_dims(Vec3 lo, Vec3 hi, float invCell, std::uint32_t& nx, std::uint32_t& ny, std::uint32_t& nz) {
+    const double dx = std::floor((static_cast<double>(hi.x) - lo.x) * invCell) + 1.0;
+    const double dy = std::floor((static_cast<double>(hi.y) - lo.y) * invCell) + 1.0;
+    const double dz = std::floor((static_cast<double>(hi.z) - lo.z) * invCell) + 1.0;
+    if (!(dx <= kGridMaxDim && dy <= kGridMaxDim && dz <= kGridMaxDim)) return false;
+    nx = static_cast<std::uint32_t>(dx);
+    ny = static_cast<std::uint32_t>(dy);
+    nz = static_cast<std::uint32_t>(dz);
+    return true;
+}
+
 // First index in sortedKey[first..count) whose key is >= key (count when there is none).
 CF_FN std::uint32_t grid_lower_bound(const std::uint64_t* sortedKey, std::uint32_t count, std::uint64_t key, std::uint32_t first = 0) {
     std::uint32_t lo = first, hi = count;

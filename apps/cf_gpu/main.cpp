@@ -57,6 +57,8 @@ void usage() {
         "  --log-every <k>           CSV log row every k steps (default 50)\n"
         "  --milestones <a,b,c>      record wall time and step when the cell count passes each value\n"
         "  --timing                  per-phase GPU timing (adds a synchronisation after every phase)\n"
+        "  --max-batch <n>           steps queued on the GPU per round trip, at most (default 64; 1 = one\n"
+        "                            step at a time). A speed setting: the result does not depend on it\n"
         "\n"
         "Exit code 0: stopped as asked. 2: the run broke (see failure.txt). 1: bad usage, I/O or GPU error.\n";
 }
@@ -72,6 +74,7 @@ struct Options {
     std::uint64_t seed = 1, steps = 0, untilStep = 0, untilCells = 0, logEvery = 50;
     bool seedGiven = false, hasSteps = false, hasUntilStep = false, hasUntilCells = false;
     bool writeLatest = true, check = true, timing = false;
+    std::uint64_t maxBatch = 64;
     double maxSeconds = 0.0, snapshotFactor = 2.0, checkpointFactor = 4.0;
     std::vector<std::uint64_t> milestones;
 };
@@ -117,6 +120,7 @@ Options parse(int argc, char** argv) {
         else if (a == "--no-check") o.check = false;
         else if (a == "--log-every") o.logEvery = to_u64(a, next());
         else if (a == "--timing") o.timing = true;
+        else if (a == "--max-batch") o.maxBatch = to_u64(a, next());
         else if (a == "--milestones") {
             std::stringstream ss(next());
             std::string item;
@@ -215,6 +219,7 @@ int main(int argc, char** argv) {
             initial.params.maxCells = static_cast<std::uint32_t>(to_u64("--capacity", opt.capacity));
         }
         cudaOptions.capacity = initial.params.maxCells;
+        cudaOptions.maxBatch = static_cast<std::uint32_t>(opt.maxBatch < 1 ? 1 : (opt.maxBatch > 64 ? 64 : opt.maxBatch));
 
         const cf::ParamIssues issues = cf::validate(initial.params);
         for (const std::string& w : issues.warnings) std::cerr << "warning: " << w << "\n";
@@ -339,7 +344,56 @@ int main(int argc, char** argv) {
             if (!opt.hasSteps && !opt.hasUntilStep && !opt.hasUntilCells && opt.maxSeconds <= 0.0) { stopReason = "nothing-to-do"; break; }
             if (invariantBroken) { stopReason = "invariant"; exitCode = 2; break; }
 
-            const cf::StepReport r = sim.step();
+            // How far the backend may go before this loop looks again. Small forms run many
+            // steps per round trip to the GPU, so everything that needs a particular step is
+            // given as a limit: the next log row, the last step, and the cell counts at which
+            // the run stops, takes a snapshot or records a milestone. The run then stops after
+            // exactly the step it would have stopped after one step at a time.
+            cf::RunLimits lim;
+            {
+                const std::uint64_t at = sim.step_count();
+                lim.maxSteps = opt.logEvery - at % opt.logEvery;
+                if (stepGoal - at < lim.maxSteps) lim.maxSteps = stepGoal - at;
+                if (opt.hasUntilStep && opt.untilStep - at < lim.maxSteps) lim.maxSteps = opt.untilStep - at;
+                std::uint64_t stopCells = 0xFFFFFFFFull;
+                if (opt.hasUntilCells && opt.untilCells < stopCells) stopCells = opt.untilCells;
+                if (nextSnap < stopCells) stopCells = nextSnap;
+                if (nextMilestone < opt.milestones.size() && opt.milestones[nextMilestone] < stopCells) stopCells = opt.milestones[nextMilestone];
+                lim.stopAtCells = static_cast<std::uint32_t>(stopCells);
+                // Look at the clock and at the snapshot worker at least this often.
+                lim.maxSeconds = 0.02;
+                if (opt.maxSeconds > 0.0) {
+                    const double left = opt.maxSeconds - std::chrono::duration<double>(Clock::now() - t0).count();
+                    if (left < lim.maxSeconds) lim.maxSeconds = left > 1.0e-6 ? left : 1.0e-6;
+                }
+            }
+            cf::StepReport r;
+            sim.run(lim, [&](const cf::StepReport& each) {
+                r = each;
+                if (!each.ok()) return;
+                ++ivSteps;
+                ivDiv += each.divisions;
+                ivReady += each.ready;
+                ivPostponed += each.postponedDegree;
+                ivClamped += each.clamped;
+                ivFallbacks += each.normalFallbacks;
+                totalDiv += each.divisions;
+                totalClamped += each.clamped;
+                totalPostponed += each.postponedDegree;
+                totalFallbacks += each.normalFallbacks;
+                const std::uint64_t stepAfter = each.step + 1;
+                if (stepAfter % opt.logEvery == 0) {
+                    const Clock::time_point now = Clock::now();
+                    lastMsPerStep = std::chrono::duration<double, std::milli>(now - tLog).count() / static_cast<double>(ivSteps ? ivSteps : 1);
+                    if (writing) {
+                        log << stepAfter << ',' << each.cells << ',' << ivDiv << ',' << ivReady << ',' << ivPostponed << ',' << ivClamped << ',' << ivFallbacks
+                            << ',' << lastMsPerStep << ',' << std::chrono::duration<double>(now - t0).count() << ",nan,nan,nan,nan\n";
+                        log.flush();
+                    }
+                    ivSteps = ivDiv = ivReady = ivPostponed = ivClamped = ivFallbacks = 0;
+                    tLog = Clock::now();
+                }
+            });
             if (r.status == cf::StepStatus::CapacityReached) {
                 std::cerr << r.message;
                 stopReason = "capacity";
@@ -352,16 +406,6 @@ int main(int argc, char** argv) {
                 exitCode = 2;
                 break;  // the simulation still holds the last good state; it is saved below
             }
-            ++ivSteps;
-            ivDiv += r.divisions;
-            ivReady += r.ready;
-            ivPostponed += r.postponedDegree;
-            ivClamped += r.clamped;
-            ivFallbacks += r.normalFallbacks;
-            totalDiv += r.divisions;
-            totalClamped += r.clamped;
-            totalPostponed += r.postponedDegree;
-            totalFallbacks += r.normalFallbacks;
 
             const std::uint64_t step = sim.step_count();
             const std::uint32_t cells = sim.cell_count();
@@ -370,17 +414,6 @@ int main(int argc, char** argv) {
                 snapshot(ckpt, false);
                 nextSnap = next_threshold(cells, opt.snapshotFactor);
                 if (ckpt) nextCkpt = next_threshold(cells, opt.checkpointFactor);
-            }
-            if (step % opt.logEvery == 0) {
-                const Clock::time_point now = Clock::now();
-                lastMsPerStep = std::chrono::duration<double, std::milli>(now - tLog).count() / static_cast<double>(ivSteps ? ivSteps : 1);
-                if (writing) {
-                    log << step << ',' << cells << ',' << ivDiv << ',' << ivReady << ',' << ivPostponed << ',' << ivClamped << ',' << ivFallbacks << ','
-                        << lastMsPerStep << ',' << std::chrono::duration<double>(now - t0).count() << ",nan,nan,nan,nan\n";
-                    log.flush();
-                }
-                ivSteps = ivDiv = ivReady = ivPostponed = ivClamped = ivFallbacks = 0;
-                tLog = Clock::now();
             }
             while (nextMilestone < opt.milestones.size() && cells >= opt.milestones[nextMilestone]) {
                 const double wall = std::chrono::duration<double>(Clock::now() - t0).count();
@@ -414,6 +447,13 @@ int main(int argc, char** argv) {
         std::printf("steps_run=%llu\nwall_seconds=%.3f\nwall_seconds_with_output=%.3f\nms_per_step=%.4f\n", static_cast<unsigned long long>(ran), wallSim,
                     wallAll, ran ? wallSim * 1000.0 / static_cast<double>(ran) : 0.0);
         std::printf("blocked_starting_snapshots_seconds=%.3f\n", blockedInSnapshot);
+        {
+            const cf::CudaBatchStats b = sim.batch_stats();
+            std::printf("gpu_round_trips=%llu\nlongest_batch=%u\nbatches_out_of_room=%llu\nbatches_grid_outgrown=%llu\nsteps_repeated_alone=%llu\n",
+                        static_cast<unsigned long long>(b.batches), b.longest, static_cast<unsigned long long>(b.outOfRoom),
+                        static_cast<unsigned long long>(b.gridOutgrown), static_cast<unsigned long long>(b.repeated));
+            std::printf("host_queue_seconds=%.3f\nhost_wait_seconds=%.3f\n", b.queueSeconds, b.waitSeconds);
+        }
         std::printf("divisions=%llu\nclamped=%llu\npostponed_degree=%llu\nnormal_fallbacks=%llu\n", static_cast<unsigned long long>(totalDiv),
                     static_cast<unsigned long long>(totalClamped), static_cast<unsigned long long>(totalPostponed), static_cast<unsigned long long>(totalFallbacks));
         std::printf("gpu_capacity_cells=%u\ngpu_allocated_gib=%.3f\ngpu_bytes_per_cell=%.0f\ngpu_needed_gib_at_end=%.3f\n", mem.capacity,

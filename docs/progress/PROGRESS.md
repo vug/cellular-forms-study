@@ -1225,6 +1225,15 @@ At 10M cells a step is 15.4 ms with default food (move pass 12.5, grid 2.6, food
    the cell count and the grid size have to live on the device, and the library sort, select
    and reduce calls (which take their sizes from the host) have to be padded or replaced. I
    estimate 2 to 3 times for 30k-cell runs. Not started; it is a redesign of the step driver.
+   Measured afterwards (21 Nov, `cf_gpu --milestones`, growth from the 162-cell sphere to 10M
+   cells): the steps below 100k cells are 4,822 steps and 0.62 s with default food (of 8,156
+   steps and 8.58 s) and 5,382 steps and 0.71 s with the crowding limit (of 13,517 steps and
+   21.05 s). So they are 40 to 60% of the steps but 3 to 7% of the time. The 60-run search
+   (`runs\explore\perf_final`) is 164,614 steps and 20.9 s of stepping inside 31 s of runs
+   (40 s with the atlas); the remaining 10 s of the runs is taken to be process start and
+   files (the difference, not timed separately), which this redesign does not touch. The
+   estimate therefore applies to the stepping only: about 0.3 to 0.4 s off a growth run and
+   10 to 14 s off a 60-run search.
 3. **The grid** is 17 to 28% of a step. The key pass reads positions in id order, which is a
    random read once cells are renumbered (0.9 to 1.0 ms at 10M); a pass in slot order plus a
    reorder inside each grid cell would avoid that. Sort keys of 32 bits when the grid fits

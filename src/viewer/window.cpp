@@ -448,6 +448,31 @@ void Window::buildSimulationUi() {
     changed |= ImGui::SliderFloat("food threshold", &uiParams_.foodThreshold, 0.1f, 4.0f);
     changed |= ImGui::SliderFloat("split offset", &uiParams_.daughterOffset, 0.01f, 0.5f);
     changed |= ImGui::SliderFloat("max move", &uiParams_.maxDisplacement, 0.0f, 1.0f);
+    if (ImGui::TreeNode("Food sources")) {
+        // M5 (core/food.hpp): every one scales the per-step food; all off = uniform food.
+        changed |= ImGui::SliderFloat("field amount", &uiParams_.fieldAmount, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("field scale", &uiParams_.fieldScale, 2.0f, 200.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+        changed |= ImGui::SliderFloat("field octaves", &uiParams_.fieldOctaves, 1.0f, 6.0f, "%.0f");
+        changed |= ImGui::SliderFloat("field contrast", &uiParams_.fieldContrast, 0.0f, 6.0f);
+        changed |= ImGui::SliderFloat("pulse period", &uiParams_.pulsePeriod, 0.0f, 2000.0f, "%.0f steps");
+        changed |= ImGui::SliderFloat("pulse duty", &uiParams_.pulseDuty, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("pulse low", &uiParams_.pulseLow, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("light amount", &uiParams_.lightAmount, 0.0f, 1.0f);
+        float dir[3] = {uiParams_.lightDirX, uiParams_.lightDirY, uiParams_.lightDirZ};
+        if (ImGui::SliderFloat3("light direction", dir, -1.0f, 1.0f)) {
+            uiParams_.lightDirX = dir[0];
+            uiParams_.lightDirY = dir[1];
+            uiParams_.lightDirZ = dir[2];
+            changed = true;
+        }
+        changed |= ImGui::SliderFloat("light ambient", &uiParams_.lightAmbient, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("diffusion", &uiParams_.foodDiffusion, 0.0f, 0.9f);
+        changed |= ImGui::SliderFloat("decay", &uiParams_.foodDecay, 0.0f, 0.05f, "%.4f");
+        changed |= ImGui::SliderFloat("crowd low", &uiParams_.crowdLow, 0.0f, 1.2f);
+        changed |= ImGui::SliderFloat("crowd high", &uiParams_.crowdHigh, 0.0f, 1.3f);
+        ImGui::TextDisabled("crowding limit is on when high > low");
+        ImGui::TreePop();
+    }
     if (changed) {
         if (uiParams_.foodMin > uiParams_.foodMax) uiParams_.foodMin = uiParams_.foodMax;
         live_->setParams(uiParams_);

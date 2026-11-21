@@ -18,6 +18,7 @@ Newest entries at the bottom. Times are local (America/New_York).
 | M3 CUDA backend | exit criteria observed (local session, 00:40) | bit-identical to the CPU reference at every snapshot of a 100k run and in 9 tests; 100M-cell benchmark with 21 invariant checks ok. Open point: the default growth rate compresses the sheet above about 500k cells (see the M3 entry) |
 | M4 Live viewer | exit criteria observed (local session, 00:40) | scripted run: parameters changed mid-run, pause, single steps, reset; no frame over 15 ms, 0 validation errors, CUDA and CPU backends. Not tried by hand |
 | M9 Ports | both ports done and verified (local session, 01:20) | Vulkan compute: step-by-step agreement with the CPU over 106 steps, reruns identical. WebGPU: one-step agreement with CPU checkpoints from 162 to 4.4M cells, reruns identical. At 10M cells: CUDA 41, Vulkan 65, WebGPU 75 ms per step |
+| M5 Food sources | exit criterion observed (local session, 01:45) | uniform versus light contrast at 600k cells; CUDA equals CPU with every source on; reaction-diffusion and inherited coordinates not built |
 
 ## Decisions made unattended
 
@@ -840,3 +841,85 @@ for M5: `params.*` (new food parameters; they are only written to files and chec
 they differ from their defaults, so the golden checksum `12cfc7e0294813a9` and old files stay
 valid), a new `food.hpp`, and the food stage of `sim_cpu.cpp`. If you are still working in
 those files, say so here and I will stop and merge by hand.
+
+## 2026-11-21 01:45 · Local session: M5 food sources
+
+**Built** (`src/core/food.hpp`, `food.cpp`, `params.*`, the food stage of `sim_cpu.cpp` and of
+`src/cuda/sim_cuda.cu`, viewer controls)
+
+Every source scales the uniform random food a cell gains per step. All are off by default, and
+with all of them off the step is the uniform model bit for bit (the golden checksum did not
+change). They are parameters like any other (`--param`, the viewer's "Food sources" sliders),
+written to files only when used.
+
+| Source | Parameters | What it does |
+| --- | --- | --- |
+| Spatial field | `fieldAmount`, `fieldScale`, `fieldOctaves`, `fieldContrast` | food times `1 + amount * (2 f - 1)`, `f` a smooth value noise at the cell's position (world space) |
+| Temporal pulses | `pulsePeriod`, `pulseDuty`, `pulseLow` | outside the "on" part of each period, food times `pulseLow` |
+| Light | `lightAmount`, `lightDirX/Y/Z`, `lightAmbient`, `lightBias`, `lightPixel` | a cell that is front-most in an orthographic depth map seen from the light and faces it gets `N . L`; others get `lightAmbient` |
+| Diffusion along links | `foodDiffusion`, `foodDecay` | each step food moves a fraction of the way to the neighbours' mean; a fraction decays |
+| Crowding limit (ours) | `crowdLow`, `crowdHigh` | food times 0 where a cell's mean link length is at or below `crowdLow` rest lengths, 1 at `crowdHigh` or above |
+
+- The kernels are shared: `food.hpp` is compiled into the CPU reference and into the CUDA
+  kernels, like `kernels.hpp`. The shadow map is an integer max over order-preserving float
+  bits (a plain loop on the CPU, `atomicMax` on the GPU), so it is exact and deterministic.
+- The food stage moved after the normals and the grid in both backends (the light needs this
+  step's normals and the bounding box). It reads only old values, so the result of the uniform
+  model is unchanged.
+- The Vulkan compute and WebGPU ports implement uniform food only and refuse a state that uses
+  these sources, with a message, instead of ignoring them.
+- **The crowding limit is not in design.md.** It came out of the benchmark finding (the sheet
+  compresses at scale because relaxation cannot keep up with exponential growth). It is one
+  possible answer to "growth should slow where the sheet cannot spread", off by default; Uğur
+  decides whether it stays.
+
+**Not built:** reaction-diffusion (design.md lists it as "less striking"); inherited
+(material) coordinates for the field, which would need a new per-cell array through the state
+file, every backend and the ports. The field is sampled in world space only.
+
+**Verified**
+
+- `cf_tests`: 40 of 40 (9 new in `tests/test_food.cpp`): parameters round-trip through text
+  and checkpoints and are not written when off; bad values are rejected; the noise is in range
+  and continuous; pulses add nothing in the off phase; light feeds the lit side (mean food
+  0.062 there, exactly 0 on the far side) and makes growth one-sided; diffusion cuts the food
+  spread from 0.283 to 0.014; a sharp field leaves a tenth of the cells unfed; the crowding
+  limit holds the mean link at 0.92 instead of 0.80 at 30k cells under very fast food.
+- `cf_cuda_tests`: 15 of 15 (6 new): CUDA and CPU checksums are equal with each source on and
+  with all of them on at once, through thousands of divisions.
+- Two of my new tests failed on their first run because my expectations were wrong, not the
+  code (a pulse test that let cells reach the division threshold; a crowding test that
+  demanded a bigger effect than there is). Both were corrected to what the model does and say
+  so in their comments.
+- **M5 exit criterion (brain-like under uniform food versus plant-like under light):
+  observed.** Four GPU runs to 600k cells, invariant checker ok on every snapshot:
+
+| Run | Parameters besides defaults | Steps | Mean link | Displacement cap hits |
+| --- | --- | --- | --- | --- |
+| uniform | `foodMax=0.001` | 12,255 | 1.03 | 0 |
+| light from above | `foodMax=0.003 lightAmount=1 lightAmbient=0.02` | 51,961 | 1.09 | 0 |
+| noise field | `foodMax=0.002 fieldAmount=1 fieldScale=30 fieldContrast=3 fieldOctaves=2` | 4,039 | 0.85 | 645,670 |
+| crowding limit | `foodMax=0.004 crowdLow=0.9 crowdHigh=1.05` | 4,188 | 0.94 | 0 |
+
+![food sources](img/m5_food_sources_600k.png)
+
+Top: uniform food, light from above. Bottom: noise field, crowding limit. 600k cells each.
+
+![light growth](img/m5_light_growth.png)
+
+The light run at 8k, 32k, 128k and 600k cells: it grows towards the light.
+
+- The crowding-limit run grows at four times the food rate of the uniform run above and still
+  has no cell hitting the displacement cap and a mean link of 0.94; the same food rate without
+  the limit is the compressed regime of the benchmark entry.
+- Live viewer with light and the crowding limit on the CUDA backend, validation layer on:
+  0 errors; ran to the 2M capacity and stopped with the message. With 2M cells on screen and
+  the simulation running flat out on the same GPU the window drew at 20 ms per frame (one
+  frame at 60 ms).
+
+**Not verified**
+
+- Each source was looked at in one or two parameter settings; no exploration of their ranges.
+- Light at more than 2M cells; light directions other than a few (the shadow map itself is
+  compared bit for bit between CPU and GPU for two directions).
+- Nobody has moved the new sliders by hand.

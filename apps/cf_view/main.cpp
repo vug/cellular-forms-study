@@ -57,6 +57,8 @@ void usage() {
         "\n"
         "Other:\n"
         "  --validate             enable the Vulkan validation layer; exit code 3 on any error\n"
+        "  --no-ray-tracing       do not use hardware ray tracing even when the GPU has it (the ray-traced\n"
+        "                         modes then fall back); --no-barycentric likewise for cell walls on the membrane\n"
         "  --no-vsync\n"
         "  --play [--play-fps <n>]  start with snapshot playback running\n"
         "  --exit-after <frames>  close the window after this many frames and print frame times\n"
@@ -152,6 +154,10 @@ int main(int argc, char** argv) {
                 o.settings.aoRadiusLarge = static_cast<float>(std::atof(next()));
             } else if (a == "--validate") {
                 o.validate = true;
+            } else if (a == "--no-ray-tracing") {
+                o.noRayTracing = true;
+            } else if (a == "--no-barycentric") {
+                o.noBarycentric = true;
             } else if (a == "--no-vsync") {
                 o.vsync = false;
             } else if (a == "--play") {

@@ -127,6 +127,8 @@ Window::Window(const ViewOptions& o) : o_(o), playing_(o.play), playFps_(o.playF
 
     ContextDesc desc;
     desc.validation = o.validate;
+    desc.allowRayTracing = !o.noRayTracing;
+    desc.allowBarycentric = !o.noBarycentric;
     uint32_t n = 0;
     const char** exts = glfwGetRequiredInstanceExtensions(&n);
     desc.instanceExtensions.assign(exts, exts + n);

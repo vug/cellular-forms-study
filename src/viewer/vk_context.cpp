@@ -181,8 +181,8 @@ void Context::createDevice(VkSurfaceKHR surface) {
             q12.pNext = &baryFeatures;
         }
         vkGetPhysicalDeviceFeatures2(gpu, &q);
-        hasRayTracing = rtNames && asFeatures.accelerationStructure && rqFeatures.rayQuery && q12.bufferDeviceAddress;
-        hasBarycentric = baryName && baryFeatures.fragmentShaderBarycentric;
+        hasRayTracing = desc_.allowRayTracing && rtNames && asFeatures.accelerationStructure && rqFeatures.rayQuery && q12.bufferDeviceAddress;
+        hasBarycentric = desc_.allowBarycentric && baryName && baryFeatures.fragmentShaderBarycentric;
         if (hasRayTracing)
             for (const char* n : rt) extensions.push_back(n);
         if (hasBarycentric) extensions.push_back(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);

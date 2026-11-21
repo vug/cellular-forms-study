@@ -19,6 +19,7 @@ Newest entries at the bottom. Times are local (America/New_York).
 | M4 Live viewer | exit criteria observed (local session, 00:40) | scripted run: parameters changed mid-run, pause, single steps, reset; no frame over 15 ms, 0 validation errors, CUDA and CPU backends. Not tried by hand |
 | M9 Ports | both ports done and verified (local session, 01:20) | Vulkan compute: step-by-step agreement with the CPU over 106 steps, reruns identical. WebGPU: one-step agreement with CPU checkpoints from 162 to 4.4M cells, reruns identical. At 10M cells: CUDA 41, Vulkan 65, WebGPU 75 ms per step |
 | M5 Food sources | exit criterion observed (local session, 01:30) | uniform versus light contrast at 600k cells; CUDA equals CPU with every source on; reaction-diffusion and inherited coordinates not built |
+| Viewer rendering, third round | built (local session, 09:45): ray tracing of the membrane, Voronoi walls, a denoiser, an environment map, stereo, the simulation's own light map | 15 modes rendered headless with the validation layer clean, live captures on both backends, the fallbacks without ray tracing run, frame times measured up to 10M cells. No control was moved by hand; no headset |
 | Viewer rendering, second round | built (local session, 09:05): sun and sky light with shadows, cell walls, outlines and toon shading, ray-traced occlusion, a path tracer, three more colour modes, the membrane in live mode; a control for every option | every mode rendered headless with the validation layer clean; live captures on CUDA and CPU; the live render data tested against the host. No control was moved by hand |
 | M7 Rendering modes | done (local session, 01:38 and 03:50) | PLY export tested; imported and rendered in Blender 5.2; viewer x-ray, membrane and membrane-with-scattering modes render with validation clean. The scattering is a screen-space approximation |
 | M6 Exploration tools | built and run once (local session, 01:55) | descriptors tested against known shapes; a 320-run MAP-Elites search filled 27 of 48 bins; one form promoted to 1M cells. Picker is a static HTML page |
@@ -1573,3 +1574,105 @@ sections, and for the rendering rows of design.md that were not built.
 ![stylized](img/r2_stylized.png)
 ![path traced](img/r2_path_traced.png)
 ![activator](img/r2_activator.png)
+
+## 2026-11-21 09:45 · Local session: viewer rendering, third round (the rest of the list)
+
+Uğur asked for all remaining rendering items, ray tracing of the membrane among them. These
+were the items of the "Rendering" row of "Not implemented" in design.md.
+
+**What was built**
+
+1. **Ray tracing of the membrane.** The acceleration structure now holds either a box per
+   cell or the triangles of the membrane. Ray-traced ambient occlusion works in the membrane
+   modes, and there is a sixth draw mode, "membrane, path traced": normal and colour blended
+   from the three cells of the triangle hit, both sides lit, and a share of the light going
+   through the sheet (a setting), which is what makes it read as tissue. This is the physical
+   counterpart of the screen-space scattering mode.
+2. **Voronoi cell walls on the membrane.** Every pixel now takes the nearest of the three
+   cells of its triangle by distance (before: by barycentric weight) and computes its distance
+   to the wall between two cells, the plane halfway between their centres. The tiles are the
+   Voronoi cells of the sheet, and the lines have an even width and smooth edges.
+3. **Denoiser.** The path tracer also writes the normal, distance and colour of the first
+   surface each pixel sees. Three edge-aware blur passes of growing reach then smooth the light
+   (not the colour), only between pixels of the same surface and similar brightness, and less
+   as samples accumulate.
+4. **Environment map.** An equirectangular image lights the form in place of the sky and
+   ground colours: matt light from a blurry level of the map, mirrored light by shininess, in
+   the raster modes; all light from the surroundings in the path tracer. It can be shown
+   behind the form and turned about the vertical. A studio with three soft lights is built in;
+   `--env <file>` or the panel loads a `.hdr`, `.png` or `.jpg`.
+5. **Stereo.** Two eyes a little apart with skewed frustums that meet at the orbit point:
+   side by side, side by side for crossed eyes, or one red and cyan image. A second renderer
+   draws the second eye. Every draw mode, in the window and in headless captures.
+6. **One shadow map shared with the food light.** In a live run the viewer can take the key
+   light from the simulation's food light and draw its shadows from the very map the food
+   source used (the backends keep the light of the last step; the map travels with the frame).
+   What is dark on screen is then what the food source saw as shadowed, texel for texel.
+7. **Switches to run the fallbacks**: `cf_view --no-ray-tracing` and `--no-barycentric` leave
+   those GPU features off, to see what the viewer does without them.
+
+Every new option is in the panels (new: Environment, Stereo) and has a name for `--set`
+(70 names now).
+
+**Frame times** (RTX 4090, window of 1600 x 1000, no vsync, mean over 209 frames of a
+standing view; the acceleration structure is built once for a file)
+
+| | 100k cells | 1M cells | 10M cells |
+|---|---|---|---|
+| Cells, default | 0.62 ms | 2.18 ms | 9.13 ms |
+| Cells, with shadows | 0.89 ms | 3.67 ms | not measured |
+| Cells, ray-traced occlusion (8 rays) | 0.93 ms | 2.58 ms | 9.67 ms |
+| Cells, path traced (2 samples per frame) | 1.45 ms | 1.73 ms | 1.95 ms |
+| Membrane with walls | 0.31 ms | 0.76 ms | not measured |
+| Membrane, ray-traced occlusion | 0.44 ms | 0.94 ms | not measured |
+| Membrane, path traced (2 samples per frame) | 1.09 ms | 1.22 ms | 1.43 ms |
+
+A live run growing to 989,246 cells (869 frames): 1.63 ms per frame as cells, 1.96 ms with
+ray-traced occlusion (worst frame 9.55 ms, when the structure is rebuilt for a new frame of
+the simulation), 0.78 ms as path-traced membrane (worst 7.30 ms).
+
+**Verified**
+
+- 15 headless renders with `--validate`, 0 validation errors each: default, sun and shadows,
+  ray-traced occlusion on cells, membrane with walls and curvature, membrane with ray-traced
+  occlusion and shadows, scattering, x-ray, toon with outlines, path traced cells, path traced
+  membrane with the environment map, environment map in a raster mode, stereo side by side,
+  red-cyan stereo of the path-traced membrane, activator colour, generation colour from
+  snapshot files. I looked at the new modes' images (path-traced membrane, walls close up,
+  denoiser before and after, environment map, both stereo forms, the simulation's light map).
+- A defect found by looking: the first red-cyan image had the two eyes shaded differently,
+  because the screen passes rebuilt positions without the skew of a stereo projection. Fixed
+  (`viewRay` in `shaders/screen.glsl`); the image now shows fringes only.
+- The simulation's light map live, CUDA and CPU backends, 0 validation errors; the debug view
+  of the light shows the texels of the simulation's map.
+- Fallbacks with `--no-ray-tracing` (path traced modes, ray-traced occlusion, environment) and
+  `--no-barycentric` (membrane walls), in headless captures and in the window: no validation
+  errors; the modes fall back to their raster forms and the walls are left out.
+- `cf_view --live-selftest --backend cuda --validate`: pass, no frame over 33 ms.
+- `cf_cuda_tests` 33 of 33, `cf_tests` 55 of 55.
+
+**Not verified, and limits**
+
+- No control was moved by hand, as before.
+- No headset: stereo is two images, not OpenXR. I could not test a headset here.
+- Whether the stereo depth is comfortable: I can check that the two views differ the right
+  way, not how it looks through glasses or with crossed eyes.
+- A loaded environment image was not tried (there is none in the repo); the built-in studio
+  goes through the same upload. Small bright lights in a loaded image would converge slowly
+  in the path tracer and are capped.
+- The cell walls on the membrane use the nearest of the three cells of a triangle. That is the
+  nearest cell of all only where triangles are well shaped; I did not measure how often it is
+  not.
+- The denoiser only looks at the current image. Silhouette pixels are left as they are.
+- The simulation's light map is one step behind the positions drawn, and is shown in live
+  runs only (files do not store it); maps above 2048 x 2048 texels are not shown.
+- A second renderer for stereo doubles the image memory, and in the ray-traced modes builds
+  its own acceleration structure.
+
+![membrane, path traced](img/r3_membrane_path_traced.png)
+![Voronoi walls](img/r3_voronoi_walls.png)
+![denoiser: 16 samples, before and after](img/r3_denoiser_before_after.png)
+![environment map](img/r3_environment_map.png)
+![stereo, side by side](img/r3_stereo_side_by_side.png)
+![stereo, red and cyan](img/r3_stereo_red_cyan.png)
+![the simulation's light map](img/r3_simulation_light_map.png)

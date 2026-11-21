@@ -38,6 +38,9 @@ const uint32_t kXrayFrag[] = {
 const uint32_t kMeshVert[] = {
 #include "mesh.vert.inc"
 };
+const uint32_t kMeshPlainVert[] = {
+#include "mesh_plain.vert.inc"
+};
 const uint32_t kMeshFrag[] = {
 #include "mesh.frag.inc"
 };
@@ -518,8 +521,10 @@ void Renderer::createPipelines() {
     xray.blend = Blend::Additive;
     xrayPipeline_ = makePipeline(ctx_, pipelineLayout_, xray);
 
-    PipelineDesc mesh{kMeshVert, std::size(kMeshVert), kMeshFrag, std::size(kMeshFrag)};
+    PipelineDesc mesh{kMeshPlainVert, std::size(kMeshPlainVert), kMeshFrag, std::size(kMeshFrag)};
     if (ctx_.hasBarycentric) {
+        mesh.vert = kMeshVert;
+        mesh.vertWords = std::size(kMeshVert);
         mesh.frag = kMeshBaryFrag;
         mesh.fragWords = std::size(kMeshBaryFrag);
     }

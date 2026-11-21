@@ -38,6 +38,9 @@ struct ContextDesc {
     std::vector<const char*> instanceExtensions;  // window-system extensions (empty when headless)
     bool wantSwapchain = true;                    // false when headless
     bool wantExternalMemory = false;              // Win32 external memory/semaphore (CUDA interop)
+    // Leave these off even when the GPU has them, to see what the viewer does on one that does not.
+    bool allowRayTracing = true;
+    bool allowBarycentric = true;
 };
 
 class Context {

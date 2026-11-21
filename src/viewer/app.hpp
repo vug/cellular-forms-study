@@ -34,6 +34,8 @@ struct ViewOptions {
 
     RenderSettings settings;
     bool validate = false;
+    bool noRayTracing = false;   // do not use ray tracing even when the GPU has it (to try the fallbacks)
+    bool noBarycentric = false;  // nor fragment-shader barycentrics (cell walls on the membrane)
     bool vsync = true;
 
     // Automated runs of the window (tests and measurements).

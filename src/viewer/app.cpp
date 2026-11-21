@@ -15,6 +15,8 @@ namespace cfv {
 int runHeadless(const ViewOptions& o) {
     ContextDesc desc;
     desc.validation = o.validate;
+    desc.allowRayTracing = !o.noRayTracing;
+    desc.allowBarycentric = !o.noBarycentric;
     desc.wantSwapchain = false;
     Context ctx(desc);
     ctx.createDevice(VK_NULL_HANDLE);

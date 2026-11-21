@@ -75,12 +75,31 @@ struct Box {
     std::uint32_t bad;  // lowest cell id with a non-finite position, or kInvalid
 };
 
-struct BoxOf {
+// What the host reads back once per step.
+struct StepOut {
+    Counters c;
+    Box box;  // bounds of the positions after the step (the next step's grid is built from them)
+};
+
+// Bounds of the cells as they are after the step, computed before the host knows how many
+// cells divided: the count is read on the device. When the step is not going to be applied
+// (a failed move, or the divisions would not fit) the result is not used.
+struct BoxOfLive {
     const Vec3* pos;
     const std::uint32_t* uid;
+    const Counters* c;
+    std::uint32_t n;      // cells before the step
+    std::uint32_t limit;  // cells the run may hold
     __host__ __device__ Box operator()(std::uint32_t v) const {
-        const Vec3 p = pos[v];
+        const std::uint32_t w = static_cast<std::uint32_t>(c->winners);
         Box b;
+        if (v >= n + w || static_cast<std::uint64_t>(n) + w > limit) {
+            b.lo = Vec3{FLT_MAX, FLT_MAX, FLT_MAX};
+            b.hi = Vec3{-FLT_MAX, -FLT_MAX, -FLT_MAX};
+            b.bad = kInvalid;
+            return b;
+        }
+        const Vec3 p = pos[v];
         b.lo = p;
         b.hi = p;
         b.bad = dev_finite(p) ? kInvalid : uid[v];
@@ -125,15 +144,6 @@ std::string failure_message(const Params& params, std::uint64_t seed, std::uint3
 
 // ------------------------------------------------------------------------------ kernels
 
-__global__ void k_reset_counters(Counters* c) {
-    c->fallbacks = 0;
-    c->clamped = 0;
-    c->ready = 0;
-    c->postponed = 0;
-    c->firstBadMove = kInvalid;
-    c->winners = 0;
-}
-
 // The light's shadow map: per texel, the depth of the cell nearest to the light. An integer
 // max on order-preserving bits, so the result does not depend on thread order.
 __global__ void k_shadow_clear(std::int32_t* shadow, std::uint32_t texels) {
@@ -148,9 +158,19 @@ __global__ void k_shadow_build(FoodParams fp, const Vec3* pos, std::int32_t* sha
 
 // Grid keys, listed in cell-id order (the stable sort then keeps cells with equal keys in id
 // order, which the model's summation order asks for), each with the slot the cell lives in.
+// This is the first kernel of a step, so one of its threads also resets the step's counters
+// (small forms are limited by the number of kernels per step, not by their work).
 __global__ void k_keys(const Vec3* pos, const std::uint32_t* slotOf, std::uint64_t* key, std::uint32_t* slot, std::uint32_t n, Vec3 origin,
-                       float inv, std::uint32_t nx, std::uint32_t ny, std::uint32_t nz) {
+                       float inv, std::uint32_t nx, std::uint32_t ny, std::uint32_t nz, Counters* c) {
     const std::uint32_t u = blockIdx.x * blockDim.x + threadIdx.x;
+    if (u == 0) {
+        c->fallbacks = 0;
+        c->clamped = 0;
+        c->ready = 0;
+        c->postponed = 0;
+        c->firstBadMove = kInvalid;
+        c->winners = 0;
+    }
     if (u >= n) return;
     const std::uint32_t v = slotOf[u];
     const Vec3 p = pos[v];
@@ -159,20 +179,20 @@ __global__ void k_keys(const Vec3* pos, const std::uint32_t* slotOf, std::uint64
     slot[u] = v;
 }
 
-__global__ void k_gather(const Vec3* pos, const std::uint32_t* sortedId, Vec3* sortedPos, std::uint32_t n) {
+// After the sort: the positions in sorted order (unless the cells have just been renumbered and
+// are in that order already: pos == nullptr), and the row table of the grid
+// (GridView::rowBegin/rowEnd: where each (y, z) row of grid cells starts and ends in the sorted
+// arrays; both arrays were zeroed, so an empty row is empty; rowBegin == nullptr: no table).
+__global__ void k_gather_rows(const Vec3* pos, const std::uint32_t* sortedId, Vec3* sortedPos, const std::uint64_t* key, std::uint32_t n,
+                              std::uint32_t nx, std::uint32_t* rowBegin, std::uint32_t* rowEnd) {
     const std::uint32_t q = blockIdx.x * blockDim.x + threadIdx.x;
     if (q >= n) return;
-    sortedPos[q] = pos[sortedId[q]];
-}
-
-// The row table of the grid (GridView::rowBegin/rowEnd): where each (y, z) row of grid cells
-// starts and ends in the sorted arrays. Both arrays are zeroed first, so an empty row is empty.
-__global__ void k_rows(const std::uint64_t* key, std::uint32_t n, std::uint32_t nx, std::uint32_t* rowBegin, std::uint32_t* rowEnd) {
-    const std::uint32_t q = blockIdx.x * blockDim.x + threadIdx.x;
-    if (q >= n) return;
-    const std::uint64_t row = key[q] / nx;
-    if (q == 0 || key[q - 1] / nx != row) rowBegin[row] = q;
-    if (q + 1 == n || key[q + 1] / nx != row) rowEnd[row] = q + 1;
+    if (pos != nullptr) sortedPos[q] = pos[sortedId[q]];
+    if (rowBegin != nullptr) {
+        const std::uint64_t row = key[q] / nx;
+        if (q == 0 || key[q - 1] / nx != row) rowBegin[row] = q;
+        if (q + 1 == n || key[q + 1] / nx != row) rowEnd[row] = q + 1;
+    }
 }
 
 // Normal, move and clamp of every cell (Jacobi: reads the old positions, writes the new buffers).
@@ -237,10 +257,11 @@ __global__ void k_diagnose(const Vec3* pos, const Vec3* nrm, const std::uint32_t
 // `oldPos` and `oldFood` are the values before this step; s holds the new buffers. Random numbers
 // are drawn by cell id (uid), not by the slot the cell happens to live in.
 __global__ void k_food_candidates(TopoView s, FoodParams fp, const float* oldFood, const Vec3* oldPos, const std::int32_t* shadow,
-                                  const std::uint32_t* uid, float threshold, std::uint64_t* prio, std::uint8_t* pair, std::uint32_t n,
-                                  std::uint64_t seed, std::uint64_t step, Orientation orient, Counters* c) {
+                                  const std::uint32_t* uid, float threshold, std::uint64_t* prio, std::uint8_t* pair, std::uint8_t* winById,
+                                  std::uint32_t n, std::uint64_t seed, std::uint64_t step, Orientation orient, Counters* c) {
     const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
     if (v >= n) return;
+    winById[v] = 0;  // every entry of the flag array is cleared by some thread; k_winners sets the winners
     const std::uint32_t id = uid[v];
     const float f = food_update(fp, v, id, step, oldFood, oldPos, s.normal, s.nbr + static_cast<std::size_t>(v) * kMaxDeg, s.deg[v], shadow);
     s.food[v] = f;
@@ -260,8 +281,9 @@ __global__ void k_food_candidates(TopoView s, FoodParams fp, const float* oldFoo
 // The independent set (docs/model.md section 7): a candidate divides when no cell within two
 // links has a higher priority. That is the same set as "priority equals the maximum of the
 // priorities after two rounds of max-over-neighbours", but only candidates do any work, and
-// in a step there are few of them. The flag is written at the cell id of the winner (the flag
-// array was zeroed), so the selection that follows lists the winners in increasing id.
+// in a step there are few of them. The flag is written at the cell id of the winner (the
+// candidate kernel cleared the flag array), so the selection that follows lists the winners in
+// increasing id.
 __global__ void k_winners(const std::uint64_t* prio, const std::uint32_t* nbr, const std::uint8_t* deg, const std::uint32_t* uid,
                           std::uint8_t* winById, std::uint32_t n) {
     const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
@@ -284,11 +306,14 @@ __global__ void k_winners(const std::uint64_t* prio, const std::uint32_t* nbr, c
 
 // Every winner splits. Winners are pairwise at graph distance >= 3, so no two threads touch
 // the same ring. `winners` holds cell ids in increasing order; the k-th daughter gets id n + k
-// and lives in slot n + k.
+// and lives in slot n + k. The kernel is launched before the host has read the winner count
+// (that saves a round trip per step), so it reads the count itself, and does nothing when the
+// step is not going to be applied: a failed move, or more cells than the run may hold.
 __global__ void k_split(TopoView s, const std::uint32_t* winners, const std::uint8_t* pair, std::uint32_t* uid, std::uint32_t* slotOf,
-                        std::uint32_t w, std::uint32_t n, std::uint64_t step) {
+                        const Counters* c, std::uint32_t n, std::uint32_t limit, std::uint64_t step) {
     const std::uint32_t k = blockIdx.x * blockDim.x + threadIdx.x;
-    if (k >= w) return;
+    const std::uint32_t w = static_cast<std::uint32_t>(c->winners);
+    if (k >= w || c->firstBadMove != kInvalid || static_cast<std::uint64_t>(n) + w > limit) return;
     const std::uint32_t v = slotOf[winners[k]];
     tv_apply_division(s, v, pair[v], n + k, step);
     uid[n + k] = n + k;
@@ -439,8 +464,10 @@ struct CudaSim::Impl {
     Vec3* sortedPos = nullptr;
     std::uint8_t* pair = nullptr;
     std::int32_t* shadow = nullptr;  // the light's shadow map; allocated the first time the light is on
-    Counters* counters = nullptr;
-    Box* boxOut = nullptr;
+    StepOut* hostOut = nullptr;   // pinned host copy of *out
+    StepOut* out = nullptr;       // device
+    Counters* counters = nullptr;  // &out->c
+    Box box{};                     // host: bounds (and first non-finite cell) of the current positions
     std::uint32_t* diagOut = nullptr;
     void* cubTemp = nullptr;
     std::size_t cubTempBytes = 0;
@@ -450,7 +477,6 @@ struct CudaSim::Impl {
     bool timing = false;
     bool useRowTable = true;
     CudaPhaseTimes times;
-    Vec3 boundsLo{}, boundsHi{};
 
     // --- asynchronous snapshots
     struct Pinned {
@@ -533,8 +559,13 @@ struct CudaSim::Impl {
         idBlock = alloc<std::uint32_t>(c * 2, "grid ids");
         sortedPos = alloc<Vec3>(c, "sorted positions");
         pair = alloc<std::uint8_t>(c, "cleavage pairs");
-        counters = alloc<Counters>(1, "counters");
-        boxOut = alloc<Box>(1, "bounds");
+        out = alloc<StepOut>(1, "step results");
+        {
+            void* pinnedOut = nullptr;
+            CF_CUDA(cudaHostAlloc(&pinnedOut, sizeof(StepOut), cudaHostAllocDefault));
+            hostOut = static_cast<StepOut*>(pinnedOut);
+        }
+        counters = &out->c;
         diagOut = alloc<std::uint32_t>(1, "diagnosis");
     }
 
@@ -790,13 +821,14 @@ CudaSim::CudaSim(State initial, const CudaOptions& options) : impl_(std::make_un
         CF_CUDA(cudaMemcpy(m.slotOf, identity.data(), n * sizeof(std::uint32_t), cudaMemcpyHostToDevice));
     }
 
-    if (initial.n > 0) {
-        m.boundsLo = m.boundsHi = initial.pos[0];
-        for (std::uint32_t v = 0; v < initial.n; ++v) {
-            const Vec3 q = initial.pos[v];
-            m.boundsLo = Vec3{std::min(m.boundsLo.x, q.x), std::min(m.boundsLo.y, q.y), std::min(m.boundsLo.z, q.z)};
-            m.boundsHi = Vec3{std::max(m.boundsHi.x, q.x), std::max(m.boundsHi.y, q.y), std::max(m.boundsHi.z, q.z)};
-        }
+    m.box.lo = Vec3{FLT_MAX, FLT_MAX, FLT_MAX};
+    m.box.hi = Vec3{-FLT_MAX, -FLT_MAX, -FLT_MAX};
+    m.box.bad = kInvalid;
+    for (std::uint32_t v = 0; v < initial.n; ++v) {
+        const Vec3 q = initial.pos[v];
+        if (!dev_finite(q) && m.box.bad == kInvalid) m.box.bad = v;
+        m.box.lo = Vec3{q.x < m.box.lo.x ? q.x : m.box.lo.x, q.y < m.box.lo.y ? q.y : m.box.lo.y, q.z < m.box.lo.z ? q.z : m.box.lo.z};
+        m.box.hi = Vec3{q.x > m.box.hi.x ? q.x : m.box.hi.x, q.y > m.box.hi.y ? q.y : m.box.hi.y, q.z > m.box.hi.z ? q.z : m.box.hi.z};
     }
 
     m.worker = std::thread([&m] { m.worker_loop(); });
@@ -817,6 +849,7 @@ CudaSim::~CudaSim() {
     if (m.stream) cudaStreamSynchronize(m.stream);
     if (m.copyStream) cudaStreamSynchronize(m.copyStream);
     m.free_pinned();
+    if (m.hostOut) cudaFreeHost(m.hostOut);
     for (void* p : m.blocks) cudaFree(p);
     if (m.cubTemp) cudaFree(m.cubTemp);
     if (m.evSim) cudaEventDestroy(m.evSim);
@@ -834,8 +867,8 @@ std::string CudaSim::device_name() const { return impl_->deviceName; }
 void CudaSim::download(State& out) const { impl_->download_into(out); }
 void CudaSim::enable_phase_timing(bool on) { impl_->timing = on; }
 void CudaSim::bounds(Vec3& lo, Vec3& hi) const {
-    lo = impl_->boundsLo;
-    hi = impl_->boundsHi;
+    lo = impl_->box.lo;
+    hi = impl_->box.hi;
 }
 CudaPhaseTimes CudaSim::phase_times() const {
     CudaPhaseTimes t = impl_->times;
@@ -876,23 +909,9 @@ StepReport CudaSim::step() {
     // An asynchronous snapshot may still be reading the buffers this step is about to overwrite.
     m.wait_geom_if(nxt);
 
-    k_reset_counters<<<1, 1, 0, st>>>(m.counters);
-
-    // ---- 3. Grid: bounds (and the finite check), keys, stable radix sort, sorted positions.
-    Box box;
-    {
-        Box init;
-        init.lo = Vec3{FLT_MAX, FLT_MAX, FLT_MAX};
-        init.hi = Vec3{-FLT_MAX, -FLT_MAX, -FLT_MAX};
-        init.bad = kInvalid;
-        const thrust::counting_iterator<std::uint32_t> first(0);
-        std::size_t bytes = 0;
-        CF_CUDA(cub::DeviceReduce::TransformReduce(nullptr, bytes, first, m.boxOut, n, BoxMerge{}, BoxOf{m.pos[cur], m.uid}, init, st));
-        m.ensure_temp(bytes);
-        CF_CUDA(cub::DeviceReduce::TransformReduce(m.cubTemp, bytes, first, m.boxOut, n, BoxMerge{}, BoxOf{m.pos[cur], m.uid}, init, st));
-        CF_CUDA(cudaStreamSynchronize(st));
-        CF_CUDA(cudaMemcpy(&box, m.boxOut, sizeof(Box), cudaMemcpyDeviceToHost));
-    }
+    // ---- 3. Grid: keys, stable radix sort, sorted positions. The bounds of the positions (and
+    // the finite check) came back with the previous step's results.
+    const Box box = m.box;
     if (box.bad != kInvalid) {
         rep.status = StepStatus::Failed;
         rep.cell = box.bad;
@@ -900,9 +919,6 @@ StepReport CudaSim::step() {
         rep.message = failure_message(p, seed, n, step, box.bad, rep.term, "position is not finite");
         return rep;
     }
-    m.boundsLo = box.lo;
-    m.boundsHi = box.hi;
-    m.phase(m.times.bounds, t0);
     const Vec3 origin = box.lo;
     const float inv = 1.0f / (p.radiusOfInfluence / static_cast<float>(CF_GRID_REFINE));  // grid cell size = roi
     constexpr double kMaxDim = 2097152.0;  // 2^21 cells per axis keeps the linear key below 2^63
@@ -921,7 +937,7 @@ StepReport CudaSim::step() {
     // Food parameters for this step (the light's shadow map needs the bounds).
     const FoodParams fp = make_food_params(p, seed, step, box.lo, box.hi);
 
-    k_keys<<<gb, kBlock, 0, st>>>(m.pos[cur], m.slotOf, m.key[0], m.idBlock, n, origin, inv, nx, ny, nz);
+    k_keys<<<gb, kBlock, 0, st>>>(m.pos[cur], m.slotOf, m.key[0], m.idBlock, n, origin, inv, nx, ny, nz, m.counters);
     m.phase(m.times.keys, t0);
     cub::DoubleBuffer<std::uint64_t> keys(m.key[0], m.key[1]);
     cub::DoubleBuffer<std::uint32_t> ids(m.idBlock, m.idBlock + m.capacity);
@@ -975,9 +991,8 @@ StepReport CudaSim::step() {
         m.stepAtRenumber = step;
         ++m.renumberings;
         grid.sortedPos = m.pos[cur];  // slot order is grid order now
-    } else {
-        k_gather<<<gb, kBlock, 0, st>>>(m.pos[cur], ids.Current(), m.sortedPos, n);
     }
+    const bool gather = grid.sortedPos == m.sortedPos;
     grid.origin = origin;
     grid.invCell = inv;
     grid.nx = nx;
@@ -993,10 +1008,12 @@ StepReport CudaSim::step() {
         std::uint32_t* rowBegin = reinterpret_cast<std::uint32_t*>(keys.Alternate());
         std::uint32_t* rowEnd = rowBegin + rows;
         CF_CUDA(cudaMemsetAsync(rowBegin, 0, static_cast<std::size_t>(rows) * 2 * sizeof(std::uint32_t), st));
-        k_rows<<<gb, kBlock, 0, st>>>(keys.Current(), n, nx, rowBegin, rowEnd);
         grid.rowBegin = rowBegin;
         grid.rowEnd = rowEnd;
     }
+    if (gather || grid.rowBegin != nullptr)
+        k_gather_rows<<<gb, kBlock, 0, st>>>(gather ? m.pos[cur] : nullptr, ids.Current(), m.sortedPos, keys.Current(), n, nx,
+                                             const_cast<std::uint32_t*>(grid.rowBegin), const_cast<std::uint32_t*>(grid.rowEnd));
     m.phase(m.times.gather, t0);
 
     // ---- 2, 4, 5. Normals from the rings (fallback: the previous normal), move and clamp.
@@ -1033,9 +1050,8 @@ StepReport CudaSim::step() {
     Orientation orient;  // oriented division (M8)
     orient.amount = p.orientAmount;
     orient.axis = unit_or_zero(Vec3{p.orientAxisX, p.orientAxisY, p.orientAxisZ});
-    k_food_candidates<<<gb, kBlock, 0, st>>>(tv, fp, m.food[cur], m.pos[cur], m.shadow, m.uid, p.foodThreshold, prio, m.pair, n, seed, step, orient,
-                                             m.counters);
-    CF_CUDA(cudaMemsetAsync(win, 0, n, st));
+    k_food_candidates<<<gb, kBlock, 0, st>>>(tv, fp, m.food[cur], m.pos[cur], m.shadow, m.uid, p.foodThreshold, prio, m.pair, win, n, seed, step,
+                                             orient, m.counters);
     k_winners<<<gb, kBlock, 0, st>>>(prio, m.nbr, m.deg, m.uid, win, n);
     {
         const thrust::counting_iterator<std::uint32_t> first(0);
@@ -1044,10 +1060,29 @@ StepReport CudaSim::step() {
         m.ensure_temp(bytes);
         CF_CUDA(cub::DeviceSelect::Flagged(m.cubTemp, bytes, first, win, winners, &m.counters->winners, n, st));
     }
-    // The one read-back of the step's counters.
-    Counters host{};
+    // ---- 7. Commit on the device, before the host knows the outcome: every winner splits
+    // (unless the move failed or the cells would not fit), then the bounds of the new positions.
+    const std::uint32_t limit = static_cast<std::uint32_t>(std::min<std::uint64_t>(p.maxCells, m.capacity));
+    m.wait_topo();  // an asynchronous snapshot may still be reading the rings
+    k_split<<<grid_blocks(n / 4u + 1u), kBlock, 0, st>>>(tv, winners, m.pair, m.uid, m.slotOf, m.counters, n, limit, step);
+    {
+        Box init;
+        init.lo = Vec3{FLT_MAX, FLT_MAX, FLT_MAX};
+        init.hi = Vec3{-FLT_MAX, -FLT_MAX, -FLT_MAX};
+        init.bad = kInvalid;
+        const thrust::counting_iterator<std::uint32_t> first(0);
+        const std::uint32_t upTo = static_cast<std::uint32_t>(std::min<std::uint64_t>(static_cast<std::uint64_t>(n) + n / 4u + 1u, m.capacity));
+        const BoxOfLive boxOf{m.pos[nxt], m.uid, m.counters, n, limit};
+        std::size_t bytes = 0;
+        CF_CUDA(cub::DeviceReduce::TransformReduce(nullptr, bytes, first, &m.out->box, upTo, BoxMerge{}, boxOf, init, st));
+        m.ensure_temp(bytes);
+        CF_CUDA(cub::DeviceReduce::TransformReduce(m.cubTemp, bytes, first, &m.out->box, upTo, BoxMerge{}, boxOf, init, st));
+    }
+    // The one read-back of the step.
+    CF_CUDA(cudaMemcpyAsync(m.hostOut, m.out, sizeof(StepOut), cudaMemcpyDeviceToHost, st));
     CF_CUDA(cudaStreamSynchronize(st));
-    CF_CUDA(cudaMemcpy(&host, m.counters, sizeof(Counters), cudaMemcpyDeviceToHost));
+    const StepOut result = *m.hostOut;
+    const Counters& host = result.c;
     rep.normalFallbacks = host.fallbacks;
     rep.clamped = host.clamped;
     if (host.firstBadMove != kInvalid) {
@@ -1072,23 +1107,19 @@ StepReport CudaSim::step() {
         t0 = now;
     }
 
-    // Capacity: an orderly stop before anything is applied.
-    const std::uint64_t limit = std::min<std::uint64_t>(p.maxCells, m.capacity);
+    // Capacity: an orderly stop; the device applied nothing.
     if (static_cast<std::uint64_t>(n) + w > limit) {
         rep.status = StepStatus::CapacityReached;
         rep.term = "capacity";
         rep.message = "step " + std::to_string(step) + ": " + std::to_string(w) + " divisions would take " + std::to_string(n) +
                       " cells past " + (p.maxCells <= m.capacity ? "maxCells=" : "the GPU buffer capacity of ") +
-                      std::to_string(limit) + "; stopped at the last good state\n";
+                      std::to_string(limit) + "; stopped at the last good state" + std::string(1, char(10));
         return rep;
     }
 
-    // ---- 7. Commit: swap buffers, then every winner splits.
+    // The step stands: the new buffers are the current ones.
     m.cur = nxt;
-    if (w > 0) {
-        m.wait_topo();  // an asynchronous snapshot may still be reading the rings
-        k_split<<<grid_blocks(w), kBlock, 0, st>>>(tv, winners, m.pair, m.uid, m.slotOf, w, n, step);
-    }
+    m.box = result.box;
     m.n = n + w;
     m.step = step + 1;
     rep.divisions = w;

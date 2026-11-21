@@ -2,6 +2,7 @@
 // One camera-facing quad per cell (4 vertices, triangle strip, instanced).
 // Per-instance inputs come straight from the simulation's structure-of-arrays buffers.
 #include "frame.glsl"
+#include "palette.glsl"
 
 layout(location = 0) in vec3 inPos;     // cell position (world)
 layout(location = 1) in uint inBirth;   // step at which the cell was created
@@ -38,17 +39,7 @@ void main() {
     vRadius = r;
     vPixelRadius = pixR;
 
-    int mode = int(F.colorParams.x + 0.5);
-    float s = 0.0;
-    if (mode == 1) {                                   // age in steps
-        s = (F.colorParams.w - float(inBirth) - F.colorParams.y) / max(F.colorParams.z - F.colorParams.y, 1e-6);
-    } else if (mode == 2) {                            // food
-        s = (inFood - F.colorParams.y) / max(F.colorParams.z - F.colorParams.y, 1e-6);
-    } else if (mode == 3) {                            // birth step (when in the run the cell appeared)
-        s = (float(inBirth) - F.colorParams.y) / max(F.colorParams.z - F.colorParams.y, 1e-6);
-    }
-    s = clamp(s, 0.0, 1.0);
-    vScalar = mode == 1 ? 1.0 - s : s;   // age: the youngest cells are the brightest
+    vScalar = cellScalar(inBirth, inFood);
 
     gl_Position = F.proj * vec4(p, 1.0);
 }

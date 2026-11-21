@@ -18,7 +18,8 @@ Newest entries at the bottom. Times are local (America/New_York).
 | M3 CUDA backend | exit criteria observed (local session, 00:40) | bit-identical to the CPU reference at every snapshot of a 100k run and in 9 tests; 100M-cell benchmark with 21 invariant checks ok. Open point: the default growth rate compresses the sheet above about 500k cells (see the M3 entry) |
 | M4 Live viewer | exit criteria observed (local session, 00:40) | scripted run: parameters changed mid-run, pause, single steps, reset; no frame over 15 ms, 0 validation errors, CUDA and CPU backends. Not tried by hand |
 | M9 Ports | both ports done and verified (local session, 01:20) | Vulkan compute: step-by-step agreement with the CPU over 106 steps, reruns identical. WebGPU: one-step agreement with CPU checkpoints from 162 to 4.4M cells, reruns identical. At 10M cells: CUDA 41, Vulkan 65, WebGPU 75 ms per step |
-| M5 Food sources | exit criterion observed (local session, 01:45) | uniform versus light contrast at 600k cells; CUDA equals CPU with every source on; reaction-diffusion and inherited coordinates not built |
+| M5 Food sources | exit criterion observed (local session, 01:30) | uniform versus light contrast at 600k cells; CUDA equals CPU with every source on; reaction-diffusion and inherited coordinates not built |
+| M7 Rendering modes | done except viewer subsurface scattering (local session, 01:50) | PLY export tested; imported and rendered in Blender 5.2; viewer x-ray and membrane modes render with validation clean |
 
 ## Decisions made unattended
 
@@ -842,7 +843,7 @@ they differ from their defaults, so the golden checksum `12cfc7e0294813a9` and o
 valid), a new `food.hpp`, and the food stage of `sim_cpu.cpp`. If you are still working in
 those files, say so here and I will stop and merge by hand.
 
-## 2026-11-21 01:45 · Local session: M5 food sources
+## 2026-11-21 01:30 · Local session: M5 food sources
 
 **Built** (`src/core/food.hpp`, `food.cpp`, `params.*`, the food stage of `sim_cpu.cpp` and of
 `src/cuda/sim_cuda.cu`, viewer controls)
@@ -923,3 +924,71 @@ The light run at 8k, 32k, 128k and 600k cells: it grows towards the light.
 - Light at more than 2M cells; light directions other than a few (the shadow map itself is
   compared bit for bit between CPU and GPU for two directions).
 - Nobody has moved the new sliders by hand.
+
+## 2026-11-21 01:50 · Local session: M7 Blender export and viewer modes
+
+**Built**
+
+- `cf_export <state.cfs> --points cells.ply --mesh membrane.ply` (`src/core/export.*`,
+  `apps/cf_export`): binary PLY. Points carry `radius`, `age`, `food`, `generation` (and normals
+  from a checkpoint); the membrane is the closed triangle mesh the rings describe, each
+  triangle emitted once by its smallest corner, with normals and the same attributes. Points
+  work from snapshots and checkpoints; the mesh needs a checkpoint (it has the rings).
+- `scripts/blender_import.py`: imports the PLY files into Blender, turns the points into
+  spheres with a Geometry Nodes "Mesh to Points" node driven by the `radius` attribute (Cycles
+  renders those as true spheres, so no instanced geometry), gives the membrane a subsurface
+  material, colours by an attribute, sets up a camera and light, and renders or saves a
+  `.blend`. It converts the simulation's Y-up to Blender's Z-up.
+- Viewer: `--mode xray` (every cell adds density; additive, no depth test; nothing hides
+  anything) and `--mode mesh` (the membrane, from checkpoint files, shaded through the same
+  G-buffer and ambient occlusion as the cells). Both are in the "draw as" menu.
+
+**Verified**
+
+- `cf_tests`: 42 of 42 (2 new). The mesh from the rings of a grown 3,008-cell state has
+  2 V - 4 triangles, every directed edge exactly once and its reverse once (closed, manifold,
+  consistently oriented), and all 6,012 face normals point outward. PLY headers and byte
+  counts match what is written, for points from a checkpoint, points from a snapshot and the
+  mesh.
+- Blender 5.2 (installed on this PC), background mode: `blender --background --factory-startup
+  --python scripts\blender_import.py -- --points ... --render ...` imported 100,033 cells with
+  the attributes `radius, age, food, generation`, the membrane with 100,033 vertices and
+  200,062 faces, and a 600k-cell point cloud; each rendered with Cycles on OptiX at 96 samples
+  in 3 to 4 seconds. Images below.
+- Viewer: both new modes rendered headless with the validation layer on, 0 errors; the default
+  cell mode still renders as before.
+
+**Not verified / not done**
+
+- Subsurface scattering in the viewer (design.md lists "mesh + SSS" as a viewer mode): not
+  done; the membrane has it in Blender only.
+- The x-ray mode is plain additive accumulation, not weighted blended OIT; for additive density
+  the two give the same picture, and there is no colour sorting to get wrong.
+- Membrane mode in live runs (the rings would have to be turned into an index buffer on the
+  GPU every frame); it works for checkpoint files.
+- Blender versions other than 5.2. The script uses the 4.x+ PLY importer and node interface.
+- The Blender scene (lighting, materials) is a starting point, not a look that anyone chose.
+
+**One thing went outside the repo, and what is left of it.** Blender resolves a relative
+output path against the drive root, not the shell's folder, so the first render went to
+`C:\runs\m7\cells_100k.png` instead of this repo's `runs\m7`. The script now makes every path
+absolute. I deleted that PNG and the `m7` folder (both created by that run, a minute before);
+the tool I work through refused to delete the top-level folder `C:\runs`, so **an empty
+`C:\runs` folder is left on the drive**. It was created at 01:32 by this, it is empty, and it
+can be deleted.
+
+![Blender membrane](img/m7_blender_membrane_100k.png)
+
+Blender, Cycles: the membrane of the 100k-cell default run, with subsurface scattering.
+
+![Blender cells](img/m7_blender_light_600k.png)
+
+Blender, Cycles: 600k cells of the light-driven run as spheres, coloured by age.
+
+![viewer modes](img/m7_viewer_mesh_100k.png)
+
+Viewer, membrane mode (100k cells).
+
+![viewer xray](img/m7_viewer_xray_600k.png)
+
+Viewer, x-ray mode (the 600k-cell light run).

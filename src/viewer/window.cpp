@@ -543,6 +543,9 @@ void Window::buildUi() {
     }
 
     if (ImGui::CollapsingHeader("Shading", live_ ? 0 : ImGuiTreeNodeFlags_DefaultOpen)) {
+        const char* drawModes[] = {"cells", "x-ray", "membrane (checkpoints only)"};
+        ImGui::Combo("draw as", &settings_.drawMode, drawModes, 3);
+        if (settings_.drawMode == 1) ImGui::SliderFloat("x-ray density", &settings_.xrayDensity, 0.002f, 0.5f, "%.3f", ImGuiSliderFlags_Logarithmic);
         ImGui::SliderFloat("cell radius", &settings_.sphereRadius, 0.1f, 1.5f);
         ImGui::Checkbox("ambient occlusion", &settings_.aoEnabled);
         ImGui::SliderFloat("AO small radius", &settings_.aoRadiusSmall, 0.2f, 6.0f);

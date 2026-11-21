@@ -16,6 +16,9 @@ struct Cloud {
     std::vector<cf::Vec3> pos;
     std::vector<std::uint32_t> birth;
     std::vector<float> food;
+    // Only when the file has topology (a checkpoint): normals and the membrane's triangles.
+    std::vector<cf::Vec3> normal;
+    std::vector<std::uint32_t> indices;
     std::uint64_t step = 0;
     float foodThreshold = 1.0f;
     float linkRestLength = 1.0f;
@@ -49,13 +52,14 @@ public:
 
     // Uploads the cloud. No frame may be using the buffers (they can be reallocated).
     void upload(const Cloud& cloud);
-    PointBuffers buffers() const { return {pos_.buffer, birth_.buffer, food_.buffer, count_}; }
+    PointBuffers buffers() const { return {pos_.buffer, birth_.buffer, food_.buffer, count_, normal_.buffer, index_.buffer, indexCount_}; }
 
 private:
     Context& ctx_;
-    Buffer pos_, birth_, food_;
+    Buffer pos_, birth_, food_, normal_, index_;
     std::uint32_t capacity_ = 0;
     std::uint32_t count_ = 0;
+    std::uint32_t indexCount_ = 0;
 };
 
 // Sets the scalar range of `settings` for its colour mode from the cloud (when autoRange is on).

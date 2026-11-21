@@ -93,6 +93,8 @@ CloudGpu::~CloudGpu() {
     ctx_.destroy(pos_);
     ctx_.destroy(birth_);
     ctx_.destroy(food_);
+    ctx_.destroy(normal_);
+    ctx_.destroy(index_);
 }
 
 void CloudGpu::upload(const Cloud& cloud) {
@@ -112,6 +114,21 @@ void CloudGpu::upload(const Cloud& cloud) {
     ctx_.upload(birth_, cloud.birth.data(), static_cast<VkDeviceSize>(n) * sizeof(std::uint32_t));
     ctx_.upload(food_, cloud.food.data(), static_cast<VkDeviceSize>(n) * sizeof(float));
     count_ = n;
+
+    // Membrane data, when the cloud has it (replaced on every upload: sizes differ per file).
+    ctx_.destroy(normal_);
+    ctx_.destroy(index_);
+    indexCount_ = 0;
+    if (!cloud.indices.empty() && cloud.normal.size() == cloud.pos.size()) {
+        const VkMemoryPropertyFlags props = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        normal_ = ctx_.createBuffer(static_cast<VkDeviceSize>(n) * sizeof(cf::Vec3),
+                                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, props);
+        index_ = ctx_.createBuffer(cloud.indices.size() * sizeof(std::uint32_t),
+                                   VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, props);
+        ctx_.upload(normal_, cloud.normal.data(), static_cast<VkDeviceSize>(n) * sizeof(cf::Vec3));
+        ctx_.upload(index_, cloud.indices.data(), cloud.indices.size() * sizeof(std::uint32_t));
+        indexCount_ = static_cast<std::uint32_t>(cloud.indices.size());
+    }
 }
 
 void applyAutoRange(RenderSettings& settings, const Cloud& cloud) {

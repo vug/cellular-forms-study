@@ -27,6 +27,15 @@ const uint32_t kBlurFrag[] = {
 const uint32_t kCompositeFrag[] = {
 #include "composite.frag.inc"
 };
+const uint32_t kXrayFrag[] = {
+#include "xray.frag.inc"
+};
+const uint32_t kMeshVert[] = {
+#include "mesh.vert.inc"
+};
+const uint32_t kMeshFrag[] = {
+#include "mesh.frag.inc"
+};
 
 constexpr VkFormat kAlbedoFormat = VK_FORMAT_R8G8B8A8_UNORM;
 constexpr VkFormat kNormalDepthFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -39,6 +48,8 @@ struct PipelineDesc {
     const uint32_t* frag;
     size_t fragWords;
     bool instancedCells = false;  // impostor vertex layout, triangle strip, depth test
+    bool mesh = false;            // per-vertex cell attributes + normals, triangle list, depth test
+    bool additive = false;        // additive blending, no depth test (x-ray)
     std::vector<VkFormat> colorFormats;
     VkFormat depthFormat = VK_FORMAT_UNDEFINED;
 };
@@ -56,21 +67,25 @@ VkPipeline makePipeline(Context& ctx, VkPipelineLayout layout, const PipelineDes
     stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     stages[1].module = fs;
 
-    const VkVertexInputBindingDescription bindings[3] = {
-        {0, 3 * sizeof(float), VK_VERTEX_INPUT_RATE_INSTANCE},
-        {1, sizeof(uint32_t), VK_VERTEX_INPUT_RATE_INSTANCE},
-        {2, sizeof(float), VK_VERTEX_INPUT_RATE_INSTANCE},
+    // Cells: one instance per cell. Membrane: one vertex per cell, plus its normal.
+    const VkVertexInputRate rate = d.mesh ? VK_VERTEX_INPUT_RATE_VERTEX : VK_VERTEX_INPUT_RATE_INSTANCE;
+    const VkVertexInputBindingDescription bindings[4] = {
+        {0, 3 * sizeof(float), rate},
+        {1, sizeof(uint32_t), rate},
+        {2, sizeof(float), rate},
+        {3, 3 * sizeof(float), rate},
     };
-    const VkVertexInputAttributeDescription attributes[3] = {
+    const VkVertexInputAttributeDescription attributes[4] = {
         {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
         {1, 1, VK_FORMAT_R32_UINT, 0},
         {2, 2, VK_FORMAT_R32_SFLOAT, 0},
+        {3, 3, VK_FORMAT_R32G32B32_SFLOAT, 0},
     };
     VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    if (d.instancedCells) {
-        vertexInput.vertexBindingDescriptionCount = 3;
+    if (d.instancedCells || d.mesh) {
+        vertexInput.vertexBindingDescriptionCount = d.mesh ? 4u : 3u;
         vertexInput.pVertexBindingDescriptions = bindings;
-        vertexInput.vertexAttributeDescriptionCount = 3;
+        vertexInput.vertexAttributeDescriptionCount = d.mesh ? 4u : 3u;
         vertexInput.pVertexAttributeDescriptions = attributes;
     }
 
@@ -91,16 +106,23 @@ VkPipeline makePipeline(Context& ctx, VkPipelineLayout layout, const PipelineDes
     msaa.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
     VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-    if (d.depthFormat != VK_FORMAT_UNDEFINED) {
+    if (d.depthFormat != VK_FORMAT_UNDEFINED && !d.additive) {
         depth.depthTestEnable = VK_TRUE;
         depth.depthWriteEnable = VK_TRUE;
         depth.depthCompareOp = VK_COMPARE_OP_LESS;
     }
 
     std::vector<VkPipelineColorBlendAttachmentState> blendAttachments(d.colorFormats.size());
-    for (auto& a : blendAttachments)
+    for (auto& a : blendAttachments) {
         a.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
                            VK_COLOR_COMPONENT_A_BIT;
+        if (d.additive) {
+            a.blendEnable = VK_TRUE;
+            a.srcColorBlendFactor = a.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            a.srcAlphaBlendFactor = a.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            a.colorBlendOp = a.alphaBlendOp = VK_BLEND_OP_ADD;
+        }
+    }
     VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
     blend.attachmentCount = static_cast<uint32_t>(blendAttachments.size());
     blend.pAttachments = blendAttachments.data();
@@ -235,7 +257,7 @@ Renderer::Renderer(Context& ctx, VkFormat targetFormat) : ctx_(ctx), targetForma
 Renderer::~Renderer() {
     vkDeviceWaitIdle(ctx_.device);
     destroyImages();
-    for (VkPipeline p : {impostorPipeline_, ssaoPipeline_, blurPipeline_, compositePipeline_})
+    for (VkPipeline p : {impostorPipeline_, ssaoPipeline_, blurPipeline_, compositePipeline_, xrayPipeline_, meshPipeline_})
         if (p) vkDestroyPipeline(ctx_.device, p, nullptr);
     if (pipelineLayout_) vkDestroyPipelineLayout(ctx_.device, pipelineLayout_, nullptr);
     if (descriptorPool_) vkDestroyDescriptorPool(ctx_.device, descriptorPool_, nullptr);
@@ -250,6 +272,18 @@ void Renderer::createPipelines() {
     impostor.colorFormats = {kAlbedoFormat, kNormalDepthFormat};
     impostor.depthFormat = kDepthFormat;
     impostorPipeline_ = makePipeline(ctx_, pipelineLayout_, impostor);
+
+    PipelineDesc xray = impostor;  // same quads, additive, no depth
+    xray.frag = kXrayFrag;
+    xray.fragWords = std::size(kXrayFrag);
+    xray.additive = true;
+    xrayPipeline_ = makePipeline(ctx_, pipelineLayout_, xray);
+
+    PipelineDesc mesh{kMeshVert, std::size(kMeshVert), kMeshFrag, std::size(kMeshFrag)};
+    mesh.mesh = true;
+    mesh.colorFormats = {kAlbedoFormat, kNormalDepthFormat};
+    mesh.depthFormat = kDepthFormat;
+    meshPipeline_ = makePipeline(ctx_, pipelineLayout_, mesh);
 
     PipelineDesc ssao{kFullscreenVert, std::size(kFullscreenVert), kSsaoFrag, std::size(kSsaoFrag)};
     ssao.colorFormats = {kAoFormat};
@@ -366,6 +400,8 @@ FrameUniforms Renderer::makeUniforms(const OrbitCamera& camera, const RenderSett
     u.background[3] = s.vignette;
     u.misc[0] = static_cast<float>(frameIndex % 1024);
     u.misc[1] = static_cast<float>(s.debugView);
+    u.misc[2] = static_cast<float>(s.drawMode);
+    u.misc[3] = s.xrayDensity;
     return u;
 }
 
@@ -383,12 +419,21 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
     beginPass(cmd, extent_, {albedo_.view, normalDepth_.view}, true, depth_.view);
     if (points.count > 0 && points.pos && points.birth && points.food) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, impostorPipeline_);
+        const int mode = static_cast<int>(uniforms.misc[2] + 0.5f);
+        const bool membrane = mode == 2 && points.normal && points.index && points.indexCount > 0;
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &setGeometry_, 0, nullptr);
-        const VkBuffer buffers[3] = {points.pos, points.birth, points.food};
-        const VkDeviceSize offsets[3] = {0, 0, 0};
-        vkCmdBindVertexBuffers(cmd, 0, 3, buffers, offsets);
-        vkCmdDraw(cmd, 4, points.count, 0, 0);
+        const VkBuffer buffers[4] = {points.pos, points.birth, points.food, points.normal};
+        const VkDeviceSize offsets[4] = {0, 0, 0, 0};
+        if (membrane) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline_);
+            vkCmdBindVertexBuffers(cmd, 0, 4, buffers, offsets);
+            vkCmdBindIndexBuffer(cmd, points.index, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(cmd, points.indexCount, 1, 0, 0, 0);
+        } else {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mode == 1 ? xrayPipeline_ : impostorPipeline_);
+            vkCmdBindVertexBuffers(cmd, 0, 3, buffers, offsets);
+            vkCmdDraw(cmd, 4, points.count, 0, 0);
+        }
     }
     vkCmdEndRendering(cmd);
 

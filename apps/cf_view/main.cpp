@@ -39,6 +39,8 @@ void usage() {
         "  --ssaa <1..4>          supersampling for captures (default 2)\n"
         "\n"
         "Look:\n"
+        "  --mode <cells|xray|mesh>  spheres (default), additive x-ray, or the membrane mesh (checkpoint files only)\n"
+        "  --xray-density <x>     brightness of the x-ray mode (default 0.06)\n"
         "  --color <age|food|birth|uniform>\n"
         "  --yaw <deg> --pitch <deg> --zoom <factor>\n"
         "  --radius <r>           cell radius in world units (default 0.55)\n"
@@ -118,6 +120,14 @@ int main(int argc, char** argv) {
                 o.zoom = static_cast<float>(std::atof(next()));
             } else if (a == "--radius") {
                 o.settings.sphereRadius = static_cast<float>(std::atof(next()));
+            } else if (a == "--mode") {
+                const std::string v = next();
+                if (v == "cells") o.settings.drawMode = 0;
+                else if (v == "xray") o.settings.drawMode = 1;
+                else if (v == "mesh" || v == "membrane") o.settings.drawMode = 2;
+                else throw std::runtime_error("--mode expects cells, xray or mesh");
+            } else if (a == "--xray-density") {
+                o.settings.xrayDensity = static_cast<float>(std::atof(next()));
             } else if (a == "--no-ao") {
                 o.settings.aoEnabled = false;
             } else if (a == "--ao-radius") {

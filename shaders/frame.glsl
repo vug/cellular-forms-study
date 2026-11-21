@@ -10,5 +10,5 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 ao;           // small radius (world), large radius (world), intensity, enabled
     vec4 baseColor;    // rgb for the "uniform" colour mode, a = exposure
     vec4 background;   // rgb top colour, a = vignette strength
-    vec4 misc;         // frame index, debug view, unused, unused
+    vec4 misc;         // frame index, debug view, draw mode (0 cells, 1 x-ray, 2 membrane), x-ray density scale
 } F;

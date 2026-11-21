@@ -43,6 +43,11 @@ struct RenderSettings {
     float background[3] = {0.13f, 0.14f, 0.17f};
     float vignette = 0.6f;
     int debugView = 0;  // 0 final, 1 AO, 2 normals, 3 albedo
+    // What the cells are drawn as: 0 = spheres, 1 = x-ray (additive density, nothing hides
+    // anything), 2 = the membrane (the triangle mesh of the rings; needs a checkpoint file,
+    // otherwise spheres are drawn).
+    int drawMode = 0;
+    float xrayDensity = 0.06f;  // brightness per unit of accumulated density
 };
 
 // Per-instance vertex buffers, one per attribute (the simulation's structure-of-arrays layout).
@@ -51,6 +56,10 @@ struct PointBuffers {
     VkBuffer birth = VK_NULL_HANDLE;  // uint32 per cell
     VkBuffer food = VK_NULL_HANDLE;   // float per cell
     uint32_t count = 0;
+    // Only for the membrane mode (states with topology):
+    VkBuffer normal = VK_NULL_HANDLE;  // float3 per cell
+    VkBuffer index = VK_NULL_HANDLE;   // uint32, three per triangle
+    uint32_t indexCount = 0;
 };
 
 class Renderer {
@@ -93,7 +102,7 @@ private:
                     setComposite_ = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline impostorPipeline_ = VK_NULL_HANDLE, ssaoPipeline_ = VK_NULL_HANDLE, blurPipeline_ = VK_NULL_HANDLE,
-               compositePipeline_ = VK_NULL_HANDLE;
+               compositePipeline_ = VK_NULL_HANDLE, xrayPipeline_ = VK_NULL_HANDLE, meshPipeline_ = VK_NULL_HANDLE;
 };
 
 }  // namespace cfv

@@ -12,7 +12,14 @@ layout(location = 0) out vec4 outColor;
 void main() {
     vec4 nd = textureLod(texNormalDepth, vUV, 0.0);
     vec3 color;
-    if (nd.w <= 0.0) {
+    if (int(F.misc.z + 0.5) == 1) {
+        // X-ray: nd.r is the accumulated density, nd.g the density-weighted colour value.
+        vec3 top = F.background.rgb * 0.35;
+        float density = nd.r * F.misc.w;
+        float glow = 1.0 - exp(-density);
+        vec3 tint = mix(vec3(0.55, 0.75, 1.0), vec3(1.0, 0.82, 0.55), clamp(nd.g / max(nd.r, 1e-6), 0.0, 1.0));
+        color = mix(top, tint, glow) + vec3(0.9) * glow * glow * glow * 0.6;
+    } else if (nd.w <= 0.0) {
         // Background: vertical gradient with a soft vignette.
         vec3 top = F.background.rgb;
         vec3 bottom = top * 0.55;

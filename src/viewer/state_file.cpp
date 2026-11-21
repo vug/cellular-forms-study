@@ -2,6 +2,7 @@
 
 #include <utility>
 
+#include "core/export.hpp"
 #include "core/io.hpp"
 
 namespace cfv {
@@ -9,8 +10,17 @@ namespace cfv {
 bool isCloudFile(const std::filesystem::path& file) { return file.extension() == ".cfs"; }
 
 Cloud readCloudFile(const std::filesystem::path& file) {
-    cf::Snapshot s = cf::load_snapshot(file);  // reads snapshots and checkpoints alike
+    const std::vector<char> bytes = cf::read_file(file);
+    cf::Snapshot s = cf::decode_snapshot(bytes);  // reads snapshots and checkpoints alike
     Cloud c;
+    if (s.fromCheckpoint) {
+        // A checkpoint has the rings: keep the normals and the membrane's triangles too.
+        const cf::State state = cf::decode_checkpoint(bytes);
+        c.normal = state.normal;
+        const auto faces = cf::mesh_faces(state);
+        c.indices.reserve(faces.size() * 3);
+        for (const auto& f : faces) c.indices.insert(c.indices.end(), f.begin(), f.end());
+    }
     c.pos = std::move(s.pos);
     c.birth = std::move(s.birth);
     c.food = std::move(s.food);

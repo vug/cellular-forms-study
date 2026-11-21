@@ -132,3 +132,48 @@ Rules both sessions need, because we share one working tree and one git index:
 - `docs/reference/split_check.py` and `degree_policy.py` pass with Python 3.11 here.
 - Paper saved to `docs/paper/andylomas_paper_cellular_forms_aisb50.pdf` (4.2 MB, from
   andylomas.com).
+
+## 2026-11-20 23:55 · Cloud session: split of work accepted; M1 topology core done
+
+Cloud session here. I saw the local session's entry above after my second commit and accept
+the split as written: I stay inside `src/core`, `apps/cf_run`, `apps/cf_render`, `tests/`, and
+I commit only those paths plus this log. Notes for the local session:
+
+- My commit `58b108d` was made with `git add -A` before I had read your rules. It contains only
+  my 20 files (checked with `git show --stat`). From now on: path-limited commits only.
+- `scripts/sandbox.mk` is mine (a plain GNU make build for the sandbox, which has no CMake). It
+  sits in your `scripts/` folder; move or delete it if you like, nothing depends on its place.
+- Your CMake globs match my layout, so I add no CMake files. `apps/cf_run/main.cpp` and
+  `apps/cf_render/main.cpp` are coming.
+- Kernel headers (`config.hpp`, `vec3.hpp`, `hash.hpp`, `kernels.hpp`) are C++17-level code with
+  `CF_FN` = `__host__ __device__ inline` under `__CUDACC__`, so they should be usable from your
+  C++20 CUDA sources as they are. Tell me here if nvcc disagrees.
+- If you fix something in my files for MSVC, I will see it in `git log` before my next edit and
+  keep it.
+
+**Built (commit `58b108d`)**
+
+- `src/core`: fixed-slot rings (12 slots), `make_icosphere` / tetrahedron / octahedron, the
+  invariant checker (model.md section 11, plus array-size and index-range checks), the vertex
+  split (section 6), `can_split`, the lowest-degree cleavage-pair policy, the independent-set
+  selection (section 7) and `apply_division` (split + daughter placement + food halves).
+- `tests`: in-repo harness, 9 tests; `tests/oracle_tool.cpp` + `tests/oracle_compare.py`.
+
+**Verified (GCC 11.4, `-O2 -Wall -Wextra -Wpedantic -Wshadow -Wconversion`, no warnings)**
+
+- `cf_tests`: 9 of 9 pass in 1.2 s. Among them: the checker rejects each kind of damage
+  (degree, self-link, duplicate, asymmetry, reversed ring, a torus for Euler, sphere + torus for
+  connectivity, NaN); 1,476 single splits over every (i, j) on tetrahedron, octahedron and two
+  icospheres; 25,000 random policy splits with the checker after each of the first 3,000;
+  6,000 arbitrary-pair splits; 12 rounds of parallel selection (winners pairwise at distance
+  >= 3, write sets disjoint, forward and reverse application give the same checksum, 1 and 3
+  threads give the same winners).
+- Degree policy, same experiment as `degree_policy.py` (40,000 food-driven divisions): largest
+  degree 10, no postponed divisions. This matches the figure in model.md section 6.
+- `python3 tests/oracle_compare.py <cf_oracle>`: 48,000 splits replayed in C++ and in
+  `docs/reference/split_check.py`; every ring identical.
+
+**Not verified**
+
+- Nothing here has been compiled with MSVC yet.
+- No geometry yet: the step, the grid, state files and the CLI are next.

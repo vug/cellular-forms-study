@@ -261,15 +261,17 @@ def cmd_emitter(store, args):
 # ---------------------------------------------------------------- ascent
 
 def _objective(descriptors, metric):
+    """The logarithm of the metric; an unhealthy form (features.healthy) counts as a seventh of
+    its value, so that a climb does not end in a crumpled sheet, which scores high on relief."""
     value = features.raw(descriptors, metric)
-    return math.log(max(value if value is not None else 0.0, 1e-4))
+    return math.log(max(value if value is not None else 0.0, 1e-4)) - (0.0 if features.healthy(descriptors) else 2.0)
 
 
 def cmd_ascent(store, args):
     runner, _rule = _runner(store, args, early_stop=False)
     rng = random.Random(args.seed)
     if args.start is None:
-        best = max(grown(store), key=lambda rs: _objective(rs[1][-1], args.metric))
+        best = max((rs for rs in grown(store) if rs[0]["origin"] != "ascent"), key=lambda rs: _objective(rs[1][-1], args.metric))
         start_run = best[0]
     else:
         start_run = store.runs("WHERE id = ?", (args.start,))[0]

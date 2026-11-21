@@ -334,26 +334,251 @@ First round, later: oriented division, per-cell parameters, then morphogens.
 
 ## Finding interesting parameters
 
-A funnel: cheap automatic screening removes broken and boring runs, a diversity archive keeps a
-spread of distinct forms, and Uğur picks favourites by eye to seed the next round.
+A funnel: cheap automatic screening removes broken and dull runs, a database keeps everything
+that was tried, a search fills the space of forms, and Uğur picks by eye. Since Nov 21 this is
+`scripts/atlas` (run as `python scripts/atlas <command>`), on top of `cf_gpu`, `cf_describe` and
+`cf_view`. The first search script, `scripts/explore.py`, stays as it was; the atlas reuses its
+parameter ranges.
 
-1. **Screen.** Many short, small runs (about 10–50k cells). Discard any that blow up, collapse,
-   stall or fail the invariant checker.
-2. **Describe.** Shape descriptors per surviving run: surface area per enclosed volume,
-   convex-hull fill ratio, mean-curvature histogram, how often the sheet nearly touches itself,
-   principal-axis ratios, box-counting dimension; optionally image-model embeddings of rendered
-   views.
-3. **Keep diversity.** Quality-diversity search (MAP-Elites) over 2–3 descriptors, or novelty
-   search in embedding space. The result is an atlas of form types, not one winner.
-4. **Choose by eye.** Contact sheets of thumbnails; mutate or cross over the chosen ones.
-5. **Promote.** Re-run the chosen ones at high resolution and render offline. Check early how
-   descriptors change with cell count.
+### What a form is measured by
 
-Related: ASAL (Kumar et al., https://arxiv.org/abs/2412.17799) scores simulations by rendering
-them and comparing with a vision-language model.
+`cf_describe` gives the descriptors of the first round (area against a sphere of the same
+volume, principal axes, curvature, box-counting dimension, health of the mesh) and, since
+Nov 21, the structure of the form (`structure()` in `core/descriptors.cpp`):
 
-Every run is logged with its parameters, seed, code version and descriptors, so any thumbnail can
-be reproduced exactly.
+| Scale | Measure | How | What it tells |
+| --- | --- | --- | --- |
+| Every scale | Relief per band | The surface is smoothed in steps (each cell to the mean of its ring), so the smoothing length counts links along the sheet: 1, 2, 4, 8, 16, 32. A band is what lies between two steps; its relief is the spread of the height between them along the normal, over the form's radius of gyration | "How high are the mountains against the radius of the planet", scale by scale. A sphere has none in any band; a band answers most to features about 3 smoothing lengths across |
+| Every scale | Skew and kurtosis of those heights | | Peaks against pits and creases; a few strong features against many |
+| Micro, meso, macro | Sums of bands | Up to 2 links; from a quarter of the sheet's radius, with what the smoothest surface still deviates from a sphere; between the two | Grain, folds, body |
+| All | Total relief, evenness, structure | Evenness: how many bands the relief is spread over, as a share. Structure = total relief times evenness | One number for "has structure": features on features score highest |
+| Region to region | Patchiness, growth unevenness | 32 regions by direction on the smoothest surface; spread across them of the fine relief, and of the share of young cells | Rough here and smooth there; one side grows |
+| Body | Reach, lobes | Distance of the farthest cells over the radius of gyration; strength of each degree of spherical harmonics of where the surface lies | Arms and long bodies (1 for a sphere); two-, three-, four-fold bodies |
+| Inside | Thickness, facing walls | Rays from 6,000 cells along the normal, inwards to the opposite wall and outwards to the next part of the form | Plates, ridges and arms against bulk; folds pressed together, and how wide the gap is |
+
+All of them are tested on shapes with known answers (`tests/test_descriptors.cpp`): waves of
+set height and spacing on a sphere land in the right band with the right height, spikes read
+as positive skew and pits as negative, an ellipsoid has relief only in the coarsest part, lobes
+are counted, deep waves face each other, texture on one half is patchy. The relief does not
+depend on size, position or direction. Describing a form of 30,000 cells takes 0.2 s.
+
+A form is compared by 22 features taken from these (`scripts/atlas/features.py`), each on a
+scale where equal steps mean about equally much (logarithms for relief, reach, thickness). Two
+spreads belong to every feature and are measured on the database: between two seeds of the same
+parameters, and between the forms of the database. The distance between two forms counts only
+what exceeds two seed spreads, in units of the spread between forms. A form is new when it is
+further from every form in the database than nine in ten pairs of seeds are from each other.
+
+Not built: curvature kinds (ridge, dome, saddle) after smoothing, a fold wavelength beyond the
+band with the most relief, image-model embeddings of rendered views, the convex hull.
+
+### What the seed and the start shape do
+
+Measured, because both decide how runs may be compared.
+
+- **Seed.** 49 parameter sets of the base model, 8 seeds each, to 30,000 cells
+  (`scripts/seed_spread.py`): all 392 runs finished. The seed changes the individual, not the
+  kind: the area ratio differs by half a percent between seeds and thirty times as much between
+  parameter sets, and the relief bands by 1 to 8 percent. The spread between seeds is largest
+  in the most folded forms (one set: area ratio 6.3 to 7.3). Elongation and flatness are seed
+  noise in the base model (every form is round to 3 percent), so the first search's second
+  axis carried nothing there. `docs/progress/img/s1_same_parameters_four_seeds.png` shows four
+  sets with four seeds each.
+- **Size.** The numbers keep moving with size, the order of the forms much less: how folded a
+  form is at 1,000 cells already ranks the sets as at 30,000 (rank correlation 0.87 for the
+  area ratio, 0.98 for the fold ratio), which is what the early stop below builds on.
+- **Start shape.** 24 parameter sets of the survey grown again from six other starts. A
+  stretched or flattened ellipsoid, a sphere with noise on its radius, or no food at the
+  start, end as near to the usual form as another seed does (median distance 0.08 to 0.12,
+  another seed 0.27). The size of the start matters more: from 642 cells the median is 0.38,
+  and from 42 cells 0.91, with one form in ten further than 4.5, which is a different form.
+
+### The database
+
+`runs/atlas/atlas.db` (SQLite) holds every run: start shape and initial food, seed, the
+simulation's parameters, the search's own description of them, the tools' commit, the outcome
+(ok, stopped early, stalled, broken), where it came from and its parents, the descriptors at
+every quarter decade of cells (stage = round(4 log10 cells)), two screenshots and a tile in
+two sets of contact sheets, and Uğur's rating, category and note. A run is identified by its
+start, seed, parameters and target, so nothing is grown twice. `photos` grows a run again to
+retake its pictures; the state files themselves are not kept (85 bytes per cell), since the
+same start, seed and parameters give the same form.
+
+**The first survey** (`python scripts/atlas survey --runs 3000`): 3,001 parameter sets that
+fill the seven base ranges evenly (a Latin hypercube), each optional mechanism on with a chance
+of one in four, one set in ten from another start shape, every twentieth also with a second
+seed. 3,152 runs to 31,623 cells took 33 minutes (0.9 s a run with describing and pictures);
+3,134 reached the size, 18 ran out of steps, none broke.
+
+| Mechanism on | Runs | Dull | Median structure | Reach above 1.6 | Median area ratio |
+| --- | --- | --- | --- | --- | --- |
+| Any (all runs) | 3,134 | 24 % | 0.071 | 19 % | 4.8 |
+| None (base model only) | 436 | 46 % | 0.035 | 0 % | 1.7 |
+| Oriented division | 805 | 0 % | 0.110 | 70 % | 6.4 |
+| Food diffusion | 761 | 4 % | 0.058 | 4 % | 7.7 |
+| Morphogens | 841 | 15 % | 0.082 | 20 % | 5.1 |
+| Food field | 752 | 19 % | 0.081 | 18 % | 5.0 |
+| Light | 745 | 23 % | 0.059 | 24 % | 4.7 |
+| Pulsed food | 756 | 26 % | 0.063 | 18 % | 3.9 |
+| Crowding | 774 | 29 % | 0.065 | 21 % | 3.5 |
+
+Dull means structure below 0.0283, the value that best splits the survey in two. The base
+model alone gives balls with texture, and nearly half of those are dull. Oriented division is
+what gives long bodies, and never a dull form; food diffusion gives the most surface. Two seeds
+of one parameter set end 0.37 apart in the median (one pair in ten more than 1.9), two different
+forms 5.7 apart.
+
+### When to stop growing a form
+
+A run is watched at every quarter decade of cells, so its growth is a path through the
+measures above. Three things are built on that (`scripts/atlas/stop.py`).
+
+**The stop rule.** At 1,000, 3,162 and 10,000 cells a logistic model per stage gives the
+chance that the form will have structure at the size it is grown to (31,623 cells). It reads
+the structure and relief so far, how fast structure and area ratio rise with size, how folded
+and how compressed the sheet is, the reach, the thickness and how many steps the growth took.
+A run is stopped when its chance is below a threshold, and the threshold is set from one
+number that is asked for: the share of forms with structure that may be stopped by mistake
+(2 percent, spread over the three stages). Fitted on the survey and tested on runs it was not
+fitted on (five folds, 3,134 runs, 747 of them dull):
+
+| Decision at | Dull forms stopped | Forms with structure stopped |
+| --- | --- | --- |
+| 1,000 cells | 470 (62.9 %) | 19 (0.8 %) |
+| 3,162 cells | 138 (18.5 %) | 12 (0.5 %) |
+| 10,000 cells | 102 (13.7 %) | 11 (0.5 %) |
+| All three | 95.0 % | 1.8 % |
+
+That saves 26.6 percent of the simulation work of the survey (cells times steps), nearly all
+the work the dull forms cost. What weighs most is how fast structure and area ratio rise, not
+their value: a form that will fold is already on its way at 1,000 cells. The searches use the
+rule by default; a run it ends has the status "stopped early" and keeps the rule's chance.
+
+**Folds later.** The rule answers for the size the form is grown to, and dull turned out to be
+a statement about a size. Forms of the survey were grown on to 316,228 cells (`long-check`):
+of 286 that were dull at 31,623 cells, 127 (44 percent) have structure at ten times the size,
+and all 20 forms with structure kept it. A larger sheet buckles more easily. Which dull forms
+fold later can be read off the form at the standard size: a second logistic model
+(`later-fit`, the same inputs at 31,623 cells) is right for 255 of the 286 on forms it was not
+fitted on; it misses 20 of the 127 that fold and expects folds of 11 that stay dull. What
+tells: a compressed sheet (fold ratio below one), fast growth, walls that already face each
+other. The page gives every dull form that chance (`folds_later`) and lists the dull forms
+most worth growing on. So "nothing will come of growing this on" can be said, right about
+nine times in ten, for one more decade of cells; beyond 316,228 cells nothing was measured.
+The stop rule itself is fitted for a target of 31,623 cells; a search at another size needs
+it fitted on runs grown to that size.
+
+**Settled.** A third, simple test asks whether a form has stopped changing in kind: its
+structure, area ratio, total relief, buried share and thickness change by less than a tenth
+per half decade of cells. It hardly ever holds at these sizes (9 of 3,134 forms at 10,000
+cells), and structure at 31,623 cells differs from that at 10,000 by a factor 1.6 in the
+median: these forms are still developing when the survey stops, which the long runs confirm.
+
+At the level of a search, an emitter that finds nothing new twice in a row is ended and the
+novelty search ends after three rounds without new forms.
+
+### Kinds
+
+`python scripts/atlas kinds` sorts the forms that were grown to the standard size into
+kinds: k-means on the 22 features (in spreads between forms), the number of kinds chosen by
+how well separated they come out, and a map from the two directions in which the forms differ
+most (68 percent of the spread: across, more relief at 4 to 16 links, thinner walls and more
+facing walls; up, more patchiness, uneven growth and elongation). Every kind gets its most
+typical form, forms from its middle and its edge, and a working name made from the features
+that set it apart. Names are Uğur's to give, on the page. `kinds --assign` places forms that
+came later in the nearest kind without sorting again, so names stay.
+
+The first sorting, of the 3,323 forms of the survey and the start-shape study, gave eight
+kinds (`docs/progress/img/s2_kinds_first_sorting.png`, one row each):
+
+| Kind | Forms | What they look like | Mechanism most often on |
+| --- | --- | --- | --- |
+| 1 | 732 | Brain-like folds | none stands out (morphogens 28 %) |
+| 2 | 541 | Bristly: thin, crowded outgrowths, the most surface | food diffusion 98 % |
+| 3 | 495 | Smooth balls with fine grain: the dull ones | crowding 34 %, base model only 28 % |
+| 4 | 459 | Long bodies with ring folds | oriented division 99 % |
+| 5 | 381 | Irregular, flattened, growing on one side | food field 71 %, morphogens 54 % |
+| 6 | 339 | Cauliflowers: bulky lobes with creases | morphogens 34 % |
+| 7 | 189 | Creased balls with rough and smooth patches | base model only 32 % |
+| 8 | 187 | Bumpy blobs growing on one side | light 62 %, food field 59 % |
+
+The kinds are regions of a continuum more than separate groups (silhouette 0.30 on a scale
+where 1 is cleanly separated), so their borders are a matter of convenience. No picture was
+used: the sorting comes from the measures alone, and the rows of the figure agree with the
+eye.
+
+### Searching
+
+Four drivers work on the same database (`python scripts/atlas search --driver ...`):
+
+- **novelty** varies and crosses the forms that have the fewest forms like them. With
+  `--guided`, eight times as many variations are drawn and only those are grown that a model
+  of the database (the forms with the nearest parameters) expects to be unlike what is there.
+  It ends when three rounds in a row bring next to nothing new.
+- **emitter** runs several local searches side by side. Each keeps a point in parameter space,
+  tries points around it, moves towards the children that are new forms, carries that step on
+  to the next round (the learned direction), and widens along the parameters that moved. An
+  emitter that finds nothing new twice in a row stops and another starts elsewhere. This is
+  the "evolve the direction" idea, a simplified form of CMA-ES emitters in MAP-Elites.
+- **ascent** climbs one metric. The slope is estimated from pairs of runs on opposite sides of
+  the current point, each averaged over seeds, which is gradient ascent on the seed-averaged
+  metric. The simulation itself is not differentiated: divisions are events, the food is
+  random and growth is chaotic over thousands of steps.
+- **breed** makes children (variations and crosses) of the forms Uğur rated 4 or 5, or of
+  given runs.
+
+**What the first searches found** (all at 31,623 cells, with the stop rule). A form counts as
+new when it is healthy and further than 1.88 from every earlier form.
+
+| Origin | Runs | New forms | New per 100 runs |
+| --- | --- | --- | --- |
+| Survey, its first 300 runs | 300 | 56 | 18.7 |
+| Survey, runs 1,001 to 1,300 | 300 | 6 | 2.0 |
+| Survey, its last 300 runs | 300 | 2 | 0.7 |
+| Novelty | 200 | 4 | 2.0 |
+| Novelty, model-guided | 335 | 7 | 2.1 |
+| Emitters | 592 | 5 | 0.8 |
+
+By its end the survey had nearly stopped finding new forms. Novelty search, run after it,
+found about three times as many per run as even draws did by then; the emitters did no better
+than even draws, and their own rule ended every one of them within two or three rounds. So
+within these parameter ranges, at this size and by these measures, three thousand even draws
+had found nearly every kind of healthy form, and more searching in the same box is not where
+more variety is. It would have to come from what the box does not hold: larger sizes (four in
+ten dull forms fold when grown ten times larger), wider ranges, new mechanisms.
+
+A warning from the first run of these searches, before there was a health gate. Novelty,
+guided novelty and the emitters then gave 6.5, 10.9 and 9.9 new forms per 100 runs against
+3.3 for even draws at the end of the survey, and looked two to three times better. They had
+drifted into crumpled sheets that lie on themselves, which are unlike everything else. A
+search for what is new needs a statement of what is acceptable. For now that is
+`features.healthy` (the mean link between 0.6 and 1.6 rest lengths, and fewer than one cell in
+twenty with an unconnected cell inside its radius; 2.4 percent of the survey fail it), and no
+feature counts for more than four spreads in a distance. Uğur's ratings would be a better
+statement.
+
+Ascent on the structure score, an unhealthy form counting a seventh: from the model's default
+parameters 0.061 became 0.114 in one step and 0.13 from the third step on (26 runs a step:
+the point and six pairs, two seeds each); from the best healthy form of the database, 0.156
+became 0.170 in eight steps, which is within the noise of the estimate. Ascent on reach from
+the defaults: 1.19 to 1.38 in two steps, then level, since the base model has no long bodies
+to climb to.
+
+### The page
+
+`python scripts/atlas serve` shows the database at http://localhost:8765: a gallery, a map
+(any two metrics, or the two directions in which the forms differ most), the database as a
+table, the kinds, the early stop, and for every run its pictures, start, seed, parameters,
+every metric, its relief per band, its growth, the most similar forms, and the rating, category
+and note, which are kept in the database. `python scripts/atlas export` writes the same page
+with its data and contact sheets for publishing; published, ratings are kept by the page's own
+store, and `import-labels` takes them into the database. It is published privately at
+https://claude.ai/artifact/XQTS7vQHE4qMZv6HhtjKvG (the survey and the first searches).
+
+Every run is logged with its parameters, seed, code version and descriptors, so any thumbnail
+can be reproduced exactly.
+
+Related work is listed under Sources ("Search and measures of form").
 
 ## Milestones
 
@@ -389,7 +614,7 @@ has the detail and the dates.
 | Food | Inherited coordinates: a field that follows the tissue instead of world space | Reaction–diffusion is built as the morphogens of M8, which can also scale the food |
 | Rendering | A headset (stereo exists as side-by-side and red-cyan images, not through OpenXR; set aside by Uğur for later); the cells' motion for the path tracer (it keeps its samples through a move of the camera, and starts again when the cells change) and for recorded runs played back (only a live run publishes it); the random walk for cells drawn as spheres; the light map of the simulation for files (it is shown in live runs only) | The cell walls on the membrane take the nearest of the three cells of a triangle, which is the nearest cell of all only where the triangles are well shaped. The blending over time moves each point of the membrane with the nearest of those three cells, not with a mix of the three. While things move it is short (three frames): every lookup falls between pixels and softens the image a little, and a longer memory measured worse than no blending. Subsurface scattering and light through the sheet are approximations in the raster modes (a blur of the light on screen; thickness from the shadow map). Without ray tracing, glowing cells light only what is on screen with them. The membrane goes through the limit points of Loop subdivision, but between them it is a point-normal patch, which follows the limit surface closely, not exactly |
 | Model extensions | Growth without division, lineage and differentiation, plasticity, discrete bending energy, a 3D environment, per-cell controllers, topology changes | Seven of the ten rows of "Extending the model". Built: oriented division, per-cell parameters (through a field and through morphogens), morphogens |
-| Exploration | Convex-hull fill ratio (a stand-in exists), image-model embeddings, novelty search, crossover between chosen forms, an interactive picker | The search mutates only; the picker is a static page |
+| Exploration | Convex-hull fill ratio (a stand-in exists), image-model embeddings, curvature kinds after smoothing, a model of Uğur's ratings, searches at sizes other than 31,623 cells, several simulations at once on the GPU | The atlas (Nov 21) has the database, the measures of structure, the early stop, the kinds, four search drivers and the page; no form has been rated yet, so nothing has been learned from ratings. The stop rule and the kinds hold for the parameter ranges of the survey |
 | Ports | The speed-ups of the CUDA backend (renumbering, the lean pipeline, batches of steps) and the model extensions | The Vulkan compute and WebGPU ports run the base model and do not reach CUDA speed |
 | Speed | One kernel per batch of steps for small forms; a summation order that frees the neighbour search; a faster grid phase | The second changes every checksum |
 | From Lomas's own list (see below) | Other force formulations, external influences (flow, attracting surfaces, fields), cell death and holes, volumetric cells, forms larger than one GPU's memory, a tested path to 3D printing | Not in this document's plan either. The PLY mesh export could feed a printer; that has not been tried |
@@ -483,3 +708,20 @@ scale.
 - Andy Lomas, Morphogenetic Vase Forms (ALIFE 2019): https://research.gold.ac.uk/id/eprint/27624/
 - Andy Lomas, real-time ray tracing of complex sculptural forms (EVA London 2020): https://research.gold.ac.uk/id/eprint/28353/
 - The other pages of "Later work by Lomas" and "Work by others" are linked in their tables.
+
+Search and measures of form (found by a web search on Nov 21; abstracts and summaries read,
+not the papers):
+
+- Lehman and Stanley, Abandoning Objectives: Evolution through the Search for Novelty Alone (2011): https://www.cs.swarthmore.edu/~meeden/DevelopmentalRobotics/lehmanNoveltySearch11.pdf
+- Cully, Autonomous skill discovery with Quality-Diversity and Unsupervised Descriptors (2019): https://arxiv.org/abs/1905.11874
+- Fontaine and Nikolaidis, Differentiable Quality Diversity (2021): https://arxiv.org/abs/2106.03894
+- Reinke, Etcheverry, Oudeyer, Intrinsically Motivated Discovery of Diverse Patterns in Self-Organizing Systems (2020): https://arxiv.org/abs/1908.06663
+- Toward Artificial Open-Ended Evolution within Lenia using Quality-Diversity (2024): https://arxiv.org/abs/2406.04235
+- McCormack and Lomas, Understanding Aesthetic Evaluation using Deep Learning (2020): https://arxiv.org/abs/2004.06874, and Deep Learning of Individual Aesthetics: https://arxiv.org/abs/2009.12216
+- Deshpande and others, Engineering morphogenesis of cell clusters with differentiable programming (2024): https://arxiv.org/abs/2407.06295
+- Mordvintsev and others, Growing Neural Cellular Automata (2020): https://distill.pub/2020/growing-ca
+- Aaronson, Carroll, Ouellette, Quantifying the Rise and Fall of Complexity in Closed Systems: The Coffee Automaton (2014): https://arxiv.org/abs/1405.6903
+- Shapira, Shamir, Cohen-Or, Consistent mesh partitioning and skeletonisation using the shape diameter function (2008): https://doi.org/10.1007/s00371-007-0197-5
+- Kazhdan, Funkhouser, Rusinkiewicz, Rotation Invariant Spherical Harmonic Representation of 3D Shape Descriptors (2003): https://www.cs.princeton.edu/~funk/sgp03.pdf
+- Spectral shape analysis (Shape-DNA, heat kernel signature): https://en.wikipedia.org/wiki/Spectral_shape_analysis
+- Tallinen and others, Gyrification from constrained cortical expansion (2014): https://arxiv.org/abs/1503.03853

@@ -19,6 +19,7 @@ Newest entries at the bottom. Times are local (America/New_York).
 | M4 Live viewer | exit criteria observed (local session, 00:40) | scripted run: parameters changed mid-run, pause, single steps, reset; no frame over 15 ms, 0 validation errors, CUDA and CPU backends. Not tried by hand |
 | M9 Ports | both ports done and verified (local session, 01:20) | Vulkan compute: step-by-step agreement with the CPU over 106 steps, reruns identical. WebGPU: one-step agreement with CPU checkpoints from 162 to 4.4M cells, reruns identical. At 10M cells: CUDA 41, Vulkan 65, WebGPU 75 ms per step |
 | M5 Food sources | exit criterion observed (local session, 01:30) | uniform versus light contrast at 600k cells; CUDA equals CPU with every source on; reaction-diffusion and inherited coordinates not built |
+| The atlas | built (local session, 15:25): measures of structure per scale, a database of 5,492 runs with pictures, an early-stop rule, eight kinds, four search drivers, and a page that runs here and is published privately | 63 CPU tests and 34 CUDA tests pass; the stop rule ends 95 % of dull forms and 1.8 % of structured ones on held-out runs; 44 % of dull forms fold when grown ten times larger; the searches found few new forms after the survey. No form rated yet; rating from the phone not tried |
 | Viewer rendering, sixth round | built (local session, 13:08): where each cell was in the frame before, published by a live run as an option, and a blending of frames that follows the cells; cell walls in the path-traced modes; the path tracer keeps its samples when the camera moves; a measured check of the blending (`cf_view --motion-test`), which found two defects in the fifth round's blending (fixed) and that eight frames of memory were too many (now three) | 46 modes rendered headless with validation and synchronization checks clean, tests 34 of 34 and 55 of 55, the motion test passes in four looks, 17 of 18 live self-test runs pass without vsync, frame times measured. With vsync under the validation layer there are occasional 60 ms frames, which the previous commit has too. No control was moved by hand |
 | Viewer rendering, fifth round | built (local session, 11:55): the limits of the fourth round. The 50 ms frame found (patch buffers growing) and removed; the membrane through the limit points of Loop subdivision; anti-aliasing that blends frames while the camera moves; glowing cells light their neighbours without ray tracing; path-traced skin by a random walk, as bright as the raster skin | 46 modes rendered headless with validation and synchronization checks clean, tests 33 of 33 and 55 of 55, five live self-test runs with the validation layer pass, frame times measured. A running simulation gets only a two-frame blend. No control was moved by hand |
 | Viewer rendering, fourth round | built (local session, 11:20): a material shared by the raster modes and the path tracer, with a library of fourteen (skin among them); subsurface scattering, light through the sheet, emissive cells, depth of field, anti-aliasing, bloom; cell properties drive the material; the membrane as smooth patches; six environment maps, sampled by brightness in the path tracer | 40 modes rendered headless with validation and synchronization checks clean, tests 33 of 33 and 55 of 55, frame times measured up to 8.2M cells, the skin compared with a Blender render. Live self-test to 2M cells: passes without the validation layer; with it, two of five runs had one frame of about 50 ms (found and removed in the fifth round). Three defects found and fixed on the way. No control was moved by hand |
@@ -2147,3 +2148,153 @@ can show.
 `r6_motion_test_still_follow_control_none.png` (the same cut of the still image, following
 the cells, the control and no blending, three times the size),
 `r6_live_growing_cells_followed.png` (a cut from a window capture of a live run).
+
+## 2026-11-21 15:25 · Local session: the atlas (measures of structure, a database of runs, early stop, kinds, searches, a page)
+
+Uğur asked how to find interesting and distinct forms: measures of structure and non-uniformity
+at small, middle and large scale, whether a seed changes the outcome, a search infrastructure
+and a taxonomy first; then a page that shows the metrics and a database of the parameters,
+start conditions and seeds that were tried with their screenshots, and a way to stop a growth
+early when nothing will come of it. `docs/design.md`, "Finding interesting parameters", is
+rewritten and has the definitions and the tables; this entry says what was built, measured
+and verified.
+
+**What was built**
+
+1. **Measures of structure** in `core/descriptors.cpp` (`structure()`, printed by
+   `cf_describe`, which now takes several files): relief per scale band (the surface is
+   smoothed in octaves of links along the sheet; a band's relief is the spread of the height
+   between two levels over the radius of gyration), its skew and kurtosis, sums for micro,
+   meso and macro, total relief, evenness over the scales and their product "structure";
+   patchiness of the fine relief and unevenness of growth across 32 regions; reach; lobes by
+   spherical harmonics of where the surface lies; thickness and facing walls by rays. A form
+   of 30,000 cells is described in 0.19 s. My first version took about 2 s: it visited the
+   cells in the order of their ids, where nearly every neighbour is a cache miss. The mesh is
+   now packed in breadth-first order, and a smoothing step puts a cell at the mean of its ring
+   (half the steps for the same smoothing length).
+2. **`scripts/seed_spread.py`**: parameter sets with several seeds, described at several
+   sizes; per descriptor the spread between seeds against the spread between sets, how well a
+   small form predicts the large one, and the sets whose seeds disagree most.
+3. **`scripts/atlas`** (`python scripts/atlas <command>`, standard library only):
+   - `store.py`: the database (SQLite): every run with its start, seed, parameters, origin,
+     parents, outcome, descriptors per stage, pictures, rating, category, note.
+   - `runner.py`: grows on the GPU, describes on other cores meanwhile, photographs in
+     batches (two views and a tile in two sizes of contact sheet), enters the run. Nothing is
+     grown twice. With a stop rule it grows stage by stage and may end a run.
+   - `survey`, `photos` (retake pictures by growing again), `sheet` (a contact sheet of chosen
+     runs or of the kinds), `inits` (does the start shape matter), `long-check` (grow forms ten
+     times larger), `features`, `stop-fit`, `later-fit`, `kinds` (`--assign` for forms that
+     came later), `search --driver novelty|emitter|ascent|breed`, `yield`, `export`, `serve`,
+     `import-labels`.
+   - `page/index.html`: the page (gallery, map, table, kinds, early stop, one run in full with
+     rating, category and note), written by a helper agent to my brief and checked by me in the
+     browser.
+4. **`cf_view`**: a screenshot whose name ends in `.jpg` is written as JPEG, and
+   `--convert-image <from> <to>`. The contact sheets were 242 MB as PNG (the dither of the
+   tone mapping does not pack); as JPEG the same sheets are 37 MB.
+
+**Measured**
+
+- **Seeds** (49 base parameter sets, 8 seeds, 30,000 cells, all 392 runs finished): the seed
+  changes the individual, not the kind. Area ratio: half a percent between seeds, thirty
+  times as much between sets. The most folded sets differ most between seeds (one: 6.3 to
+  7.3). Elongation and flatness are seed noise in the base model. In the survey, two seeds of
+  one set end 0.37 apart in the median and one pair in ten more than 1.9, where two different
+  forms are 5.7 apart: a few parameter sets sit between two kinds and a seed decides.
+- **Start shape** (24 sets, six other starts): an ellipsoid, a noisy sphere or no food at the
+  start end as near to the usual form as another seed does (median distance 0.08 to 0.12,
+  another seed 0.27). A start of 642 cells: 0.38; of 42 cells: 0.91, and one form in ten
+  further than 4.5.
+- **Survey**: 3,152 runs to 31,623 cells in 33 minutes; 3,134 reached the size, 18 ran out of
+  steps, none broke. 24 percent are dull (structure below 0.0283). With the base model alone
+  46 percent are dull and no form reaches out; with oriented division on none is dull and 70
+  percent have a reach above 1.6. Food diffusion gives the most surface.
+- **Early stop**, on runs the rule was not fitted on: 95.0 percent of the dull forms stopped
+  (62.9 percent at 1,000 cells), 1.8 percent of the forms with structure stopped by mistake
+  (2 percent was asked), 26.6 percent of the simulation work saved.
+- **Dull is a statement about a size.** 306 survey forms grown on to 316,228 cells: of 286
+  that were dull at 31,623 cells, 127 have structure at the larger size; all 20 with structure
+  kept it. I had expected dull forms to stay dull. The stop rule answers for the size the run
+  is grown to, and it would have ended most of those 127 before 31,623 cells, rightly for that
+  size. A second model says which dull forms fold later, from the form at 31,623 cells: right
+  for 255 of 286 on held-out forms (it misses 20 of the 127, and expects folds of 11 that stay
+  dull). What tells: a compressed sheet (fold ratio below one), fast growth, walls that already
+  face each other.
+- **Kinds**: eight, from the measures alone, and the rows of
+  `img/s2_kinds_first_sorting.png` agree with the eye: brain-like folds, bristly, smooth
+  balls, long bodies with ring folds, irregular one-sided forms, cauliflowers, creased balls,
+  bumpy blobs. Food diffusion is on in 98 percent of the bristly kind and oriented division in
+  99 percent of the long bodies. The kinds are regions of a continuum (silhouette 0.30).
+- **Searches** (all at 31,623 cells, with the stop rule; a form is new when it is healthy and
+  further than 1.88 from every earlier form). The survey itself found 18.7 new forms per 100
+  runs in its first 300 runs and 0.7 in its last 300. After it: novelty 2.0 per 100 runs (4 of
+  200), model-guided novelty 2.1 (7 of 335), emitters 0.8 (5 of 592): every emitter was ended
+  by its own rule within two or three rounds. So in these parameter ranges, at this size and
+  by these measures, three thousand even draws had found nearly every kind of healthy form.
+  **My first run of the searches said the opposite**: 6.5, 10.9 and 9.9 new forms per 100
+  runs against 3.3 for even draws. The searches had drifted into crumpled sheets that lie on
+  themselves, which are unlike everything, and one runaway feature (the curvature spread of
+  such a sheet) made most of the distance. Fixed by a health gate (`features.healthy`) and by
+  letting no feature count for more than four spreads; the numbers above are with both.
+- **Ascent** on the structure score: from the default parameters 0.061 to 0.114 in one step
+  and 0.13 from the third on; from the best healthy form 0.156 to 0.170 in eight steps
+  (within noise). On reach from the defaults: 1.19 to 1.38, then level. The first ascent ran
+  without the health gate and half of its 318 runs are unhealthy forms.
+
+**Verified**
+
+- `cf_tests` 63 of 63 and `cf_cuda_tests` 34 of 34 on the final build. Eight of the 63 are
+  new, on shapes with known answers: a sphere has no relief; waves 7 links apart are strongest
+  in the band at 2 links and waves 28 links apart at 8, with most of their height found, and
+  twice the height gives twice the relief; turning, moving and scaling change nothing; spikes
+  lean one way and pits the other; an ellipsoid has relief only in the coarse part; a sphere
+  has reach 1 and thickness 2 and no lobes, a 4:1:1 cigar reads as degree 2; three, four and
+  five lobes are counted; deep waves face each other and shallow ones do not; waves on one
+  half are patchy; young cells on one half read as uneven growth.
+- Every atlas command was run on the real database, which now holds 5,492 runs (5,407 s of
+  simulation, 21,968 pictures, 91 MB of database, 1.4 GB with pictures): the survey, 897
+  pictures retaken, the start-shape study (168 runs), the long runs (306), the two fits, the
+  kinds and the placing of later forms, the four search drivers (1,131 runs, 182 of them ended
+  early by the rule), the yield report, contact sheets, the JPEG conversion (214 sheets),
+  export and the server.
+- Both fits are tested on runs they were not fitted on (five folds).
+- `photos` grew 897 runs again and compares the cell count with the one in the database: none
+  came out differently.
+- The page: by the helper agent at 1320 pixels and at phone width, light and dark, every view,
+  no console errors, one rating and one kind name saved through the local server and read
+  back; by me in the browser pane: gallery, one run in full, map, kinds and early stop at
+  desktop and phone width. I read its network calls (its own data, the two local endpoints,
+  Google Fonts) and its storage code, not every line of its 1,929.
+- Published as a private page, https://claude.ai/artifact/XQTS7vQHE4qMZv6HhtjKvG, with its
+  data and 268 contact sheets (57 MB). Its store took a test rating at the path the page
+  uses, gave it back, and the test was removed.
+
+**Not verified, and limits**
+
+- No form has been rated or named. The breed driver ran only on three given runs, and nothing
+  is learned from ratings yet. A model of Uğur's ratings is not built.
+- The published page talking to its own store (a rating made on the phone) has not been run:
+  that code was written from the store's type definitions and tried against a mock. The store
+  itself was exercised. The first rating from the phone is the test; `import-labels` then
+  takes ratings into the database, and it too has only been read, not run on real ratings.
+- The searches found few new forms, and the emitters no more than even draws. Whether that is
+  the space or the drivers I cannot tell from one run of each: one seed each, six rounds.
+- The stop rule is fitted for 31,623 cells and for the parameter ranges of the survey. "Folds
+  later" was measured up to 316,228 cells only.
+- The health gate is two thresholds read off the survey. The structure score rewards crumpled
+  sheets when nothing holds it back.
+- The kinds are regions of a continuum (silhouette 0.30); eight was the best separated number
+  between 4 and 12, by a small margin.
+- The relief measure is not exactly zero on an icosphere: 0.3 percent of the radius in the
+  coarsest band and 0.45 percent in the rest, from its twelve cells with five neighbours.
+  The membrane's relief at scales above 32 links is not split into bands.
+- Not built: curvature kinds after smoothing, image-model embeddings, the convex hull, several
+  simulations at once on the GPU. The atlas's Python has no tests of its own; it was verified
+  by running it.
+- One run failed when Windows would not let a file be renamed. The runner now tries such a
+  run again; that retry has not been needed since, so it has not run.
+- `.claude/launch.json` (the page server for the browser pane) is local and not committed.
+
+**Images** in `docs/progress/img/`: `s1_same_parameters_four_seeds.png` (four base parameter
+sets, four seeds each), `s2_kinds_first_sorting.png` (the eight kinds: the typical form and
+three from the middle of each), `s3_atlas_page.jpg` (the page's gallery, sorted by structure).

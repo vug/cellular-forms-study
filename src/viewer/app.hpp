@@ -26,6 +26,8 @@ struct ViewOptions {
     int width = 1600;
     int height = 1000;
     int ssaa = 2;
+    // A check of the blending of frames on a form that moves (see runHeadless): this many frames.
+    int motionTest = 0;
 
     // Camera (degrees; zoom < 1 moves closer). Unset values keep the automatic framing.
     float yawDeg = 35.0f;

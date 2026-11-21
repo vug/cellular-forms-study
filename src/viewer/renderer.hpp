@@ -75,6 +75,7 @@ struct FrameUniforms {
     float mesh[4];
     float misc[4];
     float misc2[4];
+    float prevEye[4];
 };
 
 // What makeUniforms prepares for one frame: the uniform block, and the view of the key light
@@ -219,6 +220,10 @@ struct RenderSettings {
     // while the camera or the cells move: each pixel finds where its point was, and what has
     // changed is limited to the colours around it (raster modes).
     bool taa = true;
+    // Follow each cell's own motion in that blending, where the data says where every cell was
+    // in the frame before (a live run publishes it when this is on). Without it, frames in
+    // which the cells changed are blended over two frames only.
+    bool cellMotion = true;
     bool aaAccumulate = true;  // while the view stands still: keep averaging such frames
     int aaFrames = 32;         // ... this many
     float renderScale = 1.0f;  // render at this multiple of the size along each axis and scale down (supersampling)
@@ -240,7 +245,11 @@ struct RenderSettings {
     // tissue does); otherwise, and always for cells drawn as spheres, one probe ray.
     bool ptWalk = true;
     float ptClamp = 12.0f;        // the most a bounced ray may bring (0 = no limit): trades a little light for no bright specks
-    bool ptDenoise = true;        // edge-aware blur of the light while few samples have been gathered
+    // When the camera moves, keep what was gathered: every pixel takes over the samples of the
+    // place its point was at, if the same surface was there. Otherwise the image starts again
+    // with every move.
+    bool ptTemporal = true;
+    bool ptDenoise = true;        // edge-aware blur of the light, stronger where a pixel holds few samples
     float ptDenoiseStrength = 0.5f;
 
     // --- environment map: an image of the surroundings (equirectangular) as the light from all
@@ -299,6 +308,8 @@ struct PointBuffers {
     // Where each cell lies on the smooth surface the membrane is drawn through (float3 per cell;
     // null: the membrane goes through the cells themselves).
     VkBuffer smooth = VK_NULL_HANDLE;
+    // Where each cell was in the frame drawn before this one (float3 per cell; null: not known).
+    VkBuffer prev = VK_NULL_HANDLE;
     // The most cells these buffers will ever hold (a live run grows into them); 0: `count`.
     // What the renderer derives from the cells is sized for it once, instead of in steps.
     uint32_t capacity = 0;
@@ -403,11 +414,15 @@ private:
     Image depth_;
     // Work images in linear light. Raster modes: 0 raw occlusion and glow, then the scattering
     // pass across, then the combined image; 1 blurred occlusion and glow; 2 the matt light, then
-    // the image behind the lens; 3 highlights, glow and background. Path tracer: 0 and 1 what the
-    // denoiser needs to know about the first hit, 2 and 3 its work images, 4 the image it shows.
+    // the image behind the lens; 3 highlights, glow and background. Path tracer: 0, 1 and 2 the samples
+    // of this frame and what their first hits were, 3 and 4 the denoiser's work images, of which
+    // 3 ends up as the image shown.
     Target hdr_[5];
     Target accum_;     // the image built over the frames (raster) or samples (path tracer)
-    Target accumB_;    // raster: the next one is written here from the one before, then the two change places
+    Target accumB_;    // the next one is written here from the one before, then the two change places
+    // Path tracer: what goes with accum_ (the first-hit normal and distance, colour and
+    // coverage, as gathered so far), and the pair they alternate with.
+    Target ptGuide_[2], ptFirst_[2];
     Target bloom_[2];  // a quarter of the size
     Target ldr_[2];    // the tone mapped image, before and after edge smoothing
     Target shadowMap_;
@@ -426,6 +441,11 @@ private:
 
     uint32_t accumSamples_ = 0;  // frames drawn since the picture last changed (raster), samples per pixel (path tracer)
     uint64_t accumKey_ = 0;      // what the accumulated frames or samples were gathered for
+    uint64_t sceneKey_ = 0;      // the same without the camera: a change here means another picture, not another view
+    bool ptHistoryValid_ = false;  // path tracer: accum_ holds samples of this scene
+    bool ptMoved_ = false;         // ... and the last frame drawn was one in which the camera moved
+    uint32_t ptSeed_ = 0;          // counts every sample taken, so no two frames draw the same random numbers
+    float prevEye_[4] = {};
     bool historyValid_ = false;  // raster: accum_ holds an image of this scene
     float historyCount_ = 0.0f;  // ... worth about this many frames
     uint32_t jitterIndex_ = 0;   // which sub-pixel shift the next frame gets
@@ -456,7 +476,7 @@ private:
                gatherPipeline_ = VK_NULL_HANDLE, blurPipeline_ = VK_NULL_HANDLE, lightPipeline_ = VK_NULL_HANDLE, sssPipeline_ = VK_NULL_HANDLE,
                combinePipeline_ = VK_NULL_HANDLE, dofPipeline_ = VK_NULL_HANDLE, taaPipeline_ = VK_NULL_HANDLE,
                bloomPipeline_ = VK_NULL_HANDLE, tonemapPipeline_ = VK_NULL_HANDLE, smoothPipeline_ = VK_NULL_HANDLE,
-               pathTracePipeline_ = VK_NULL_HANDLE, denoisePipeline_ = VK_NULL_HANDLE, boxPipeline_ = VK_NULL_HANDLE,
+               pathTracePipeline_ = VK_NULL_HANDLE, temporalPipeline_ = VK_NULL_HANDLE, denoisePipeline_ = VK_NULL_HANDLE, boxPipeline_ = VK_NULL_HANDLE,
                refinePipeline_ = VK_NULL_HANDLE;
     VkPipeline finalPipeline_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};  // all channels, red only, green and blue only
 

@@ -16,9 +16,12 @@
 
 namespace cfv {
 
-std::vector<std::uint8_t> renderOffscreen(Context& ctx, const PointBuffers& points, const OrbitCamera& camera,
-                                          const RenderSettings& settings, Vec3 sceneCentre, float sceneRadius, float currentStep,
-                                          int width, int height, int ssaa) {
+namespace {
+
+// `frames` <= 0: as many frames as the image needs to build up.
+std::vector<std::uint8_t> render(Context& ctx, int frames, const std::function<PointBuffers(int)>& each, const OrbitCamera& camera,
+                                 const RenderSettings& settings, Vec3 sceneCentre, float sceneRadius, float currentStep, int width, int height,
+                                 int ssaa) {
     const VkExtent2D extent{static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
     const VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
 
@@ -35,6 +38,7 @@ std::vector<std::uint8_t> renderOffscreen(Context& ctx, const PointBuffers& poin
     // Supersampling: the renderer draws at a multiple of the size and scales down in its last pass.
     RenderSettings s = settings;
     s.renderScale = std::clamp(settings.renderScale * static_cast<float>(std::clamp(ssaa, 1, 4)), 0.25f, 4.0f);
+    PointBuffers points;
     auto draw = [&](VkCommandBuffer cmd) {
         transition(cmd, target.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -44,15 +48,21 @@ std::vector<std::uint8_t> renderOffscreen(Context& ctx, const PointBuffers& poin
 
     // The image builds up over frames: the samples of the path tracer, or in the raster modes
     // frames drawn a fraction of a pixel apart with fresh noise. Render them all.
-    int frames = 1;
-    if ((s.drawMode == kDrawPathTraced || s.drawMode == kDrawMembranePathTraced) && renderer.rayTracing()) {
-        const int perFrame = std::clamp(s.ptSamplesPerFrame, 1, 64);
-        frames = (std::max(s.ptMaxSamples, 1) + perFrame - 1) / perFrame;
-    } else if (s.aaAccumulate) {
-        frames = std::clamp(s.aaFrames, 1, 4096);
+    if (frames <= 0) {
+        frames = 1;
+        if ((s.drawMode == kDrawPathTraced || s.drawMode == kDrawMembranePathTraced) && renderer.rayTracing()) {
+            const int perFrame = std::clamp(s.ptSamplesPerFrame, 1, 64);
+            frames = (std::max(s.ptMaxSamples, 1) + perFrame - 1) / perFrame;
+        } else if (s.aaAccumulate) {
+            frames = std::clamp(s.aaFrames, 1, 4096);
+        }
     }
-    for (int i = 0; i + 1 < frames; ++i) ctx.immediate(draw);
+    for (int i = 0; i + 1 < frames; ++i) {
+        points = each(i);
+        ctx.immediate(draw);
+    }
 
+    points = each(frames - 1);
     ctx.immediate([&](VkCommandBuffer cmd) {
         draw(cmd);
         transition(cmd, target.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -70,6 +80,20 @@ std::vector<std::uint8_t> renderOffscreen(Context& ctx, const PointBuffers& poin
     ctx.destroy(readback);
     ctx.destroy(target);
     return out;
+}
+
+}  // namespace
+
+std::vector<std::uint8_t> renderOffscreen(Context& ctx, const PointBuffers& points, const OrbitCamera& camera,
+                                          const RenderSettings& settings, Vec3 sceneCentre, float sceneRadius, float currentStep,
+                                          int width, int height, int ssaa) {
+    return render(ctx, 0, [&](int) { return points; }, camera, settings, sceneCentre, sceneRadius, currentStep, width, height, ssaa);
+}
+
+std::vector<std::uint8_t> renderSequence(Context& ctx, int frames, const std::function<PointBuffers(int)>& each, const OrbitCamera& camera,
+                                         const RenderSettings& settings, Vec3 sceneCentre, float sceneRadius, float currentStep, int width,
+                                         int height, int ssaa) {
+    return render(ctx, std::max(frames, 1), each, camera, settings, sceneCentre, sceneRadius, currentStep, width, height, ssaa);
 }
 
 bool writePng(const std::filesystem::path& file, int width, int height, const std::vector<std::uint8_t>& rgba) {

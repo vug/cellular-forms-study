@@ -143,6 +143,7 @@ CloudGpu::~CloudGpu() {
     ctx_.destroy(index_);
     ctx_.destroy(extra_);
     ctx_.destroy(smooth_);
+    ctx_.destroy(prev_);
 }
 
 void CloudGpu::upload(const Cloud& cloud) {
@@ -152,6 +153,7 @@ void CloudGpu::upload(const Cloud& cloud) {
         ctx_.destroy(birth_);
         ctx_.destroy(food_);
         ctx_.destroy(extra_);
+        ctx_.destroy(prev_);
         capacity_ = std::max<std::uint32_t>(n + n / 4, 1024u);
         const VkBufferUsageFlags usage = cellBufferUsage(ctx_) | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         const VkMemoryPropertyFlags props = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
@@ -173,6 +175,13 @@ void CloudGpu::upload(const Cloud& cloud) {
         if (extraMask_ & 4) packed_[v].z = cloud.activator[v];
     }
     if (n > 0) ctx_.upload(extra_, packed_.data(), static_cast<VkDeviceSize>(n) * sizeof(cf::Vec3));
+    havePrev_ = n > 0 && cloud.prev.size() == n;
+    if (havePrev_) {
+        if (!prev_.buffer)
+            prev_ = ctx_.createBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(cf::Vec3), cellBufferUsage(ctx_) | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        ctx_.upload(prev_, cloud.prev.data(), static_cast<VkDeviceSize>(n) * sizeof(cf::Vec3));
+    }
     version_ = nextBufferVersion();
 
     // Membrane data, when the cloud has it (replaced on every upload: sizes differ per file).

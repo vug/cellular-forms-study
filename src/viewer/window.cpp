@@ -716,6 +716,11 @@ void Window::buildUi() {
     if (ImGui::CollapsingHeader("Anti-aliasing")) {
         ImGui::Checkbox("smooth edges (fast)", &settings_.fxaa);
         ImGui::Checkbox("blend frames while things move", &settings_.taa);
+        if (settings_.taa) {
+            ImGui::Checkbox("follow the cells' own motion", &settings_.cellMotion);
+            if (settings_.cellMotion && !live_) ImGui::TextDisabled("(a live run publishes where each cell was)");
+            else if (settings_.cellMotion && !sc.buffers.prev) ImGui::TextDisabled("not published yet");
+        }
         ImGui::Checkbox("refine while the view stands still", &settings_.aaAccumulate);
         if (settings_.aaAccumulate) {
             ImGui::SliderInt("frames to average", &settings_.aaFrames, 2, 256, "%d", ImGuiSliderFlags_Logarithmic);
@@ -832,6 +837,7 @@ void Window::buildUi() {
         ImGui::SliderFloat("sky, times its share", &settings_.ptSkyIntensity, 0.0f, 8.0f);
         ImGui::Checkbox("random walk under the membrane", &settings_.ptWalk);
         ImGui::SliderFloat("cap on bounced light", &settings_.ptClamp, 0.0f, 100.0f, settings_.ptClamp <= 0.0f ? "none" : "%.1f");
+        ImGui::Checkbox("keep the image when the camera moves", &settings_.ptTemporal);
         ImGui::Checkbox("denoise", &settings_.ptDenoise);
         ImGui::SliderFloat("denoise strength", &settings_.ptDenoiseStrength, 0.0f, 2.0f);
         ImGui::EndDisabled();
@@ -973,7 +979,8 @@ void Window::drawFrame() {
             }
         }
         // What the simulation has to publish besides the cells: the membrane, its light map.
-        live_->setRenderNeeds(settings_.drawMode == kDrawMembrane || settings_.drawMode == kDrawMembranePathTraced, settings_.simLight);
+        live_->setRenderNeeds(settings_.drawMode == kDrawMembrane || settings_.drawMode == kDrawMembranePathTraced, settings_.simLight,
+                              settings_.taa && settings_.cellMotion);
         // Switch to the newest frame the simulation has published; never waits for a step.
         liveFrame_ = live_->acquire();
         liveStatus_ = live_->status();
@@ -1081,6 +1088,10 @@ void Window::drawFrame() {
     wait.stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSemaphoreSubmitInfo signal{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
     signal.semaphore = renderDone_[imageIndex];
+    // (Everything in the command buffer, the change of layout for presenting included, comes
+    // before the signal. Left at zero, the signal waits for nothing, which the synchronization
+    // checks of the validation layer report as presenting an image still being written.)
+    signal.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     VkCommandBufferSubmitInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
     cbi.commandBuffer = cmd_;
     VkSubmitInfo2 submit{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};

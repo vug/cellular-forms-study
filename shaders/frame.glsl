@@ -17,7 +17,7 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 shadow;         // normal offset (world units), softness (texels), 1 / map size, depth bias (clip units)
     vec4 shadow2;        // depth of the box of the light in world units, 1 when the shadow map has been drawn, unused, unused
     vec4 ao;             // small radius (world), large radius (world), intensity, enabled
-    vec4 rt;             // traced occlusion: rays per pixel (0 = screen space), ray length (world); path tracer: samples so far, samples this frame
+    vec4 rt;             // traced occlusion: rays per pixel (0 = screen space), ray length (world); path tracer: a number that differs every frame (for its random numbers), samples this frame
     vec4 pt;             // path tracer: bounces, the most a bounced ray may bring (0 = no cap), random walk under the surface of the membrane (0 or 1), unused
     vec4 lens;           // lens radius (world units; 0 = everything sharp), focus distance, largest blur radius (pixels), unused
     vec4 baseColor;      // rgb for the "uniform" colour mode, a = exposure
@@ -48,8 +48,9 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 simLightV;      // second axis (xyz), lower corner along it (w)
     vec4 simLightMap;    // texels per world unit, texels along U, texels along V, depth tolerance (world units)
     vec4 bloom;          // strength, threshold, unused, unused
-    vec4 aa;             // seed of the noise of this frame (0 while the image is not being accumulated), fast edge smoothing on, unused, unused
+    vec4 aa;             // seed of the noise of this frame (0 while the image is not being accumulated), fast edge smoothing on, the sub-pixel shift of this frame in pixels (x, y)
     vec4 mesh;           // membrane patches: segments per edge, vertices per patch, triangles per patch, unused
     vec4 misc;           // frame index, debug view, draw mode (0 cells, 1 x-ray, 2 membrane, 4 cells path traced, 5 membrane path traced), x-ray density scale
     vec4 misc2;          // tone map (0 none, 1 Reinhard, 2 filmic, 3 soft), background gradient, unused, unused
+    vec4 prevEye;        // where the camera was in the frame drawn before this one (world, xyz)
 } F;

@@ -3,10 +3,10 @@
 // Path tracer over the cells as spheres or over the membrane, with the material of the raster
 // modes: a matt base under a mirror-like highlight (or a metal), light that scatters under the
 // surface, light that passes through the sheet, and cells that glow. The light is a sun of
-// adjustable size and the sky, or an environment map. Each frame adds a few samples per pixel,
-// blended into a running mean (the blend weight is set by the renderer), so the image converges
-// while the view stands still. Next to the image it writes what the denoiser needs to know about
-// the first surface each pixel sees.
+// adjustable size and the sky, or an environment map. Each frame takes a few samples per pixel
+// and writes their mean; pt_temporal.frag joins it to what was gathered before, so the image
+// converges while the view stands still. Next to the image it writes what the denoiser needs to
+// know about the first surface each pixel sees.
 #include "frame.glsl"
 #include "palette.glsl"
 #include "patch.glsl"
@@ -121,6 +121,25 @@ bool walk(inout vec3 p, inout vec3 n, inout vec3 through, vec3 albedo) {
     return true;
 }
 
+// Cell walls, where a camera ray meets the form: how much of the point is wall (0 .. 1). The
+// wall is paint on the surface here: it takes the light that falls on it, where the raster
+// modes draw their walls over the finished shading. On the membrane the point knows its distance
+// to the wall between its cell and the next. For cells drawn as spheres, four rays a wall's
+// width to the sides tell whether another cell is that close on screen.
+float wallAt(vec3 o, vec3 d, Surface s) {
+    if (F.wall.a <= 0.0) return 0.0;
+    float perPixel = 2.0 / (F.viewport.y * abs(F.proj[1][1]));  // tangent of the angle one pixel covers
+    if (F.misc.z > 4.5) return clamp(F.style.x - s.toWall / (s.t * perPixel) + 0.5, 0.0, 1.0) * F.wall.a;
+    vec3 right = F.invView[0].xyz, up = F.invView[1].xyz;
+    float other = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        vec2 side = vec2(i == 0 ? 1.0 : (i == 1 ? -1.0 : 0.0), i == 2 ? 1.0 : (i == 3 ? -1.0 : 0.0));
+        Surface q;
+        if (nearestSurface(o, normalize(d + (right * side.x + up * side.y) * (F.style.x * perPixel)), 1.0e30, q) && q.cell != s.cell) other += 1.0;
+    }
+    return clamp(other / 2.0, 0.0, 1.0) * F.wall.a;
+}
+
 // What a bounced ray brings is capped (F.pt.y), so that a rare very bright path does not leave
 // a bright speck that takes thousands of samples to average out.
 vec3 capped(vec3 c, int bounce) { return bounce == 0 || F.pt.y <= 0.0 ? c : min(c, vec3(F.pt.y)); }
@@ -155,6 +174,7 @@ vec3 radiance(vec3 o, vec3 d, vec2 uv, inout vec4 guide, inout vec4 first) {
         // light gets through a thin fold and not through the whole body.
         if (k > 0 && F.misc.z > 4.5 && dot(s.n, d) > 0.0) through *= exp(-s.t / max(F.matSss.w * F.matSssColor.rgb, vec3(1e-4)));
         if (k == 0) {
+            s.albedo = mix(s.albedo, F.wall.rgb, wallAt(o, d, s));
             guide += vec4(n, s.t);
             first += vec4(s.albedo, 1.0);
         }

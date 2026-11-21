@@ -83,6 +83,9 @@ const uint32_t kPathTraceFrag[] = {
 const uint32_t kDenoiseFrag[] = {
 #include "denoise.frag.inc"
 };
+const uint32_t kTemporalFrag[] = {
+#include "pt_temporal.frag.inc"
+};
 const uint32_t kBoxComp[] = {
 #include "aabb.comp.inc"
 };
@@ -108,7 +111,7 @@ constexpr uint64_t kMostFineTriangles = 12'000'000;  // the membrane is refined 
 constexpr uint64_t kMostTracedLiveTriangles = 4'000'000;
 
 enum class VertexInput { None, Cells, CellsPos };
-enum class Blend { Opaque, Additive, Accumulate };
+enum class Blend { Opaque, Additive };
 
 struct PipelineDesc {
     const uint32_t* vert;
@@ -199,22 +202,15 @@ VkPipeline makePipeline(Context& ctx, VkPipelineLayout layout, const PipelineDes
                 a.srcAlphaBlendFactor = a.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
                 a.colorBlendOp = a.alphaBlendOp = VK_BLEND_OP_ADD;
             }
-        } else if (d.blend == Blend::Accumulate) {
-            // new mean = this frame * weight + old mean * (1 - weight); the weight is the blend
-            // constant, set when the pass is recorded
-            a.blendEnable = VK_TRUE;
-            a.srcColorBlendFactor = a.srcAlphaBlendFactor = VK_BLEND_FACTOR_CONSTANT_ALPHA;
-            a.dstColorBlendFactor = a.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
-            a.colorBlendOp = a.alphaBlendOp = VK_BLEND_OP_ADD;
         }
     }
     VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
     blend.attachmentCount = static_cast<uint32_t>(blendAttachments.size());
     blend.pAttachments = blendAttachments.data();
 
-    const VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_BLEND_CONSTANTS};
+    const VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-    dynamic.dynamicStateCount = d.blend == Blend::Accumulate ? 3u : 2u;
+    dynamic.dynamicStateCount = 2;
     dynamic.pDynamicStates = dynamicStates;
 
     VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
@@ -465,12 +461,13 @@ Renderer::Renderer(Context& ctx, VkFormat targetFormat) : ctx_(ctx), targetForma
     // steps, 3 food, 4 the extra values, 5 the boxes of the cells (written by a compute pass),
     // 6 normals, 7 the triangles of the membrane, 8 .. 10 the membrane refined into patches
     // (positions, normals, triangles; written by a compute pass), 11 where each cell lies on
-    // the surface the membrane is drawn through (the smoothed positions, or the cells' own).
+    // the surface the membrane is drawn through (the smoothed positions, or the cells' own),
+    // 12 where each cell was in the frame before.
     {
         const VkShaderStageFlags stages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
         std::vector<VkDescriptorSetLayoutBinding> bindings;
         if (ctx_.hasRayTracing) bindings.push_back({0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
-        for (uint32_t i = 1; i <= 11; ++i) bindings.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, stages, nullptr});
+        for (uint32_t i = 1; i <= 12; ++i) bindings.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, stages, nullptr});
         VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         li.bindingCount = static_cast<uint32_t>(bindings.size());
         li.pBindings = bindings.data();
@@ -485,7 +482,7 @@ Renderer::Renderer(Context& ctx, VkFormat targetFormat) : ctx_(ctx), targetForma
         pi.pPoolSizes = sizes;
         vk_check(vkCreateDescriptorPool(ctx_.device, &pi, nullptr, &screenPool_), "vkCreateDescriptorPool");
 
-        std::vector<VkDescriptorPoolSize> cellSizes = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 11}};
+        std::vector<VkDescriptorPoolSize> cellSizes = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 12}};
         if (ctx_.hasRayTracing) cellSizes.push_back({VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1});
         VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         ci.maxSets = 1;
@@ -538,7 +535,7 @@ Renderer::~Renderer() {
     for (Buffer* b : {&fine_.pos, &fine_.normal, &fine_.index}) ctx_.destroy(*b);
     for (VkPipeline p : {impostorPipeline_, xrayPipeline_, meshPipeline_, shadowCellsPipeline_, shadowMeshPipeline_, ssaoPipeline_, gatherPipeline_,
                          blurPipeline_, lightPipeline_, sssPipeline_, combinePipeline_, dofPipeline_, taaPipeline_, bloomPipeline_,
-                         tonemapPipeline_, smoothPipeline_, pathTracePipeline_, denoisePipeline_, boxPipeline_, refinePipeline_, finalPipeline_[0],
+                         tonemapPipeline_, smoothPipeline_, pathTracePipeline_, temporalPipeline_, denoisePipeline_, boxPipeline_, refinePipeline_, finalPipeline_[0],
                          finalPipeline_[1], finalPipeline_[2]})
         if (p) vkDestroyPipeline(ctx_.device, p, nullptr);
     for (VkSampler s : {sampler_, linearSampler_, envSampler_})
@@ -601,6 +598,7 @@ void Renderer::createPipelines() {
     tonemapPipeline_ = screen(kTonemapFrag, std::size(kTonemapFrag), {kLdrFormat});
     smoothPipeline_ = screen(kFinalFrag, std::size(kFinalFrag), {kLdrFormat});
     denoisePipeline_ = screen(kDenoiseFrag, std::size(kDenoiseFrag), {kHdrFormat});
+    temporalPipeline_ = screen(kTemporalFrag, std::size(kTemporalFrag), {kAccumFormat, kHdrFormat, kHdrFormat});
 
     // The last pass, into the target; the two halves of a red and cyan stereo image each write
     // only their colours.
@@ -615,13 +613,13 @@ void Renderer::createPipelines() {
     refinePipeline_ = makeComputePipeline(ctx_, layout_, kRefineComp, std::size(kRefineComp));
     if (ctx_.hasRayTracing) {
         gatherPipeline_ = screen(kGatherFrag, std::size(kGatherFrag), {kHdrFormat});
-        pathTracePipeline_ = screen(kPathTraceFrag, std::size(kPathTraceFrag), {kAccumFormat, kHdrFormat, kHdrFormat}, Blend::Accumulate);
+        pathTracePipeline_ = screen(kPathTraceFrag, std::size(kPathTraceFrag), {kHdrFormat, kHdrFormat, kHdrFormat});
         boxPipeline_ = makeComputePipeline(ctx_, layout_, kBoxComp, std::size(kBoxComp));
     }
 }
 
 void Renderer::destroyImages() {
-    for (Target* t : {&albedo_, &normalDepth_, &id_, &material_, &hdr_[0], &hdr_[1], &hdr_[2], &hdr_[3], &hdr_[4], &accum_, &accumB_, &bloom_[0], &bloom_[1],
+    for (Target* t : {&albedo_, &normalDepth_, &id_, &material_, &hdr_[0], &hdr_[1], &hdr_[2], &hdr_[3], &hdr_[4], &accum_, &accumB_, &ptGuide_[0], &ptGuide_[1], &ptFirst_[0], &ptFirst_[1], &bloom_[0], &bloom_[1],
                       &ldr_[0], &ldr_[1]}) {
         ctx_.destroy(t->image);
         t->layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -654,8 +652,11 @@ void Renderer::resize(VkExtent2D extent, float scale) {
     for (Target& t : hdr_) make(t, render, kHdrFormat);
     make(accum_, render, kAccumFormat);
     make(accumB_, render, kAccumFormat);
+    for (Target& t : ptGuide_) make(t, render, kHdrFormat);
+    for (Target& t : ptFirst_) make(t, render, kHdrFormat);
     historyValid_ = false;
     historyCount_ = 0.0f;
+    ptHistoryValid_ = false;
     const VkExtent2D quarter{std::max(render.width / 4u, 1u), std::max(render.height / 4u, 1u)};
     for (Target& t : bloom_) make(t, quarter, kHdrFormat);
     for (Target& t : ldr_) make(t, render, kLdrFormat);
@@ -1239,23 +1240,27 @@ void Renderer::ensureCellTree(uint32_t primitives, bool mesh, uint64_t mostPrimi
 // the frame does not have is replaced by one of the same size, so a shader that reads it reads
 // something.
 void Renderer::bindCells(const PointBuffers& points, VkBuffer surface) {
-    const VkBuffer buffers[11] = {
-        points.pos,
-        points.birth,
-        points.food,
-        points.extra ? points.extra : points.pos,
+    // (With no cells at all every binding gets the stand-in buffer: a pass may name a binding it
+    // then never reads.)
+    const VkBuffer some = points.pos ? points.pos : dummy_.buffer;
+    VkBuffer buffers[12] = {
+        some,
+        points.birth ? points.birth : dummy_.buffer,
+        points.food ? points.food : dummy_.buffer,
+        points.extra ? points.extra : some,
         tree_.boxes.buffer ? tree_.boxes.buffer : dummy_.buffer,
-        points.normal ? points.normal : points.pos,
+        points.normal ? points.normal : some,
         points.index ? points.index : dummy_.buffer,
         fine_.pos.buffer ? fine_.pos.buffer : dummy_.buffer,
         fine_.normal.buffer ? fine_.normal.buffer : dummy_.buffer,
         fine_.index.buffer ? fine_.index.buffer : dummy_.buffer,
-        surface,
+        surface ? surface : some,
+        points.prev ? points.prev : some,
     };
-    VkDescriptorBufferInfo infos[11];
-    VkWriteDescriptorSet writes[12]{};
+    VkDescriptorBufferInfo infos[12];
+    VkWriteDescriptorSet writes[13]{};
     uint32_t count = 0;
-    for (uint32_t i = 0; i < 11; ++i) {
+    for (uint32_t i = 0; i < 12; ++i) {
         infos[i] = VkDescriptorBufferInfo{buffers[i], 0, VK_WHOLE_SIZE};
         VkWriteDescriptorSet& w = writes[count++];
         w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -1493,6 +1498,29 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
             changed = true;
         }
     }
+    // The same without what follows from the camera alone (the view, the near and far planes,
+    // the light when it is given relative to the camera, the focus when it is set from the
+    // orbit distance): when only that differs, the scene is the same one seen from elsewhere.
+    bool sceneChanged = false;
+    {
+        FrameUniforms scene = u;
+        std::memset(scene.view, 0, sizeof scene.view);
+        std::memset(scene.proj, 0, sizeof scene.proj);
+        std::memset(scene.invView, 0, sizeof scene.invView);
+        std::memset(scene.lightViewProj, 0, sizeof scene.lightViewProj);
+        for (int i = 0; i < 3; ++i) scene.light[i] = scene.sunWorld[i] = 0.0f;
+        scene.sphere[2] = scene.sphere[3] = 0.0f;
+        scene.lens[1] = 0.0f;
+        uint64_t key = fnv(&scene, sizeof scene);
+        key = fnv(&points.version, sizeof points.version, key);
+        key = fnv(&points.count, sizeof points.count, key);
+        key = fnv(&envVersion_, sizeof envVersion_, key);
+        key = fnv(&settings.meshRelax, sizeof settings.meshRelax, key);
+        if (key != sceneKey_) {
+            sceneKey_ = key;
+            sceneChanged = true;
+        }
+    }
     Mat4 viewProj;  // of this frame, before its sub-pixel shift
     {
         Mat4 view, proj;
@@ -1503,10 +1531,12 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
     uint32_t newSamples = 0;
     float blend = 1.0f;      // raster: the weight of this frame in the image so far
     bool reproject = false;  // raster: things moved, so the image so far is looked up where they were
-    // How much a frame counts while things move. When only the camera moved, the lookup of where
-    // a point was is exact and the image so far is worth about eight frames. When the cells
-    // themselves changed it is not (the lookup does not know how they moved), and more than two
-    // frames would smear them.
+    // How much a frame counts while things move. When the lookup of where a point was is exact
+    // (only the camera moved, or the data says where every cell was), a frame counts for a
+    // third: every lookup falls between pixels and softens the image so far a little, and on a
+    // form that moves a few pixels a frame a longer memory came out further from a still image
+    // than no blending at all (cf_view --motion-test; an eighth was tried). When the cells
+    // changed and the lookup does not know how, the image so far is worth one frame only.
     const bool cellsMoved = points.version != cellsVersion_;
     if (cellsMoved) {
         cellChanges_ = framesSinceCells_ < 60u ? cellChanges_ + 1u : 1u;
@@ -1516,15 +1546,40 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
     }
     if (framesSinceCells_ >= 60u) cellChanges_ = 0;
     const bool running = cellChanges_ >= 2u;  // a simulation is publishing frames
-    const float kMovingBlend = cellsMoved ? 0.5f : 0.125f;
+    // ... unless the data says where every cell was in the frame before: then the lookup follows
+    // the cells too.
+    const bool cellMotion = settings.cellMotion && points.prev != VK_NULL_HANDLE && drawMode != kDrawXray;
+    const float kMovingBlend = cellsMoved && !cellMotion ? 0.5f : 1.0f / 3.0f;
+    int ptMode = 0;        // path tracer: 0 start anew, 1 nothing changed, 2 the camera moved (pt_temporal.frag)
+    float ptMost = 1.0e9f;  // ... and the most samples a pixel takes over from before
     if (pathTraced) {
-        if (changed) accumSamples_ = 0;
-        historyValid_ = false;  // accum_ now holds the path tracer's mean
+        if (changed) accumSamples_ = 0;  // samples since the view last changed
+        historyValid_ = false;           // accum_ now holds the path tracer's mean
         const uint32_t limit = static_cast<uint32_t>(std::max(settings.ptMaxSamples, 1));
         if (accumSamples_ < limit) newSamples = std::min(static_cast<uint32_t>(std::clamp(settings.ptSamplesPerFrame, 1, 64)), limit - accumSamples_);
-        u.rt[2] = static_cast<float>(accumSamples_);
+        if (newSamples > 0) {
+            if (!ptHistoryValid_ || sceneChanged || (changed && !settings.ptTemporal)) {
+                ptMode = 0;  // another picture, or the first frame: nothing to take over
+            } else if (changed) {
+                // The camera moved. What a pixel takes over is limited: light that depends on the
+                // direction of view (highlights) has to be able to follow.
+                ptMode = 2;
+                ptMost = 24.0f;
+            } else {
+                // Still. What was carried through a move is a little soft from being looked up
+                // between pixels: on the first still frame it is cut down to four samples, which
+                // the samples taken from now on soon outweigh.
+                ptMode = 1;
+                if (ptMoved_) ptMost = 4.0f;
+            }
+            ptSeed_ += newSamples;
+            std::memcpy(u.prevViewProj, prevViewProj_, sizeof u.prevViewProj);
+            std::memcpy(u.prevEye, prevEye_, sizeof u.prevEye);
+        }
+        u.rt[2] = static_cast<float>(ptSeed_ % 16777216u);
         u.rt[3] = static_cast<float>(newSamples);
     } else {
+        ptHistoryValid_ = false;  // accum_ will hold a raster image
         if (changed || !historyValid_) {
             accumSamples_ = 0;
             newSamples = 1;
@@ -1548,9 +1603,14 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
             // otherwise only while the view stands still (a single frame then stays as it is).
             if (settings.taa || !changed) {
                 ++jitterIndex_;
-                u.proj[8] += 2.0f * (halton(jitterIndex_ % 1024u + 1u, 2) - 0.5f) / static_cast<float>(extent_.width);
-                u.proj[9] += 2.0f * (halton(jitterIndex_ % 1024u + 1u, 3) - 0.5f) / static_cast<float>(extent_.height);
+                const float shiftX = halton(jitterIndex_ % 1024u + 1u, 2) - 0.5f, shiftY = halton(jitterIndex_ % 1024u + 1u, 3) - 0.5f;
+                u.proj[8] += 2.0f * shiftX / static_cast<float>(extent_.width);
+                u.proj[9] += 2.0f * shiftY / static_cast<float>(extent_.height);
                 u.aa[0] = static_cast<float>(jitterIndex_ % 4096u + 1u);
+                // The shift in pixels: a pixel of this frame shows the point that lies this far
+                // from the pixel's centre in a frame drawn without the shift (taa.frag).
+                u.aa[2] = shiftX;
+                u.aa[3] = shiftY;
             }
             std::memcpy(u.prevViewProj, prevViewProj_, sizeof u.prevViewProj);
         }
@@ -1575,7 +1635,7 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
     }
     // The surface the membrane is drawn through: the smoothed positions, or the cells' own.
     const VkBuffer surface = settings.meshRelax && points.smooth ? points.smooth : points.pos;
-    if (havePoints && newSamples > 0 && (drawMesh || needTree)) bindCells(points, surface);
+    if (newSamples > 0) bindCells(points, surface);
     if (refine) refineMembrane(cmd, points, surface, segments, traceMesh);
     if (needTree) buildCellTree(cmd, points, surface, settings.sphereRadius, traceMesh, segments);
 
@@ -1594,25 +1654,46 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
     Target* shown = &accum_;  // the image in linear light that is tone mapped
 
     if (pathTraced) {
-        // --- path tracer: a few more samples into the running mean, then the denoiser, or a
-        // plain copy, into the image that is shown. hdr_[0] and hdr_[1] hold what the denoiser
-        // needs to know about the first hit of every pixel.
+        // --- path tracer: a few more samples, joined to what was gathered so far, then the
+        // denoiser, or a plain copy, into the image that is shown (hdr_[3]).
         if (newSamples > 0) {
-            const bool keep = accumSamples_ > 0;
-            const VkDescriptorSet set = screenSet(false, {}, true);
-            for (Target* t : {&accum_, &hdr_[0], &hdr_[1]}) toWrite(cmd, *t, keep);
-            beginPass(cmd, extent_, {accum_.image.view, hdr_[0].image.view, hdr_[1].image.view}, keep ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR,
-                      VK_NULL_HANDLE);
-            // The weight of this frame in the running mean.
-            const float weight = static_cast<float>(newSamples) / static_cast<float>(accumSamples_ + newSamples);
-            const float constants[4] = {weight, weight, weight, weight};
-            vkCmdSetBlendConstants(cmd, constants);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pathTracePipeline_);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set, 0, nullptr);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 1, 1, &cellSet_, 0, nullptr);
-            vkCmdDraw(cmd, 3, 1, 0, 0);
-            vkCmdEndRendering(cmd);
+            // This frame's samples: their mean into hdr_[0], and what the first hit of every
+            // pixel was into hdr_[1] (normal, distance) and hdr_[2] (colour, coverage).
+            {
+                const VkDescriptorSet set = screenSet(false, {}, true);
+                for (Target* t : {&hdr_[0], &hdr_[1], &hdr_[2]}) toWrite(cmd, *t);
+                beginPass(cmd, extent_, {hdr_[0].image.view, hdr_[1].image.view, hdr_[2].image.view}, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_NULL_HANDLE);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pathTracePipeline_);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set, 0, nullptr);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 1, 1, &cellSet_, 0, nullptr);
+                vkCmdDraw(cmd, 3, 1, 0, 0);
+                vkCmdEndRendering(cmd);
+            }
+            // Joined to what was gathered before (accum_ with its two companions), per pixel,
+            // into their partners; then the pairs change places.
+            {
+                struct {
+                    int32_t mode;
+                    float most, fresh;
+                } push{ptMode, ptMost, static_cast<float>(newSamples)};
+                const VkDescriptorSet set =
+                    screenSet(false, {read(hdr_[0]), read(hdr_[1]), read(hdr_[2]), read(accum_), read(ptGuide_[0]), read(ptFirst_[0])});
+                for (Target* t : {&accumB_, &ptGuide_[1], &ptFirst_[1]}) toWrite(cmd, *t);
+                beginPass(cmd, extent_, {accumB_.image.view, ptGuide_[1].image.view, ptFirst_[1].image.view}, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_NULL_HANDLE);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, temporalPipeline_);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set, 0, nullptr);
+                pushConstants(cmd, &push, sizeof push);
+                vkCmdDraw(cmd, 3, 1, 0, 0);
+                vkCmdEndRendering(cmd);
+                std::swap(accum_, accumB_);
+                std::swap(ptGuide_[0], ptGuide_[1]);
+                std::swap(ptFirst_[0], ptFirst_[1]);
+            }
+            ptHistoryValid_ = true;
+            ptMoved_ = ptMode == 2;
             accumSamples_ += newSamples;
+            std::memcpy(prevViewProj_, viewProj.m, sizeof prevViewProj_);
+            std::memcpy(prevEye_, u.invView + 12, 3 * sizeof(float));
         }
         struct Pass {
             Target* from;
@@ -1620,21 +1701,22 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
             int32_t step, first, last;
         };
         const bool denoise = settings.ptDenoise && settings.ptDenoiseStrength > 0.0f;
-        const Pass blur[3] = {{&accum_, &hdr_[2], 1, 1, 0}, {&hdr_[2], &hdr_[3], 2, 0, 0}, {&hdr_[3], &hdr_[4], 4, 0, 1}};
-        const Pass copy[1] = {{&accum_, &hdr_[4], 0, 1, 1}};
+        const Pass blur[3] = {{&accum_, &hdr_[3], 1, 1, 0}, {&hdr_[3], &hdr_[4], 2, 0, 0}, {&hdr_[4], &hdr_[3], 4, 0, 1}};
+        const Pass copy[1] = {{&accum_, &hdr_[3], 0, 1, 1}};
         const Pass* passes = denoise ? blur : copy;
-        // The fewer samples, the noisier the image and the more a neighbour may differ.
-        const float sigma = settings.ptDenoiseStrength * 4.0f / std::sqrt(static_cast<float>(std::max(accumSamples_, 1u)));
+        // The fewer samples a pixel holds, the noisier it is and the more a neighbour may differ
+        // from it: the shader divides this by the root of the pixel's own count.
+        const float sigma = settings.ptDenoiseStrength * 4.0f;
         for (int i = 0; i < (denoise ? 3 : 1); ++i) {
             const Pass& pass = passes[i];
             struct {
                 int32_t step, first, last;
                 float sigma;
             } push{pass.step, pass.first, pass.last, sigma};
-            const VkDescriptorSet set = screenSet(false, {read(*pass.from), read(hdr_[0]), read(hdr_[1])});
+            const VkDescriptorSet set = screenSet(false, {read(*pass.from), read(ptGuide_[0]), read(ptFirst_[0])});
             screenPass(cmd, denoisePipeline_, *pass.to, set, &push, sizeof push);
         }
-        shown = &hdr_[4];
+        shown = &hdr_[3];
     } else if (newSamples > 0) {
         // --- shadow map: the cells seen from the key light
         if (shadowMap) {
@@ -1749,8 +1831,16 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
             struct {
                 float weight;
                 int32_t moving;
-            } push{blend, reproject ? 1 : 0};
-            screenPass(cmd, taaPipeline_, accumB_, screenSet(false, {read(*image), readLinear(accum_), read(normalDepth_)}), &push, sizeof push);
+            } push{blend, reproject ? (cellMotion && cellsMoved ? 2 : 1) : 0};  // (the cells' motion belongs to the frame they arrived in)
+            const VkDescriptorSet set = screenSet(false, {read(*image), readLinear(accum_), read(normalDepth_), read(id_)});
+            toWrite(cmd, accumB_);
+            beginPass(cmd, extent_, {accumB_.image.view}, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_NULL_HANDLE);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, taaPipeline_);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set, 0, nullptr);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 1, 1, &cellSet_, 0, nullptr);
+            pushConstants(cmd, &push, sizeof push);
+            vkCmdDraw(cmd, 3, 1, 0, 0);
+            vkCmdEndRendering(cmd);
             std::swap(accum_, accumB_);
             historyCount_ = reproject ? std::min(historyCount_ + 1.0f, 1.0f / kMovingBlend - 1.0f) : historyCount_ + 1.0f;
             historyValid_ = true;

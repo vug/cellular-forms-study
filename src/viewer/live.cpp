@@ -109,7 +109,9 @@ void LiveSim::releaseSlots() {
         slot.cudaSmooth.reset();
         slot.cudaIndex.reset();
         slot.cudaLightMap.reset();
-        for (Buffer* b : {&slot.pos, &slot.birth, &slot.food, &slot.extra, &slot.normal, &slot.smooth, &slot.index, &slot.lightMap}) ctx_.destroy(*b);
+        slot.cudaPrev.reset();
+        for (Buffer* b : {&slot.pos, &slot.birth, &slot.food, &slot.extra, &slot.normal, &slot.smooth, &slot.index, &slot.lightMap, &slot.prev})
+            ctx_.destroy(*b);
     }
     ctx_.destroy(frontLightMap_);
 }
@@ -188,9 +190,31 @@ void LiveSim::ensureMeshBuffers() {
     }
 }
 
-void LiveSim::setRenderNeeds(bool mesh, bool lightMap) {
+// The shared buffers for where each cell was in the frame shown before, the first time they are
+// asked for. Render thread; the simulation thread publishes under the same mutex.
+void LiveSim::ensureMotionBuffers() {
+    std::lock_guard<std::mutex> lock(slotsMutex_);
+    if (motionReady_ || motionFailed_) return;
+    try {
+        for (Slot& slot : slots_)
+            shareBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(cf::Vec3), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, slot.prev, slot.cudaPrev);
+        motionReady_ = true;
+    } catch (const std::exception& e) {
+        for (Slot& slot : slots_) {
+            slot.cudaPrev.reset();
+            ctx_.destroy(slot.prev);
+        }
+        motionFailed_ = true;
+        std::lock_guard<std::mutex> statusLock(mutex_);
+        status_.message = std::string("the motion of the cells cannot be published: ") + e.what();
+    }
+}
+
+void LiveSim::setRenderNeeds(bool mesh, bool lightMap, bool motion) {
     if (mesh && config_.backend == LiveBackend::Cuda && !meshReady_) ensureMeshBuffers();
     if (lightMap && config_.backend == LiveBackend::Cuda && !lightMapReady_) ensureLightMapBuffers();
+    if (motion && config_.backend == LiveBackend::Cuda && !motionReady_) ensureMotionBuffers();
+    wantMotion_.store(motion);  // takes effect with the next frame; nothing to show at once
     bool changed = wantMesh_.exchange(mesh) != mesh;
     changed = (wantLightMap_.exchange(lightMap) != lightMap) || changed;
     if (changed) {
@@ -220,6 +244,7 @@ void LiveSim::buildSimulation(std::uint64_t seed, int level, const cf::Params& p
         name = "CPU reference";
     }
     sim_.reset();  // release the old one's memory first
+    cpuShown_.clear();
     sim_ = std::move(fresh);
     std::lock_guard<std::mutex> lock(mutex_);
     backendName_ = name;
@@ -296,8 +321,13 @@ void LiveSim::publish() {
     }
     slot.extraMask = morphogens ? 7 : 3;
     slot.hasMesh = false;
+    slot.hasPrev = false;
     slot.indexCount = 0;
     slot.light = cf::LightMapInfo{};
+    // Where each cell was in the frame on screen. A frame is only published once the renderer
+    // has taken the one before (see threadMain), so the frame published last is the one on
+    // screen when this one arrives.
+    const bool motion = wantMotion_.load();
     const bool lightMap = wantLightMap_.load();
     if (config_.backend == LiveBackend::Cuda) {
 #ifdef CF_HAVE_CUDA
@@ -320,7 +350,17 @@ void LiveSim::publish() {
             t.lightMap = slot.cudaLightMap->device_ptr();
             t.maxLightTexels = kSharedLightTexels;
         }
+        if (motion && motionReady_) {
+            t.prev = slot.cudaPrev->device_ptr();
+            t.shownLast = true;
+        }
         const cf::RenderCounts counts = cuda->copy_render_data(t, capacity_);
+        slot.hasPrev = counts.prev;
+        if (t.prev != nullptr && !counts.prev && !motionRefused_) {
+            motionRefused_ = true;
+            std::lock_guard<std::mutex> statusLock(mutex_);
+            status_.message = "no memory to publish the motion of the cells (24 bytes per cell): frames are blended without it";
+        }
         slot.light = counts.light;
         slot.count = counts.cells;
         slot.indexCount = counts.indices;
@@ -360,6 +400,16 @@ void LiveSim::publish() {
             slot.hostGeneration[v] = static_cast<float>(s.gen[v]);
             slot.hostCurvature[v] = cf::cell_curvature(s.pos.data(), s.ring(v), s.deg[v], s.pos[v], ringNormal, s.params.linkRestLength);
             if (morph) slot.hostActivator[v] = cf::morph_signal(s.morphB[v]);
+        }
+        // (On this backend a cell's place in the arrays is its id for life.)
+        slot.hostPrev.clear();
+        if (motion) {
+            slot.hostPrev.resize(s.n);
+            for (std::uint32_t v = 0; v < s.n; ++v) slot.hostPrev[v] = v < cpuShown_.size() ? cpuShown_[v] : s.pos[v];
+            cpuShown_.assign(s.pos.begin(), s.pos.begin() + s.n);
+            slot.hasPrev = true;
+        } else {
+            cpuShown_.clear();
         }
         slot.hostIndex.clear();
         if (mesh) {
@@ -410,6 +460,7 @@ LiveFrame LiveSim::acquire() {
                 c.food.swap(slot.hostFood);
                 c.normal.swap(slot.hostNormal);
                 c.smooth.swap(slot.hostSmooth);
+                c.prev.swap(slot.hostPrev);
                 c.indices.swap(slot.hostIndex);
                 c.generation.swap(slot.hostGeneration);
                 c.curvature.swap(slot.hostCurvature);
@@ -448,6 +499,7 @@ LiveFrame LiveSim::acquire() {
             f.buffers.indexCount = slot.indexCount;
         }
         f.buffers.version = slot.version;
+        if (slot.hasPrev) f.buffers.prev = slot.prev.buffer;
         if (slot.light.valid) f.buffers.lightMap = slot.lightMap.buffer;
     } else {
         f.buffers = frontGpu_->buffers();

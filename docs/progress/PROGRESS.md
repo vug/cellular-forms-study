@@ -19,6 +19,7 @@ Newest entries at the bottom. Times are local (America/New_York).
 | M4 Live viewer | exit criteria observed (local session, 00:40) | scripted run: parameters changed mid-run, pause, single steps, reset; no frame over 15 ms, 0 validation errors, CUDA and CPU backends. Not tried by hand |
 | M9 Ports | both ports done and verified (local session, 01:20) | Vulkan compute: step-by-step agreement with the CPU over 106 steps, reruns identical. WebGPU: one-step agreement with CPU checkpoints from 162 to 4.4M cells, reruns identical. At 10M cells: CUDA 41, Vulkan 65, WebGPU 75 ms per step |
 | M5 Food sources | exit criterion observed (local session, 01:30) | uniform versus light contrast at 600k cells; CUDA equals CPU with every source on; reaction-diffusion and inherited coordinates not built |
+| Viewer rendering, sixth round | built (local session, 13:08): where each cell was in the frame before, published by a live run as an option, and a blending of frames that follows the cells; cell walls in the path-traced modes; the path tracer keeps its samples when the camera moves; a measured check of the blending (`cf_view --motion-test`), which found two defects in the fifth round's blending (fixed) and that eight frames of memory were too many (now three) | 46 modes rendered headless with validation and synchronization checks clean, tests 34 of 34 and 55 of 55, the motion test passes in four looks, 17 of 18 live self-test runs pass without vsync, frame times measured. With vsync under the validation layer there are occasional 60 ms frames, which the previous commit has too. No control was moved by hand |
 | Viewer rendering, fifth round | built (local session, 11:55): the limits of the fourth round. The 50 ms frame found (patch buffers growing) and removed; the membrane through the limit points of Loop subdivision; anti-aliasing that blends frames while the camera moves; glowing cells light their neighbours without ray tracing; path-traced skin by a random walk, as bright as the raster skin | 46 modes rendered headless with validation and synchronization checks clean, tests 33 of 33 and 55 of 55, five live self-test runs with the validation layer pass, frame times measured. A running simulation gets only a two-frame blend. No control was moved by hand |
 | Viewer rendering, fourth round | built (local session, 11:20): a material shared by the raster modes and the path tracer, with a library of fourteen (skin among them); subsurface scattering, light through the sheet, emissive cells, depth of field, anti-aliasing, bloom; cell properties drive the material; the membrane as smooth patches; six environment maps, sampled by brightness in the path tracer | 40 modes rendered headless with validation and synchronization checks clean, tests 33 of 33 and 55 of 55, frame times measured up to 8.2M cells, the skin compared with a Blender render. Live self-test to 2M cells: passes without the validation layer; with it, two of five runs had one frame of about 50 ms (found and removed in the fifth round). Three defects found and fixed on the way. No control was moved by hand |
 | Viewer rendering, third round | built (local session, 09:45): ray tracing of the membrane, Voronoi walls, a denoiser, an environment map, stereo, the simulation's own light map | 15 modes rendered headless with the validation layer clean, live captures on both backends, the fallbacks without ray tracing run, frame times measured up to 10M cells. No control was moved by hand; no headset |
@@ -1970,3 +1971,179 @@ setting (`ptWalk`). Empty cells were not measured.
 `r5_glow_neighbours_off.png`, `r5_glow_neighbours_screen_space.png` and
 `r5_glow_neighbours_rays.png`, `r5_camera_turning_blend_off.png` and
 `r5_camera_turning_blend_on.png` (cuts from window captures).
+
+## 2026-11-21 13:08 · Local session: viewer rendering, sixth round (the cells' motion; walls and kept samples in the path tracer)
+
+Uğur asked for the publishing of where each cell was as an optional setting, and said which
+items he had meant by "still not built": cell walls in the path-traced modes, a denoiser that
+uses earlier frames, and sampling the environment map by brightness. The third was already
+built in the fourth round (the tables in `environment.cpp`, shared with mirrored rays in
+`pathtrace.frag`); the other two are built now.
+
+**What was built**
+
+1. **Cell walls in the path-traced modes.** The walls are paint on the surface at the first
+   hit, which the light then falls on like on any other colour. On the membrane the hit knows
+   its distance to the wall between the nearest two of the three cells of its triangle, as in
+   the raster mode. For cells drawn as spheres, four short rays around the pixel look for a
+   different cell (`wallAt` in `pathtrace.frag`).
+2. **The path tracer keeps its samples when the camera moves** (`pt_temporal.frag`). Every
+   pixel works out where the point it sees was in the previous view and takes over what was
+   gathered there, if the same surface was there (about the same normal and distance, all of
+   the pixel on the form). Each pixel keeps count of the samples it holds; the denoiser smooths
+   a pixel by that count instead of by one number for the whole image. A pixel takes over at
+   most 24 samples while the camera moves, so highlights can follow, and what was carried
+   through a move counts for 4 once the view stands still. Pixels on the outline neither take
+   over nor hand on samples: they left specks behind a moving outline. A setting, `ptTemporal`.
+   When the cells change, the path tracer still starts again.
+3. **Where each cell was, as an option** (`cellMotion`, on by default, a checkbox under the
+   blending). A live run then publishes, with every frame, the position each cell had in the
+   frame published before: `k_render_prev` in the CUDA publisher keeps the positions of the
+   frame on screen by cell id (cells change their place in memory when the simulation sorts
+   them; a cell born since gets its own position). The viewer thread only publishes a frame
+   once the renderer has taken the one before, so "the frame published before" is the one on
+   screen. Cost: 12 bytes per cell in each of the three shared buffers and 24 bytes per cell in
+   the simulation, allocated the first time the option is on. The simulation gives its part
+   back when a frame does not ask for it, and when there is no memory for it the run goes on
+   and the viewer says so. The CPU backend does the same on the host.
+4. **The blending of frames follows the cells.** `taa.frag` reads the cell under each pixel,
+   takes the cell's displacement off the pixel's point and looks the image so far up there.
+5. **A measured check of the blending, `cf_view --motion-test <frames>`.** Headless: the form
+   turns 0.5 degrees and swells 0.4 % a frame (every cell moves by a different amount, a few
+   pixels a frame), and the last frame is compared with a still image of the form as it stands
+   then (64 frames averaged). Four ways: told where each cell was; told the cells stood still
+   (the control: the same blend, looked up in the wrong place); told nothing; no blending.
+   Exit code 4 unless the first is closer to the still image than the control and than the
+   two-frame blend.
+6. **What the check found in the fifth round's blending.** Three things, the first two
+   defects of mine:
+   - The lookup carried the sub-pixel shift of the frame with it, so the image so far was
+     read a random fraction of a pixel aside on every frame and blurred a little each time,
+     also when only the camera moved. With the form standing still but counted as moving, the
+     difference from the still image fell from 1.79 to 0.51 (of 255) once the shift is taken
+     off again.
+   - The far side of the form shows through the gaps between cells and moves the other way
+     when the form turns. The blend took whatever had been at the looked-up place, so those
+     gaps were smeared with the colours of the cells in front. The image so far now keeps the
+     distance of every pixel's surface from the camera (in its fourth channel), and what is
+     looked up counts only where that distance matches.
+   - The image so far counted for eight frames when the lookup was exact. On the moving form
+     that was further from the still image than no blending at all (3.9 against 2.6 as
+     cells, 1.3 against 0.8 as membrane): every lookup falls between pixels and softens edges
+     a little, and eight of them add up. It now counts for three frames. Tried: 8, 5, 3 and 2
+     frames; a wider and a narrower limit on the colours (the narrower one stays).
+7. **A wait that waited for nothing.** With the synchronization checks on, a window run
+   reported the swapchain image as presented while still being written: the semaphore the
+   frame signals named no pipeline stage. It names all of them now. (The headless sweeps of
+   the earlier rounds never present, which is why they did not show it.)
+
+116 names for `--set` now (new: `ptTemporal`, `cellMotion`), and one new option of `cf_view`,
+`--motion-test`.
+
+**The motion test** (final build, 4,006 cells, 1600 x 1000, 24 frames; root mean square
+difference from the still image, of 255)
+
+| | Cells, default | Cells, skin with shadows | Membrane, default | Membrane, skin with shadows |
+|---|---|---|---|---|
+| Told where each cell was | 2.47 | 1.98 | 0.86 | 0.99 |
+| Told the cells stood still (the control) | 5.95 | 2.81 | 2.25 | 1.05 |
+| Told nothing (two-frame blend) | 4.71 | 2.60 | 1.78 | 1.02 |
+| No blending over time | 2.57 | 2.83 | 0.79 | 0.95 |
+
+Following the cells is closer than the control and the two-frame blend in all four, as the
+test demands. Against no blending at all it wins where a single frame is noisy (skin with
+shadows on cells) and is about level elsewhere: the membrane with its default look has so
+little noise in one frame that nothing is gained on this measure. What the measure does not
+show is steadiness from frame to frame, which is what the blending is for while things move.
+
+**Frame times** (RTX 4090, 1600 x 1000, no vsync, mean over 469 frames; 100,033 cells)
+
+| | Now | Fifth round |
+|---|---|---|
+| Cells, default, camera turning | 0.74 ms (0.64 without the blending) | 0.81 ms (0.72) |
+| Cells, skin with shadows, camera turning | 1.04 ms | 1.24 ms |
+| Membrane, default, camera turning | 0.84 ms (0.78 without the blending) | 0.91 ms |
+| Cells, path traced, still | 2.00 ms; with walls 2.71 ms | |
+| Membrane, path traced, still | 1.20 ms; with walls 1.23 ms | |
+| Cells, path traced, camera turning | 1.99 ms with the samples kept, 1.96 ms without | |
+| Membrane, path traced, camera turning | 1.20 ms with the samples kept, 1.18 ms without | |
+
+The blending costs 0.1 ms a frame as cells and 0.06 ms as membrane, with the distance check
+in it (measured on a file with the camera turning; the lookup by cell, two more buffer reads
+per pixel, runs only in a live run and was not measured apart). Walls cost the path tracer 0.03 ms a frame on the membrane and
+0.7 ms for spheres (the four extra rays at the first hit). Keeping the samples through a move
+costs 0.02 to 0.03 ms. The raster numbers are a little lower than the fifth round's for the
+same looks; I did not look for why.
+
+Publishing where each cell was: a live run to 1 million cells (no vsync, 5,969 frames) had a
+mean frame of 0.60 ms as cells with it and 0.59 ms without, 0.74 and 0.73 ms as membrane, and
+reached the same step with the same number of cells. One run each, so no difference that this
+can show.
+
+**Verified**
+
+- The final build. `cf_tests` 55 of 55, `cf_cuda_tests` 34 of 34. The new test,
+  `cuda_render_data_previous_positions`, grows a form from 28,571 to 142,312 cells over four
+  published frames, one of them counted as never shown, and compares every cell's published
+  previous position with the state downloaded at the frame that was on screen (138,566 cells
+  sat in another place in memory than their id by the end); then the option off and on again.
+- 46 headless renders with `--validate` and the synchronization checks, 0 errors each: the
+  five draw modes in eight looks (default; skin with shadows; gold under an environment map;
+  walls and outlines; glowing cells with bloom; the lens with ray-traced occlusion; wax under
+  the simulation's light; red-cyan stereo), and both path-traced modes with the kept samples
+  off, the random walk off and the denoiser off.
+- The motion test in the four looks of the table, under the same checks: passes, 0 errors.
+- Live self-tests the way the fifth round ran them (no vsync, to 2 million cells; the CPU
+  backend to 20,000): cells with and without the cells' motion, the membrane as skin with
+  shadows, glowing cells, the path-traced membrane with walls, the CPU backend as membrane;
+  each without the validation layer, with it, and with its synchronization checks. 17 of 18
+  pass, with 0 validation errors in the 12 runs under the layer. Worst frame without the layer
+  6.5 to 14.9 ms (fifth round: 9 to 17), with the layer 7.7 to 24.6 ms (18 to 27), with the
+  synchronization checks 17.9 to 33.0 ms. The one failure: the CPU backend under the
+  synchronization checks had one frame of 59 ms.
+- Ten window runs with vsync (the screen runs at 50 Hz), validation and the synchronization
+  checks: 0 validation errors in all ten. Two live path-traced runs with walls (to 100,000
+  cells) and four files with the camera turning (path-traced membrane and cells with walls,
+  cells as skin with shadows, membrane with walls): worst frame 21 to 29 ms. The four live
+  self-tests among them failed their count of long frames: 1 to 7 frames of about 60 ms each,
+  all on frames that took a new frame of the simulation.
+- Those 60 ms frames are older than this round. I built the previous commit (d32d16a) in a
+  separate worktree and ran the same four self-tests: 2, 4, 4 and 8 such frames (and the
+  present errors that item 7 fixed). They need the validation layer: without it, three vsync
+  runs had none (worst frame 32 to 34 ms, where the simulation resumes at 224,000 cells; one
+  of the three counted its 34.2 ms as a long frame), and with plain validation three of four
+  vsync runs had none.
+- Looked at: the walls on the path-traced membrane and on path-traced spheres; the path-traced
+  skin while the camera turns, with the samples kept (clean) and not kept (blotchy); the cut
+  of the motion test (the control smears what shows through the gaps between cells, following
+  does not); a live form while it grows.
+
+**Not verified, and limits**
+
+- No control was moved by hand. The two new checkboxes (follow the cells' own motion; keep
+  the image when the camera moves) were only set through `--set`.
+- What the layer does in the 60 ms frames above I did not find. They are in the previous
+  commit too and were not seen without the layer.
+- A simulation with no memory left for the previous positions goes on without them by the
+  code; that path was not run (it needs a full GPU).
+- The path tracer still starts again when the cells change. It keeps its samples through a
+  move of the camera only.
+- The blending moves each point of the membrane with the nearest of the three cells of its
+  triangle, not with a mix of the three.
+- While things move the blend is three frames long and a little soft. On the motion test it
+  is level with no blending at all for the membrane in its default look (0.86 against 0.79)
+  and for default cells (2.47 against 2.57); it wins clearly only where one frame is noisy.
+  The test measures closeness to a still image, not steadiness from frame to frame.
+- Recorded runs that are played back carry no motion of the cells and get the two-frame blend.
+- The three shared buffers for the previous positions stay allocated once made (12 bytes per
+  cell each). Only the simulation's 24 bytes per cell are given back when the option is off.
+- The random walk is for the membrane. Cells drawn as spheres keep the one probe ray.
+- A few dark pixels remain on the outline of a path-traced form while the camera moves (they
+  can be seen in `r6_path_traced_turning_samples_kept.png`).
+
+**Images** in `docs/progress/img/`: `r6_walls_path_traced_membrane.png`,
+`r6_walls_path_traced_cells.png`, `r6_path_traced_turning_samples_kept.png` and
+`r6_path_traced_turning_samples_not_kept.png` (cuts from window captures at the same frame),
+`r6_motion_test_still_follow_control_none.png` (the same cut of the still image, following
+the cells, the control and no blending, three times the size),
+`r6_live_growing_cells_followed.png` (a cut from a window capture of a live run).

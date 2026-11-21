@@ -91,6 +91,13 @@ struct RenderTargets {
     void* extra = nullptr;   // float3 per cell: generation, curvature, morphogen activator (0 without morphogens)
     void* normal = nullptr;  // float3 per cell: the normal of the smoothed membrane (see copy_render_data)
     void* smooth = nullptr;  // float3 per cell: where the cell lies on the smoothed membrane
+    // Optional, for a viewer that blends frames: where each cell was in the frame the viewer
+    // shows now (float3 per cell; a cell born since gets its own position). The simulation keeps
+    // the positions of the frame on screen by cell id for this (24 bytes per cell, allocated
+    // the first time it is asked for and given back when a call does not ask for it). `shownLast` says whether the frame the previous call
+    // published is the one on screen: if not, the frame before it still is.
+    void* prev = nullptr;
+    bool shownLast = true;
     void* index = nullptr;   // uint32, three per triangle of the membrane
     std::uint32_t maxIndices = 0;
     void* lightMap = nullptr;  // int32 per texel: the shadow map of the food light, as the last step used it
@@ -100,6 +107,10 @@ struct RenderCounts {
     std::uint32_t cells = 0;
     std::uint32_t indices = 0;  // 0 when no triangles were asked for
     LightMapInfo light;         // valid when the shadow map of the food light was copied
+    // Whether RenderTargets::prev says where the cells were. False when it was not asked for, and
+    // when there was no memory for the positions it needs (the cells' own places are written
+    // then, and the run goes on).
+    bool prev = false;
 };
 
 class CudaSim final : public Simulation {
@@ -161,8 +172,10 @@ public:
         std::vector<Vec3> normal;
         std::vector<Vec3> smooth;
         std::vector<std::uint32_t> index;
+        std::vector<Vec3> prev;         // with `withPrev`: where each cell was in the frame on screen
+        std::vector<std::uint32_t> id;  // the cell in each place of these arrays
     };
-    RenderDataHost render_data_host();
+    RenderDataHost render_data_host(bool withPrev = false, bool shownLast = true);
 
 private:
     struct Impl;

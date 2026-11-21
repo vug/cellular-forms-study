@@ -815,6 +815,18 @@ __global__ void k_render_cells(const std::uint32_t* gen, const Vec3* pos, const 
         outExtra[v] = Vec3{static_cast<float>(gen[v]), cell_curvature(pos, ring, deg[v], pos[v], N, l0), morphB != nullptr ? morph_signal(morphB[v]) : 0.0f};
 }
 
+// For a viewer that blends frames: where every cell was in the frame the viewer shows now
+// (`shown`, by cell id; a cell born since has no such place and gets its own), and this frame's
+// positions by id (`last`), which become `shown` once this frame is on screen.
+__global__ void k_render_prev(const Vec3* pos, const std::uint32_t* uid, const Vec3* shown, std::uint32_t shownCount, Vec3* outPrev, Vec3* last,
+                              std::uint32_t n) {
+    const std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
+    if (v >= n) return;
+    const std::uint32_t id = uid[v];
+    outPrev[v] = id < shownCount ? shown[id] : pos[v];
+    last[id] = pos[v];
+}
+
 // The triangles of the membrane: every triangle (v, a, b) of consecutive ring entries is listed
 // by the cell with the lowest slot (core/export.cpp mesh_faces does the same by id). First the
 // number each cell lists, then, after a running sum, the triangles themselves. Cells past `n`
@@ -946,6 +958,12 @@ struct CudaSim::Impl {
     CudaBatchStats stats;
     std::uint32_t* diagOut = nullptr;
     void* cubTemp = nullptr;
+    // For copy_render_data with `prev`: positions by cell id of the frame the viewer shows, and of
+    // the frame published last.
+    Vec3* renderShown = nullptr;
+    Vec3* renderLast = nullptr;
+    std::uint32_t renderShownCount = 0, renderLastCount = 0;
+    bool renderPrevFailed = false;  // there was no memory for the two: not tried again
     std::size_t cubTempBytes = 0;
     std::size_t allocated = 0;
     std::vector<void*> blocks;
@@ -1954,13 +1972,15 @@ BatchEnd CudaSim::Impl::run_batch(std::uint32_t steps, std::uint32_t stopCells, 
     return result;
 }
 
-CudaSim::RenderDataHost CudaSim::render_data_host() {
+CudaSim::RenderDataHost CudaSim::render_data_host(bool withPrev, bool shownLast) {
     Impl& m = *impl_;
     const std::size_t n = m.n;
     RenderDataHost out;
     Vec3* extra = nullptr;
     Vec3* normal = nullptr;
     Vec3* smooth = nullptr;
+    Vec3* prev = nullptr;
+    if (withPrev) CF_CUDA(cudaMalloc(&prev, n * sizeof(Vec3)));
     std::uint32_t* index = nullptr;
     const std::size_t maxIndices = n * 6;
     CF_CUDA(cudaMalloc(&extra, n * sizeof(Vec3)));
@@ -1971,6 +1991,8 @@ CudaSim::RenderDataHost CudaSim::render_data_host() {
     t.extra = extra;
     t.normal = normal;
     t.smooth = smooth;
+    t.prev = prev;
+    t.shownLast = shownLast;
     t.index = index;
     t.maxIndices = static_cast<std::uint32_t>(maxIndices);
     const RenderCounts counts = copy_render_data(t, m.n);
@@ -1985,6 +2007,13 @@ CudaSim::RenderDataHost CudaSim::render_data_host() {
     CF_CUDA(cudaFree(extra));
     CF_CUDA(cudaFree(normal));
     CF_CUDA(cudaFree(smooth));
+    if (withPrev) {
+        out.prev.resize(n);
+        CF_CUDA(cudaMemcpy(out.prev.data(), prev, n * sizeof(Vec3), cudaMemcpyDeviceToHost));
+        CF_CUDA(cudaFree(prev));
+    }
+    out.id.resize(n);
+    CF_CUDA(cudaMemcpy(out.id.data(), m.uid, n * sizeof(std::uint32_t), cudaMemcpyDeviceToHost));
     CF_CUDA(cudaFree(index));
     return out;
 }
@@ -2074,6 +2103,46 @@ RenderCounts CudaSim::copy_render_data(const RenderTargets& t, std::uint32_t max
         k_render_cells<<<gb, kBlock, 0, st>>>(m.gen, m.pos[m.cur], m.normal[m.cur], m.nbr, m.deg, m.morphPresent ? m.morphB[m.cur] : nullptr,
                                               m.params.linkRestLength, normal_eps2(m.params.linkRestLength), static_cast<Vec3*>(t.normal),
                                               static_cast<Vec3*>(t.smooth), static_cast<Vec3*>(t.extra), n);
+    if (t.prev != nullptr && n == m.n && m.renderShown == nullptr && !m.renderPrevFailed) {
+        // Extra data for a viewer: when there is no memory for it, the run goes on without it.
+        const std::size_t bytes = static_cast<std::size_t>(m.capacity) * sizeof(Vec3);
+        void* shown = nullptr;
+        void* last = nullptr;
+        if (cudaMalloc(&shown, bytes) == cudaSuccess && cudaMalloc(&last, bytes) == cudaSuccess) {
+            m.renderShown = static_cast<Vec3*>(shown);
+            m.renderLast = static_cast<Vec3*>(last);
+            m.blocks.push_back(shown);
+            m.blocks.push_back(last);
+            m.allocated += 2 * bytes;
+        } else {
+            if (shown != nullptr) cudaFree(shown);
+            (void)cudaGetLastError();  // the refusal is handled here
+            m.renderPrevFailed = true;
+        }
+    }
+    if (t.prev != nullptr && n == m.n && m.renderShown != nullptr) {
+        out.prev = true;
+        if (t.shownLast) {  // the frame published last is on screen now: it is what the next one moves from
+            std::swap(m.renderShown, m.renderLast);
+            m.renderShownCount = m.renderLastCount;
+        }
+        k_render_prev<<<gb, kBlock, 0, st>>>(m.pos[m.cur], m.uid, m.renderShown, m.renderShownCount, static_cast<Vec3*>(t.prev), m.renderLast, n);
+        m.renderLastCount = n;
+    } else {
+        // Not asked for (or a view cut short): nothing is known about the frame on screen any more.
+        if (t.prev != nullptr) CF_CUDA(cudaMemcpyAsync(t.prev, m.pos[m.cur], c * sizeof(Vec3), cudaMemcpyDeviceToDevice, st));
+        m.renderShownCount = m.renderLastCount = 0;
+        if (t.prev == nullptr && m.renderShown != nullptr) {  // no longer asked for: the memory goes back
+            CF_CUDA(cudaStreamSynchronize(st));
+            for (void* p : {static_cast<void*>(m.renderShown), static_cast<void*>(m.renderLast)}) {
+                m.blocks.erase(std::remove(m.blocks.begin(), m.blocks.end(), p), m.blocks.end());
+                CF_CUDA(cudaFree(p));
+            }
+            m.allocated -= 2 * static_cast<std::size_t>(m.capacity) * sizeof(Vec3);
+            m.renderShown = m.renderLast = nullptr;
+        }
+        if (t.prev == nullptr) m.renderPrevFailed = false;
+    }
     std::uint32_t* counts = m.idBlock;  // the id buffers of the grid are free between steps
     std::uint32_t* offsets = m.idBlock + m.capacity;
     const bool triangles = t.index != nullptr && t.maxIndices >= 3u && n >= 3u;

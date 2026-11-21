@@ -69,6 +69,10 @@ void usage() {
         "  --no-vsync\n"
         "  --play [--play-fps <n>]  start with snapshot playback running\n"
         "  --spin <deg/s>         turn the camera slowly around the form\n"
+        "  --motion-test <frames> headless check of the blending of frames on a moving form: the form turns\n"
+        "                         and swells from frame to frame, and the last frame is compared with a still\n"
+        "                         image, with and without the cells' own motion (exit code 4 when following\n"
+        "                         the cells does not come closer; with --screenshot the images are written)\n"
         "  --exit-after <frames>  close the window after this many frames and print frame times\n"
         "  --window-capture <png> [--window-capture-frame <n>]  save the window, UI included, at frame n\n");
 }
@@ -183,6 +187,8 @@ int main(int argc, char** argv) {
                 o.playFps = static_cast<float>(std::atof(next()));
             } else if (a == "--spin") {
                 o.spin = static_cast<float>(std::atof(next()));
+            } else if (a == "--motion-test") {
+                o.motionTest = std::atoi(next());
             } else if (a == "--exit-after") {
                 o.exitAfterFrames = std::atoi(next());
             } else if (a == "--live") {
@@ -219,7 +225,7 @@ int main(int argc, char** argv) {
         if (o.files.empty() && o.demoLevel < 0 && !o.live) o.demoLevel = 4;
         if (o.liveSelfTest && o.exitAfterFrames <= 0) o.exitAfterFrames = 2400;
 
-        if (!o.screenshot.empty()) return cfv::runHeadless(o);
+        if (!o.screenshot.empty() || o.motionTest > 0) return cfv::runHeadless(o);
         return cfv::runWindowed(o);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "cf_view: %s\n", e.what());

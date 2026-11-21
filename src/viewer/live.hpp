@@ -84,7 +84,9 @@ public:
     // and the three extra values per cell (generation, curvature, morphogen activator): the
     // membrane (normals and triangles) and the shadow map of the food light. A change is
     // published at once, also while paused.
-    void setRenderNeeds(bool mesh, bool lightMap = false);
+    // `motion`: also where each cell was in the frame shown before (for blending frames while
+    // the simulation runs; 12 more bytes per cell and buffer, 24 per cell in the simulation).
+    void setRenderNeeds(bool mesh, bool lightMap = false, bool motion = false);
 
     // --- render thread. Call with no frame in flight: switches to the newest published frame,
     // if there is one, and returns what to draw.
@@ -105,6 +107,12 @@ private:
         // The shadow map of the food light, allocated the first time it is asked for.
         Buffer lightMap;
         std::unique_ptr<cf::CudaExternalBuffer> cudaLightMap;
+        // Where each cell was in the frame shown before this one, allocated the first time it is
+        // asked for.
+        Buffer prev;
+        std::unique_ptr<cf::CudaExternalBuffer> cudaPrev;
+        std::vector<cf::Vec3> hostPrev;  // CPU backend
+        bool hasPrev = false;            // this frame carries it
         cf::LightMapInfo light;                  // valid when this frame carries the map
         std::vector<std::int32_t> hostLightMap;  // CPU backend
         // CPU backend: host copy, uploaded by the render thread when the slot becomes the front.
@@ -128,6 +136,7 @@ private:
     void shareBuffer(VkDeviceSize bytes, VkBufferUsageFlags usage, Buffer& buffer, std::unique_ptr<cf::CudaExternalBuffer>& mapped);
     void ensureMeshBuffers();
     void ensureLightMapBuffers();
+    void ensureMotionBuffers();
     void releaseSlots();
     void buildSimulation(std::uint64_t seed, int level, const cf::Params& params);
     void publish();
@@ -148,6 +157,11 @@ private:
     std::atomic<bool> wantLightMap_{false};
     std::atomic<bool> lightMapReady_{false};
     bool lightMapFailed_ = false;
+    std::atomic<bool> wantMotion_{false};
+    std::atomic<bool> motionReady_{false};
+    bool motionFailed_ = false;
+    bool motionRefused_ = false;  // simulation thread: the simulation had no memory for it (said once)
+    std::vector<cf::Vec3> cpuShown_;  // CPU backend: the positions of the frame published last, which is the one on screen
     Buffer frontLightMap_;                // CPU backend: device copy of the front slot's light map
     VkDeviceSize frontLightMapBytes_ = 0;
     bool meshFailed_ = false;             // they could not be allocated: do not try again

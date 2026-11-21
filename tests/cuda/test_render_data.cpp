@@ -96,3 +96,79 @@ CF_TEST(cuda_render_data_matches_the_host) {
                  " more than 1, the worst " + std::to_string(staleBy) + "), generation, curvature (worst " +
                  std::to_string(worstCurvature) + ") and activator equal to the host");
 }
+
+// Where each cell was in the frame on screen (for a viewer that blends frames): the positions
+// of the last frame that was shown, by cell, whatever happened to the order of the cells in
+// between, and a cell's own position when it was born since.
+CF_TEST(cuda_render_data_previous_positions) {
+    Params p;
+    p.foodMax = 0.04f;
+    p.maxCells = 200000u;
+    p.repulsionStrength = 0.2f;
+    State s = make_icosphere(3, p);
+    s.params = p;
+    s.seed = 5;
+    randomise_initial_food(s);
+    CudaOptions o;  // the cells are put in a new order in memory every few steps
+    o.renumberMinCells = 0;
+    o.renumberGrowth = 0.0;
+    o.renumberMaxSteps = 7;
+    CudaSim gpu(s, o);
+    RunLimits lim;
+    lim.maxSteps = 150;
+    CF_CHECK_EQ(gpu.run(lim), std::uint64_t{150});
+
+    // What `prev` must be: `shown` for the cells that were there, the cell's own place otherwise.
+    auto wrong = [](const CudaSim::RenderDataHost& got, const State& shown, bool haveShown, const State& now) {
+        std::uint32_t bad = 0;
+        for (std::uint32_t v = 0; v < now.n; ++v) {
+            const std::uint32_t id = got.id[v];
+            const Vec3 want = haveShown && id < shown.n ? shown.pos[id] : now.pos[id];
+            bad += got.prev[v].x == want.x && got.prev[v].y == want.y && got.prev[v].z == want.z ? 0u : 1u;
+        }
+        return bad;
+    };
+    auto moved = [](const CudaSim::RenderDataHost& got, const State& now) {
+        std::uint32_t count = 0;
+        for (std::uint32_t v = 0; v < now.n; ++v) count += length(got.prev[v] - now.pos[got.id[v]]) > 1.0e-4f ? 1u : 0u;
+        return count;
+    };
+
+    State a, b, c, d;
+    gpu.download(a);
+    const CudaSim::RenderDataHost first = gpu.render_data_host(true, true);  // nothing has been shown yet
+    CF_CHECK_EQ(first.prev.size(), static_cast<std::size_t>(a.n));
+    CF_CHECK_EQ(wrong(first, a, false, a), 0u);
+
+    lim.maxSteps = 20;
+    gpu.run(lim);
+    gpu.download(b);
+    const CudaSim::RenderDataHost second = gpu.render_data_host(true, true);  // the first frame is on screen
+    CF_CHECK(b.n > a.n);
+    CF_CHECK_EQ(wrong(second, a, true, b), 0u);
+    CF_CHECK(moved(second, b) > a.n / 2u);
+
+    gpu.run(lim);
+    gpu.download(c);
+    const CudaSim::RenderDataHost third = gpu.render_data_host(true, false);  // the second frame was never shown: still the first
+    CF_CHECK_EQ(wrong(third, a, true, c), 0u);
+
+    gpu.run(lim);
+    gpu.download(d);
+    const CudaSim::RenderDataHost fourth = gpu.render_data_host(true, true);  // the third frame is on screen
+    CF_CHECK_EQ(wrong(fourth, c, true, d), 0u);
+
+    // A frame that does not ask for it gives the memory back and forgets what was on screen:
+    // the next one that asks starts again from the cells' own places.
+    (void)gpu.render_data_host(false);
+    const CudaSim::RenderDataHost fifth = gpu.render_data_host(true, true);
+    CF_CHECK_EQ(wrong(fifth, d, false, d), 0u);
+    const CudaSim::RenderDataHost sixth = gpu.render_data_host(true, true);  // the same state, shown: nothing moved
+    CF_CHECK_EQ(wrong(sixth, d, true, d), 0u);
+
+    // Whether the cells have been put in another order since the start (the case that matters).
+    std::uint32_t outOfPlace = 0;
+    for (std::uint32_t v = 0; v < d.n; ++v) outOfPlace += fourth.id[v] != v ? 1u : 0u;
+    cftest::note(std::to_string(a.n) + " -> " + std::to_string(d.n) + " cells over four frames, one of them not shown; " + std::to_string(moved(second, b)) +
+                 " cells of the second frame had moved; " + std::to_string(outOfPlace) + " cells sit in another place than their id at the end");
+}

@@ -20,6 +20,8 @@ struct Cloud {
     // cell the point on the smooth surface the membrane is drawn through and the normal there.
     std::vector<cf::Vec3> normal;
     std::vector<cf::Vec3> smooth;
+    // Only from a live run that publishes it: where each cell was in the frame shown before.
+    std::vector<cf::Vec3> prev;
     std::vector<std::uint32_t> indices;
     // Per-cell values for the colour modes beyond age and food; empty when the file has none.
     // Generation is in every file, curvature needs topology, the activator needs morphogens.
@@ -73,13 +75,15 @@ public:
         b.extraMask = extraMask_;
         b.capacity = count_;
         b.smooth = smooth_.buffer;
+        b.prev = havePrev_ ? prev_.buffer : VK_NULL_HANDLE;
         b.version = version_;
         return b;
     }
 
 private:
     Context& ctx_;
-    Buffer pos_, birth_, food_, normal_, index_, extra_, smooth_;
+    Buffer pos_, birth_, food_, normal_, index_, extra_, smooth_, prev_;
+    bool havePrev_ = false;
     std::uint32_t capacity_ = 0;
     std::uint32_t count_ = 0;
     std::uint32_t indexCount_ = 0;

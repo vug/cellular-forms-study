@@ -38,6 +38,7 @@ struct FrameUniforms {
     float wall[4];
     float outline[4];
     float style[4];
+    float env[4];
     float misc[4];
     float misc2[4];
 };
@@ -144,6 +145,17 @@ struct RenderSettings {
     float ptAperture = 0.0f;      // lens radius in world units (0 = everything sharp)
     float ptFocus = 0.0f;         // focus distance (0 = the point the camera orbits)
     float ptTranslucency = 0.3f;  // path traced membrane: share of the light that goes through the sheet
+    bool ptDenoise = true;        // edge-aware blur of the light while few samples have been gathered
+    float ptDenoiseStrength = 0.5f;
+
+    // --- environment map: an image of the surroundings (equirectangular) as the light from all
+    // around, in place of the sky and ground colours. The built-in one is a studio with three
+    // soft lights; envFile names an image to load instead (.hdr, or .png / .jpg).
+    bool envLight = false;
+    float envIntensity = 1.0f;
+    float envRotation = 0.0f;    // degrees about the vertical
+    bool envBackground = false;  // show the map behind the form
+    std::string envFile;
 
     // --- output
     float exposure = 1.0f;
@@ -200,6 +212,8 @@ public:
 
     // Path tracer: samples per pixel gathered for the current view so far.
     uint32_t accumulatedSamples() const { return accumSamples_; }
+    // The environment map in use ("built-in studio" or a file name), or why a file was not loaded.
+    const std::string& environmentStatus() const { return envStatus_; }
     bool rayTracing() const { return ctx_.hasRayTracing; }
     bool cellWallsOnMembrane() const { return ctx_.hasBarycentric; }
 
@@ -208,6 +222,9 @@ private:
     void destroyImages();
     void writeDescriptors();
     void ensureShadowMap(uint32_t size);
+    void setEnvironment(const float* rgb, int width, int height);
+    void writeEnvDescriptor();
+    void syncEnvironment(const RenderSettings& settings);
     void updateCellTree(VkCommandBuffer cmd, const PointBuffers& points, float radius, bool mesh);
     void destroyCellTree();
 
@@ -215,7 +232,16 @@ private:
     VkFormat targetFormat_;
     VkExtent2D extent_{};
 
-    Image albedo_, normalDepth_, id_, depth_, aoRaw_, aoBlur_, accum_, shadowMap_;
+    Image albedo_, normalDepth_, id_, depth_, aoRaw_, aoBlur_, shadowMap_;
+    // Path tracer: the running mean, what the denoiser needs (first-hit normal and distance,
+    // first-hit colour), its two work images, and the image the composite pass shows.
+    Image accum_, ptGuide_, ptFirst_, denoiseA_, denoiseB_, ptDisplay_;
+    Image env_;  // the environment map, with its chain of blurrier levels
+    uint32_t envLevels_ = 1;
+    uint64_t envVersion_ = 0;
+    std::string envLoaded_ = "\x01";  // the envFile the map was made from (the built-in one: empty)
+    std::string envStatus_;
+    VkSampler envSampler_ = VK_NULL_HANDLE;
     uint32_t shadowSize_ = 0;
     bool accumReady_ = false;       // the accumulation image has been through its first transition
     uint32_t accumSamples_ = 0;
@@ -226,7 +252,9 @@ private:
     VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
     VkDescriptorSet setGeometry_ = VK_NULL_HANDLE, setShadow_ = VK_NULL_HANDLE, setSsao_ = VK_NULL_HANDLE, setBlur_ = VK_NULL_HANDLE,
                     setComposite_ = VK_NULL_HANDLE, rtSet_ = VK_NULL_HANDLE;
-    VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE, rtLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSet setDenoise_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE, rtLayout_ = VK_NULL_HANDLE, denoiseLayout_ = VK_NULL_HANDLE;
+    VkPipeline denoisePipeline_ = VK_NULL_HANDLE;
     VkPipeline impostorPipeline_ = VK_NULL_HANDLE, ssaoPipeline_ = VK_NULL_HANDLE, blurPipeline_ = VK_NULL_HANDLE,
                compositePipeline_ = VK_NULL_HANDLE, xrayPipeline_ = VK_NULL_HANDLE, meshPipeline_ = VK_NULL_HANDLE,
                shadowCellsPipeline_ = VK_NULL_HANDLE, shadowMeshPipeline_ = VK_NULL_HANDLE, rtaoPipeline_ = VK_NULL_HANDLE,

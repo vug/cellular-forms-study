@@ -46,6 +46,8 @@ void usage() {
         "  --xray-density <x>     brightness of the x-ray mode (default 0.06)\n"
         "  --color <age|food|birth|uniform|generation|curvature|activator>\n"
         "                         curvature needs a state with its rings, activator one with morphogens\n"
+        "  --env <image>          light the form with an environment map (.hdr, .png, .jpg; equirectangular);\n"
+        "                         --set envLight=on alone uses the built-in studio\n"
         "  --set name=value       any render setting (repeatable): light, shadows, occlusion, cell walls,\n"
         "                         outlines, path tracer, tone mapping, ...;  --list-settings prints the names\n"
         "  --yaw <deg> --pitch <deg> --zoom <factor>\n"
@@ -137,6 +139,10 @@ int main(int argc, char** argv) {
             } else if (a == "--mode") {
                 const std::string v = next();
                 if (!cfv::setRenderSetting(o.settings, "drawMode", v).empty()) throw std::runtime_error("--mode expects cells, xray, mesh, sss or path");
+            } else if (a == "--env") {
+                // An image of the surroundings to light the form with (see --set envLight, envBackground).
+                o.settings.envFile = next();
+                o.settings.envLight = true;
             } else if (a == "--xray-density") {
                 o.settings.xrayDensity = static_cast<float>(std::atof(next()));
             } else if (a == "--no-ao") {

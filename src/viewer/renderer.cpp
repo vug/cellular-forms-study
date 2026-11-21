@@ -7,6 +7,8 @@
 #include <cstring>
 #include <vector>
 
+#include "environment.hpp"
+
 namespace cfv {
 
 namespace {
@@ -63,6 +65,9 @@ const uint32_t kPathTraceFrag[] = {
 const uint32_t kBoxComp[] = {
 #include "aabb.comp.inc"
 };
+const uint32_t kDenoiseFrag[] = {
+#include "denoise.frag.inc"
+};
 
 constexpr VkFormat kAlbedoFormat = VK_FORMAT_R8G8B8A8_UNORM;
 constexpr VkFormat kNormalDepthFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -70,6 +75,10 @@ constexpr VkFormat kIdFormat = VK_FORMAT_R32_UINT;
 constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
 constexpr VkFormat kAoFormat = VK_FORMAT_R8_UNORM;
 constexpr VkFormat kAccumFormat = VK_FORMAT_R32G32B32A32_SFLOAT;
+constexpr VkFormat kGuideFormat = VK_FORMAT_R16G16B16A16_SFLOAT;    // first-hit normal and distance
+constexpr VkFormat kFirstFormat = VK_FORMAT_R16G16B16A16_SFLOAT;    // first-hit colour and coverage
+constexpr VkFormat kDisplayFormat = VK_FORMAT_R16G16B16A16_SFLOAT;  // the (denoised) path traced image
+constexpr VkFormat kEnvFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 
 enum class VertexInput { None, Cells, Mesh, CellsPos, MeshPos };
 enum class Blend { Opaque, Additive, Accumulate };
@@ -164,12 +173,11 @@ VkPipeline makePipeline(Context& ctx, VkPipelineLayout layout, const PipelineDes
                 a.colorBlendOp = a.alphaBlendOp = VK_BLEND_OP_ADD;
             }
         } else if (d.blend == Blend::Accumulate) {
-            // new mean = this frame * alpha + old mean * (1 - alpha)
+            // new mean = this frame * weight + old mean * (1 - weight); the weight is the blend
+            // constant, set when the pass is recorded
             a.blendEnable = VK_TRUE;
-            a.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-            a.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-            a.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-            a.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            a.srcColorBlendFactor = a.srcAlphaBlendFactor = VK_BLEND_FACTOR_CONSTANT_ALPHA;
+            a.dstColorBlendFactor = a.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
             a.colorBlendOp = a.alphaBlendOp = VK_BLEND_OP_ADD;
         }
     }
@@ -177,9 +185,9 @@ VkPipeline makePipeline(Context& ctx, VkPipelineLayout layout, const PipelineDes
     blend.attachmentCount = static_cast<uint32_t>(blendAttachments.size());
     blend.pAttachments = blendAttachments.data();
 
-    const VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    const VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_BLEND_CONSTANTS};
     VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-    dynamic.dynamicStateCount = 2;
+    dynamic.dynamicStateCount = d.blend == Blend::Accumulate ? 3u : 2u;
     dynamic.pDynamicStates = dynamicStates;
 
     VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
@@ -314,6 +322,17 @@ uint64_t fnv(const void* data, size_t bytes, uint64_t h = 1469598103934665603ull
     return h;
 }
 
+// A float as a 16-bit half float (values too large become the largest half; tiny ones zero).
+uint16_t toHalf(float f) {
+    if (!(f > 0.0f)) return 0;
+    uint32_t x;
+    std::memcpy(&x, &f, sizeof x);
+    const int exponent = static_cast<int>((x >> 23) & 0xFFu) - 127 + 15;
+    if (exponent <= 0) return 0;
+    if (exponent >= 31) return 0x7BFFu;
+    return static_cast<uint16_t>((static_cast<uint32_t>(exponent) << 10) | ((x & 0x7FFFFFu) >> 13));
+}
+
 void set3(float* dst, const float* src, float w) {
     dst[0] = src[0];
     dst[1] = src[1];
@@ -335,16 +354,27 @@ Renderer::Renderer(Context& ctx, VkFormat targetFormat) : ctx_(ctx), targetForma
     si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     vk_check(vkCreateSampler(ctx_.device, &si, nullptr, &sampler_), "vkCreateSampler");
 
-    // Set 0: the frame uniforms and up to six images a pass samples (see composite.frag).
-    VkDescriptorSetLayoutBinding bindings[7]{};
+    // Linear filtering over all levels, wrapping around the horizon: the environment map.
+    VkSamplerCreateInfo ei{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    ei.magFilter = VK_FILTER_LINEAR;
+    ei.minFilter = VK_FILTER_LINEAR;
+    ei.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    ei.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    ei.addressModeV = ei.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    ei.maxLod = VK_LOD_CLAMP_NONE;
+    vk_check(vkCreateSampler(ctx_.device, &ei, nullptr, &envSampler_), "vkCreateSampler (environment)");
+
+    // Set 0: the frame uniforms, up to six images a pass samples (see composite.frag), and the
+    // environment map.
+    VkDescriptorSetLayoutBinding bindings[8]{};
     bindings[0] = {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-    for (uint32_t i = 1; i < 7; ++i) bindings[i] = {i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    for (uint32_t i = 1; i < 8; ++i) bindings[i] = {i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 7;
+    li.bindingCount = 8;
     li.pBindings = bindings;
     vk_check(vkCreateDescriptorSetLayout(ctx_.device, &li, nullptr, &setLayout_), "vkCreateDescriptorSetLayout");
 
-    std::vector<VkDescriptorPoolSize> sizes = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 8}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32}};
+    std::vector<VkDescriptorPoolSize> sizes = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 10}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 64}};
     if (ctx_.hasRayTracing) {
         // Set 1 of the ray-traced passes: the acceleration structure and the per-cell buffers.
         // 0 the structure, 1 positions, 2 birth steps, 3 food, 4 the extra scalar, 5 the boxes
@@ -364,28 +394,39 @@ Renderer::Renderer(Context& ctx, VkFormat targetFormat) : ctx_(ctx), targetForma
         sizes.push_back({VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1});
     }
     VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pi.maxSets = 6;
+    pi.maxSets = 9;
     pi.poolSizeCount = static_cast<uint32_t>(sizes.size());
     pi.pPoolSizes = sizes.data();
     vk_check(vkCreateDescriptorPool(ctx_.device, &pi, nullptr, &descriptorPool_), "vkCreateDescriptorPool");
 
-    const VkDescriptorSetLayout layouts[5] = {setLayout_, setLayout_, setLayout_, setLayout_, setLayout_};
+    const VkDescriptorSetLayout layouts[8] = {setLayout_, setLayout_, setLayout_, setLayout_, setLayout_, setLayout_, setLayout_, setLayout_};
     VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     ai.descriptorPool = descriptorPool_;
-    ai.descriptorSetCount = 5;
+    ai.descriptorSetCount = 8;
     ai.pSetLayouts = layouts;
-    VkDescriptorSet sets[5];
+    VkDescriptorSet sets[8];
     vk_check(vkAllocateDescriptorSets(ctx_.device, &ai, sets), "vkAllocateDescriptorSets");
     setGeometry_ = sets[0];
     setShadow_ = sets[1];
     setSsao_ = sets[2];
     setBlur_ = sets[3];
     setComposite_ = sets[4];
+    for (int i = 0; i < 3; ++i) setDenoise_[i] = sets[5 + i];
 
     VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pli.setLayoutCount = 1;
     pli.pSetLayouts = &setLayout_;
     vk_check(vkCreatePipelineLayout(ctx_.device, &pli, nullptr, &pipelineLayout_), "vkCreatePipelineLayout");
+    {
+        // The denoiser passes differ only in a few numbers, given as push constants.
+        const VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16};
+        VkPipelineLayoutCreateInfo dl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        dl.setLayoutCount = 1;
+        dl.pSetLayouts = &setLayout_;
+        dl.pushConstantRangeCount = 1;
+        dl.pPushConstantRanges = &push;
+        vk_check(vkCreatePipelineLayout(ctx_.device, &dl, nullptr, &denoiseLayout_), "vkCreatePipelineLayout (denoiser)");
+    }
 
     if (ctx_.hasRayTracing) {
         VkDescriptorSetAllocateInfo rai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
@@ -412,6 +453,7 @@ Renderer::Renderer(Context& ctx, VkFormat targetFormat) : ctx_(ctx), targetForma
     }
 
     ensureShadowMap(1024);
+    syncEnvironment(RenderSettings{});  // the built-in studio, until a file is asked for
     createPipelines();
 }
 
@@ -419,10 +461,13 @@ Renderer::~Renderer() {
     vkDeviceWaitIdle(ctx_.device);
     destroyImages();
     ctx_.destroy(shadowMap_);
+    ctx_.destroy(env_);
     destroyCellTree();
     for (VkPipeline p : {impostorPipeline_, ssaoPipeline_, blurPipeline_, compositePipeline_, xrayPipeline_, meshPipeline_, shadowCellsPipeline_,
-                         shadowMeshPipeline_, rtaoPipeline_, pathTracePipeline_, boxPipeline_})
+                         shadowMeshPipeline_, rtaoPipeline_, pathTracePipeline_, boxPipeline_, denoisePipeline_})
         if (p) vkDestroyPipeline(ctx_.device, p, nullptr);
+    if (envSampler_) vkDestroySampler(ctx_.device, envSampler_, nullptr);
+    if (denoiseLayout_) vkDestroyPipelineLayout(ctx_.device, denoiseLayout_, nullptr);
     if (pipelineLayout_) vkDestroyPipelineLayout(ctx_.device, pipelineLayout_, nullptr);
     if (rtLayout_) vkDestroyPipelineLayout(ctx_.device, rtLayout_, nullptr);
     if (descriptorPool_) vkDestroyDescriptorPool(ctx_.device, descriptorPool_, nullptr);
@@ -480,13 +525,17 @@ void Renderer::createPipelines() {
     composite.colorFormats = {targetFormat_};
     compositePipeline_ = makePipeline(ctx_, pipelineLayout_, composite);
 
+    PipelineDesc denoise{kFullscreenVert, std::size(kFullscreenVert), kDenoiseFrag, std::size(kDenoiseFrag)};
+    denoise.colorFormats = {kDisplayFormat};
+    denoisePipeline_ = makePipeline(ctx_, denoiseLayout_, denoise);
+
     if (ctx_.hasRayTracing) {
         PipelineDesc rtao{kFullscreenVert, std::size(kFullscreenVert), kRtaoFrag, std::size(kRtaoFrag)};
         rtao.colorFormats = {kAoFormat};
         rtaoPipeline_ = makePipeline(ctx_, rtLayout_, rtao);
 
         PipelineDesc pt{kFullscreenVert, std::size(kFullscreenVert), kPathTraceFrag, std::size(kPathTraceFrag)};
-        pt.colorFormats = {kAccumFormat};
+        pt.colorFormats = {kAccumFormat, kGuideFormat, kFirstFormat};
         pt.blend = Blend::Accumulate;
         pathTracePipeline_ = makePipeline(ctx_, rtLayout_, pt);
 
@@ -504,7 +553,8 @@ void Renderer::createPipelines() {
 }
 
 void Renderer::destroyImages() {
-    for (Image* img : {&albedo_, &normalDepth_, &id_, &depth_, &aoRaw_, &aoBlur_, &accum_}) ctx_.destroy(*img);
+    for (Image* img : {&albedo_, &normalDepth_, &id_, &depth_, &aoRaw_, &aoBlur_, &accum_, &ptGuide_, &ptFirst_, &denoiseA_, &denoiseB_, &ptDisplay_})
+        ctx_.destroy(*img);
 }
 
 void Renderer::resize(VkExtent2D extent) {
@@ -520,6 +570,11 @@ void Renderer::resize(VkExtent2D extent) {
     aoRaw_ = ctx_.createImage(extent, kAoFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
     aoBlur_ = ctx_.createImage(extent, kAoFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
     accum_ = ctx_.createImage(extent, kAccumFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
+    ptGuide_ = ctx_.createImage(extent, kGuideFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
+    ptFirst_ = ctx_.createImage(extent, kFirstFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
+    denoiseA_ = ctx_.createImage(extent, kDisplayFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
+    denoiseB_ = ctx_.createImage(extent, kDisplayFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
+    ptDisplay_ = ctx_.createImage(extent, kDisplayFormat, colorUsage, VK_IMAGE_ASPECT_COLOR_BIT);
     accumReady_ = false;
     accumSamples_ = 0;
     accumKey_ = 0;
@@ -547,6 +602,11 @@ void Renderer::writeDescriptors() {
     const VkDescriptorImageInfo shadow{sampler_, shadowMap_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     const VkDescriptorImageInfo id{sampler_, id_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     const VkDescriptorImageInfo accum{sampler_, accum_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    const VkDescriptorImageInfo guide{sampler_, ptGuide_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    const VkDescriptorImageInfo first{sampler_, ptFirst_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    const VkDescriptorImageInfo workA{sampler_, denoiseA_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    const VkDescriptorImageInfo workB{sampler_, denoiseB_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    const VkDescriptorImageInfo display{sampler_, ptDisplay_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 
     std::vector<VkWriteDescriptorSet> writes;
     auto addUbo = [&](VkDescriptorSet set, const VkDescriptorBufferInfo* info) {
@@ -581,8 +641,153 @@ void Renderer::writeDescriptors() {
     addImage(setComposite_, 3, &albedo);
     addImage(setComposite_, 4, &shadow);
     addImage(setComposite_, 5, &id);
-    addImage(setComposite_, 6, &accum);
+    addImage(setComposite_, 6, &display);
+    // The denoiser: its input (the running mean, then its own work images) and the two guides.
+    const VkDescriptorImageInfo* inputs[3] = {&accum, &workA, &workB};
+    for (int i = 0; i < 3; ++i) {
+        addUbo(setDenoise_[i], &ubo);
+        addImage(setDenoise_[i], 1, inputs[i]);
+        addImage(setDenoise_[i], 2, &guide);
+        addImage(setDenoise_[i], 3, &first);
+    }
     vkUpdateDescriptorSets(ctx_.device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    writeEnvDescriptor();
+}
+
+void Renderer::writeEnvDescriptor() {
+    if (!env_.view) return;
+    const VkDescriptorImageInfo info{envSampler_, env_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet writes[2]{};
+    const VkDescriptorSet sets[2] = {setGeometry_, setComposite_};  // the path tracer and the composite pass
+    for (int i = 0; i < 2; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = sets[i];
+        writes[i].dstBinding = 7;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[i].pImageInfo = &info;
+    }
+    vkUpdateDescriptorSets(ctx_.device, 2, writes, 0, nullptr);
+}
+
+// Uploads an environment map (linear colour, three floats per pixel) with its chain of smaller,
+// blurrier levels.
+void Renderer::setEnvironment(const float* rgb, int width, int height) {
+    vkDeviceWaitIdle(ctx_.device);
+    ctx_.destroy(env_);
+    uint32_t levels = 1;
+    for (int m = std::max(width, height); m > 1; m >>= 1) ++levels;
+    envLevels_ = levels;
+
+    env_.format = kEnvFormat;
+    env_.extent = VkExtent2D{static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+    VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ci.imageType = VK_IMAGE_TYPE_2D;
+    ci.format = kEnvFormat;
+    ci.extent = {env_.extent.width, env_.extent.height, 1};
+    ci.mipLevels = levels;
+    ci.arrayLayers = 1;
+    ci.samples = VK_SAMPLE_COUNT_1_BIT;
+    ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk_check(vkCreateImage(ctx_.device, &ci, nullptr, &env_.image), "vkCreateImage (environment)");
+    VkMemoryRequirements req;
+    vkGetImageMemoryRequirements(ctx_.device, env_.image, &req);
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = req.size;
+    ai.memoryTypeIndex = ctx_.findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    vk_check(vkAllocateMemory(ctx_.device, &ai, nullptr, &env_.memory), "vkAllocateMemory (environment)");
+    vk_check(vkBindImageMemory(ctx_.device, env_.image, env_.memory, 0), "vkBindImageMemory (environment)");
+    VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vi.image = env_.image;
+    vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vi.format = kEnvFormat;
+    vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1};
+    vk_check(vkCreateImageView(ctx_.device, &vi, nullptr, &env_.view), "vkCreateImageView (environment)");
+
+    // Half floats, four per pixel.
+    const size_t pixels = static_cast<size_t>(width) * height;
+    Buffer staging = ctx_.createBuffer(pixels * 8, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
+    auto* half = static_cast<uint16_t*>(staging.mapped);
+    for (size_t i = 0; i < pixels; ++i) {
+        for (int c = 0; c < 3; ++c) half[i * 4 + c] = toHalf(rgb[i * 3 + c]);
+        half[i * 4 + 3] = toHalf(1.0f);
+    }
+
+    auto barrier = [&](VkCommandBuffer cmd, uint32_t level, uint32_t count, VkImageLayout from, VkImageLayout to, VkAccessFlags2 srcAccess,
+                       VkAccessFlags2 dstAccess, VkPipelineStageFlags2 dstStage) {
+        VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+        b.srcStageMask = from == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+        b.srcAccessMask = srcAccess;
+        b.dstStageMask = dstStage;
+        b.dstAccessMask = dstAccess;
+        b.oldLayout = from;
+        b.newLayout = to;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = env_.image;
+        b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, count, 0, 1};
+        VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers = &b;
+        vkCmdPipelineBarrier2(cmd, &dep);
+    };
+    ctx_.immediate([&](VkCommandBuffer cmd) {
+        barrier(cmd, 0, levels, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT);
+        VkBufferImageCopy region{};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageExtent = {env_.extent.width, env_.extent.height, 1};
+        vkCmdCopyBufferToImage(cmd, staging.buffer, env_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        int w = width, h = height;
+        for (uint32_t level = 1; level < levels; ++level) {
+            // Each level is the one before it at half the size.
+            barrier(cmd, level - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_2_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT);
+            const int nw = std::max(w / 2, 1), nh = std::max(h / 2, 1);
+            VkImageBlit blit{};
+            blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level - 1, 0, 1};
+            blit.srcOffsets[1] = {w, h, 1};
+            blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1};
+            blit.dstOffsets[1] = {nw, nh, 1};
+            vkCmdBlitImage(cmd, env_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, env_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                           VK_FILTER_LINEAR);
+            w = nw;
+            h = nh;
+        }
+        barrier(cmd, levels - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_ACCESS_2_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT);
+        barrier(cmd, 0, levels, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+    });
+    ctx_.destroy(staging);
+    ++envVersion_;
+    writeEnvDescriptor();
+}
+
+// Makes the environment map the one the settings name: a file, or the built-in studio.
+void Renderer::syncEnvironment(const RenderSettings& settings) {
+    if (settings.envFile == envLoaded_) return;
+    envLoaded_ = settings.envFile;
+    std::vector<float> rgb;
+    int w = 0, h = 0;
+    if (!settings.envFile.empty()) {
+        std::string error;
+        if (loadEnvironmentImage(settings.envFile, rgb, w, h, error)) {
+            setEnvironment(rgb.data(), w, h);
+            envStatus_ = settings.envFile + " (" + std::to_string(w) + " x " + std::to_string(h) + ")";
+            return;
+        }
+        envStatus_ = error + "; using the built-in studio";
+    } else {
+        envStatus_ = "built-in studio";
+    }
+    w = 512;
+    h = 256;
+    rgb = studioEnvironment(w, h);
+    setEnvironment(rgb.data(), w, h);
 }
 
 FrameSetup Renderer::makeUniforms(const OrbitCamera& camera, const RenderSettings& s, Vec3 sceneCentre, float sceneRadius, float currentStep,
@@ -686,8 +891,13 @@ FrameSetup Renderer::makeUniforms(const OrbitCamera& camera, const RenderSetting
     u.misc[1] = static_cast<float>(s.debugView);
     u.misc[2] = static_cast<float>(drawMode);
     u.misc[3] = drawMode == kDrawMembraneSss ? s.sssRadius : s.xrayDensity;
+    u.env[0] = s.envLight ? 1.0f : 0.0f;
+    u.env[1] = std::max(s.envIntensity, 0.0f);
+    u.env[2] = s.envRotation * 3.14159265f / 180.0f;
+    u.env[3] = s.envBackground ? 1.0f : 0.0f;
     u.misc2[0] = static_cast<float>(s.toneMap);
     u.misc2[1] = std::clamp(s.backgroundGradient, 0.0f, 1.0f);
+    u.misc2[3] = static_cast<float>(envLevels_ - 1u);
     return frame;
 }
 
@@ -877,7 +1087,9 @@ void Renderer::updateCellTree(VkCommandBuffer cmd, const PointBuffers& points, f
 
 void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBuffers& points, const FrameSetup& frame,
                       const RenderSettings& settings, const std::function<void(VkCommandBuffer)>& overlay) {
+    syncEnvironment(settings);
     FrameUniforms u = frame.uniforms;
+    u.misc2[3] = static_cast<float>(envLevels_ - 1u);
     int drawMode = static_cast<int>(u.misc[2] + 0.5f);
     const bool havePoints = points.count > 0 && points.pos && points.birth && points.food;
     // Data without a membrane (a snapshot file): the membrane modes draw the cells instead.
@@ -902,6 +1114,7 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
         uint64_t key = fnv(&keyed, sizeof keyed);
         key = fnv(&points.version, sizeof points.version, key);
         key = fnv(&points.count, sizeof points.count, key);
+        key = fnv(&envVersion_, sizeof envVersion_, key);
         if (key != accumKey_) {
             accumKey_ = key;
             accumSamples_ = 0;
@@ -1002,24 +1215,60 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
     vkCmdEndRendering(cmd);
     toSampled(cmd, aoBlur_);
 
-    // --- path tracer: a few more samples into the running mean (the image keeps its contents)
+    // --- path tracer: a few more samples into the running mean (the images keep their contents),
+    // then the denoiser, or a plain copy, into the image the composite pass shows.
+    const VkImageLayout readable = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     if (!accumReady_) {
-        transition(cmd, accum_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        for (const Image* img : {&accum_, &ptGuide_, &ptFirst_, &ptDisplay_})
+            transition(cmd, img->image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, readable, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
+                       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
         accumReady_ = true;
     }
     if (newSamples > 0) {
-        transition(cmd, accum_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT);
-        beginPass(cmd, extent_, {accum_.view}, VK_ATTACHMENT_LOAD_OP_LOAD, VK_NULL_HANDLE);
+        for (const Image* img : {&accum_, &ptGuide_, &ptFirst_})
+            transition(cmd, img->image, VK_IMAGE_ASPECT_COLOR_BIT, readable, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                       VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT);
+        beginPass(cmd, extent_, {accum_.view, ptGuide_.view, ptFirst_.view}, VK_ATTACHMENT_LOAD_OP_LOAD, VK_NULL_HANDLE);
+        // The weight of this frame in the running mean.
+        const float weight = static_cast<float>(newSamples) / static_cast<float>(accumSamples_ + newSamples);
+        const float constants[4] = {weight, weight, weight, weight};
+        vkCmdSetBlendConstants(cmd, constants);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pathTracePipeline_);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rtLayout_, 0, 1, &setGeometry_, 0, nullptr);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rtLayout_, 1, 1, &rtSet_, 0, nullptr);
         vkCmdDraw(cmd, 3, 1, 0, 0);
         vkCmdEndRendering(cmd);
-        toSampled(cmd, accum_);
+        for (const Image* img : {&accum_, &ptGuide_, &ptFirst_}) toSampled(cmd, *img);
         accumSamples_ += newSamples;
+    }
+    if (pathTraced) {
+        struct Pass {
+            int set;
+            const Image* target;
+            int32_t step, first, last;
+        };
+        const bool denoise = settings.ptDenoise && settings.ptDenoiseStrength > 0.0f;
+        const Pass blur[3] = {{0, &denoiseA_, 1, 1, 0}, {1, &denoiseB_, 2, 0, 0}, {2, &ptDisplay_, 4, 0, 1}};
+        const Pass copy[1] = {{0, &ptDisplay_, 0, 1, 1}};
+        const Pass* passes = denoise ? blur : copy;
+        // The fewer samples, the noisier the image and the more a neighbour may differ.
+        const float sigma = settings.ptDenoiseStrength * 4.0f / std::sqrt(static_cast<float>(std::max(accumSamples_, 1u)));
+        for (int i = 0; i < (denoise ? 3 : 1); ++i) {
+            const Pass& pass = passes[i];
+            toAttachment(cmd, *pass.target);
+            beginPass(cmd, extent_, {pass.target->view}, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_NULL_HANDLE);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, denoisePipeline_);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, denoiseLayout_, 0, 1, &setDenoise_[pass.set], 0, nullptr);
+            struct {
+                int32_t step, first, last;
+                float sigma;
+            } push{pass.step, pass.first, pass.last, sigma};
+            vkCmdPushConstants(cmd, denoiseLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof push, &push);
+            vkCmdDraw(cmd, 3, 1, 0, 0);
+            vkCmdEndRendering(cmd);
+            toSampled(cmd, *pass.target);
+        }
     }
 
     // --- composite into the target, then the overlay (UI) on top
@@ -1155,6 +1404,17 @@ const std::vector<Entry>& entries() {
         number("ptAperture", &RenderSettings::ptAperture),
         number("ptFocus", &RenderSettings::ptFocus),
         number("ptTranslucency", &RenderSettings::ptTranslucency),
+        flag("ptDenoise", &RenderSettings::ptDenoise),
+        number("ptDenoiseStrength", &RenderSettings::ptDenoiseStrength),
+        flag("envLight", &RenderSettings::envLight),
+        number("envIntensity", &RenderSettings::envIntensity),
+        number("envRotation", &RenderSettings::envRotation),
+        flag("envBackground", &RenderSettings::envBackground),
+        {"envFile",
+         [](RenderSettings& st, const std::string& v) {
+             st.envFile = v;
+             return true;
+         }},
         number("exposure", &RenderSettings::exposure),
         whole("toneMap", &RenderSettings::toneMap),
         triple("background", &RenderSettings::background),

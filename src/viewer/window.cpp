@@ -108,6 +108,7 @@ private:
 
     OrbitCamera camera_;
     RenderSettings settings_;
+    char envFileInput_[512] = {};  // the text box of the environment image file
     std::uint64_t frameCounter_ = 0;
     bool saveRequested_ = false;
     std::string status_;
@@ -654,6 +655,22 @@ void Window::buildUi() {
             ImGui::TextDisabled("not used by this draw mode (the path tracer casts its own)");
     }
 
+    if (ImGui::CollapsingHeader("Environment")) {
+        ImGui::Checkbox("light from the environment map", &settings_.envLight);
+        ImGui::Checkbox("show it behind the form", &settings_.envBackground);
+        ImGui::SliderFloat("environment intensity", &settings_.envIntensity, 0.0f, 4.0f);
+        ImGui::SliderFloat("rotation", &settings_.envRotation, 0.0f, 360.0f, "%.0f deg");
+        ImGui::InputText("image file", envFileInput_, sizeof envFileInput_);
+        if (ImGui::Button("Load image")) settings_.envFile = envFileInput_;
+        ImGui::SameLine();
+        if (ImGui::Button("Built-in studio")) {
+            settings_.envFile.clear();
+            envFileInput_[0] = 0;
+        }
+        ImGui::TextDisabled("%s", renderer_->environmentStatus().c_str());
+        ImGui::TextDisabled("replaces the sky and ground colours");
+    }
+
     if (ImGui::CollapsingHeader("Ambient occlusion")) {
         ImGui::Checkbox("ambient occlusion", &settings_.aoEnabled);
         ImGui::SliderFloat("occlusion strength", &settings_.aoIntensity, 0.0f, 2.0f);
@@ -696,6 +713,8 @@ void Window::buildUi() {
         ImGui::SliderFloat("lens radius", &settings_.ptAperture, 0.0f, 3.0f);
         ImGui::SliderFloat("focus distance", &settings_.ptFocus, 0.0f, std::max(2.0f * camera_.distance, 1.0f), settings_.ptFocus <= 0.0f ? "orbit point" : "%.1f");
         ImGui::SliderFloat("light through the membrane", &settings_.ptTranslucency, 0.0f, 0.9f);
+        ImGui::Checkbox("denoise", &settings_.ptDenoise);
+        ImGui::SliderFloat("denoise strength", &settings_.ptDenoiseStrength, 0.0f, 2.0f);
         ImGui::EndDisabled();
         ImGui::TextDisabled("lit by the key light and the sky and ground colours");
     }
@@ -711,8 +730,10 @@ void Window::buildUi() {
         ImGui::Combo("view", &settings_.debugView, views, 6);
         if (ImGui::Button("Reset the look")) {
             const int keepMode = settings_.drawMode;
+            const std::string keepFile = settings_.envFile;
             settings_ = RenderSettings{};
             settings_.drawMode = keepMode;
+            settings_.envFile = keepFile;
         }
     }
 

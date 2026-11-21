@@ -1,22 +1,30 @@
 #version 460
 #extension GL_EXT_ray_query : require
 // Path tracer over the cells as diffuse spheres or over the membrane, lit by a sun of
-// adjustable size and by the sky. The membrane is a thin sheet: a share of the light goes
-// through it (F.pt.w), which is what makes it look like tissue. Each frame adds a few samples
-// per pixel; the output is blended into a running mean (the alpha written here is the weight
-// of this frame), so the image converges while the view stands still.
+// adjustable size and by the sky or an environment map. The membrane is a thin sheet: a share
+// of the light goes through it (F.pt.w), which is what makes it look like tissue. Each frame
+// adds a few samples per pixel, blended into a running mean (the blend weight is set by the
+// renderer), so the image converges while the view stands still. Next to the image it writes
+// what the denoiser needs to know about the first surface each pixel sees.
 #include "frame.glsl"
 #include "palette.glsl"
 #include "screen.glsl"
+#include "env.glsl"
 #include "rt_common.glsl"
 #include "rt_surface.glsl"
 
 layout(location = 0) in vec2 vUV;
 layout(location = 0) out vec4 outColor;
+layout(location = 1) out vec4 outGuide;  // first hit: world normal (xyz), distance along the ray (w)
+layout(location = 2) out vec4 outFirst;  // first hit: colour (rgb), share of the pixel that is on the form (a)
 
-vec3 skyLight(vec3 d) { return mix(F.ground.rgb, F.sky.rgb, 0.5 + 0.5 * d.y) * F.sky.a; }
+vec3 skyLight(vec3 d) {
+    // Very bright spots of an environment map would show as stray bright pixels: capped.
+    if (F.env.x > 0.5) return min(envLight(d, 0.0), vec3(40.0)) * F.sky.a;
+    return mix(F.ground.rgb, F.sky.rgb, 0.5 + 0.5 * d.y) * F.sky.a;
+}
 
-vec3 radiance(vec3 o, vec3 d, vec2 uv) {
+vec3 radiance(vec3 o, vec3 d, vec2 uv, inout vec4 guide, inout vec4 first) {
     vec3 through = vec3(1.0), light = vec3(0.0);
     int bounces = max(int(F.pt.x + 0.5), 1);
     float offset = 0.01 * F.sphere.x;
@@ -25,13 +33,17 @@ vec3 radiance(vec3 o, vec3 d, vec2 uv) {
         float t;
         vec3 n, albedo;
         if (!nearestSurface(o, d, t, n, albedo)) {
-            // The camera sees the background behind the form; bounced rays see the sky.
-            light += through * (k == 0 ? backgroundColor(uv) : skyLight(d));
+            // The camera sees what is behind the form; bounced rays see the sky.
+            light += through * (k == 0 ? sceneBackground(uv) : skyLight(d));
             break;
+        }
+        if (dot(n, d) > 0.0) n = -n;  // the side the ray arrives on
+        if (k == 0) {
+            guide += vec4(n, t);
+            first += vec4(albedo, 1.0);
         }
         if (k == bounces) break;  // the path is cut here
         vec3 p = o + d * t;
-        if (dot(n, d) > 0.0) n = -n;  // the side the ray arrives on
         vec3 front = p + n * offset, back = p - n * offset;
         // The sun, sampled directly: a direction inside its disc. It lights the side it shines
         // on, and through the sheet a share of it lights the other side.
@@ -57,9 +69,9 @@ vec3 radiance(vec3 o, vec3 d, vec2 uv) {
 
 void main() {
     int samples = max(int(F.rt.w + 0.5), 1);
-    float before = F.rt.z;
-    rngInit(uvec2(gl_FragCoord.xy), uint(before) + 1u);
+    rngInit(uvec2(gl_FragCoord.xy), uint(F.rt.z) + 1u);
     vec3 sum = vec3(0.0);
+    vec4 guide = vec4(0.0), first = vec4(0.0);
     for (int s = 0; s < samples; ++s) {
         // A point inside the pixel, and for a lens with an opening, a point on the lens.
         vec2 uv = (gl_FragCoord.xy - 0.5 + vec2(rnd(), rnd())) * F.viewport.zw;
@@ -74,7 +86,10 @@ void main() {
         }
         vec3 o = (F.invView * vec4(originView, 1.0)).xyz;
         vec3 d = normalize(mat3(F.invView) * dirView);
-        sum += radiance(o, d, uv);
+        sum += radiance(o, d, uv, guide, first);
     }
-    outColor = vec4(sum / float(samples), float(samples) / (before + float(samples)));
+    float scale = 1.0 / float(samples);
+    outColor = vec4(sum * scale, 1.0);
+    outGuide = guide * scale;
+    outFirst = first * scale;
 }

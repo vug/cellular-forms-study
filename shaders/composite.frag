@@ -3,6 +3,7 @@
 // by the occlusion, then cell walls, outlines, exposure, tone mapping and the background.
 #include "frame.glsl"
 #include "screen.glsl"
+#include "env.glsl"
 
 layout(set = 0, binding = 1) uniform sampler2D texNormalDepth;
 layout(set = 0, binding = 2) uniform sampler2D texAO;
@@ -105,7 +106,7 @@ void main() {
         vec3 tint = mix(vec3(0.55, 0.75, 1.0), vec3(1.0, 0.82, 0.55), clamp(nd.g / max(nd.r, 1e-6), 0.0, 1.0));
         color = mix(top, tint, glow) + vec3(0.9) * glow * glow * glow * 0.6;
     } else if (nd.w <= 0.0) {
-        color = backgroundColor(vUV);
+        color = sceneBackground(vUV);
     } else {
         vec3 n = normalize(nd.xyz);
         vec4 albedoWall = textureLod(texAlbedo, vUV, 0.0);
@@ -120,10 +121,22 @@ void main() {
         float bands = F.style.w;
         if (bands >= 1.0) ndl = floor(ndl * bands + 0.5) / bands;  // toon shading: the light in steps
         float ambient = F.light.w;
-        // Light from the sky above and the ground below, by the world-space normal.
-        vec3 hemi = mix(F.ground.rgb, F.sky.rgb, 0.5 + 0.5 * (mat3(F.invView) * n).y);
+        // Light from the surroundings, by the world-space normal: the sky above and the ground
+        // below, or the environment map (a blurry level of it stands in for the wide cone a
+        // matt surface gathers light from).
+        vec3 nWorld = mat3(F.invView) * n;
+        vec3 hemi = mix(F.ground.rgb, F.sky.rgb, 0.5 + 0.5 * nWorld.y);
         vec3 v = vec3(0.0, 0.0, 1.0);
         vec3 spec = F.lightColor.rgb * (pow(max(dot(n, normalize(l + v)), 0.0), max(F.material.y, 1.0)) * F.material.x * visible);
+        if (F.env.x > 0.5) {
+            hemi = envLight(nWorld, max(F.misc2.w - 2.0, 0.0));
+            // The surroundings mirrored in the surface, sharper the shinier it is and stronger at
+            // grazing angles.
+            vec3 toPoint = normalize(mat3(F.invView) * viewPos(vUV, nd.w));
+            float level = clamp(F.misc2.w - 0.5 * log2(max(F.material.y, 1.0)) - 1.0, 0.0, F.misc2.w);
+            float grazing = pow(1.0 - max(dot(nWorld, -toPoint), 0.0), 5.0);
+            spec += envLight(reflect(toPoint, nWorld), level) * F.material.x * (0.3 + 0.7 * grazing);
+        }
 
         vec3 lit = albedo * (ambient * hemi * ao + (1.0 - ambient) * F.lightColor.rgb * ndl * mix(1.0, ao, 0.6)) + spec * ao;
         if (drawMode == 3) {

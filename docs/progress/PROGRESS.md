@@ -13,7 +13,7 @@ Newest entries at the bottom. Times are local (America/New_York).
 
 | Milestone | State | Verified how |
 | --- | --- | --- |
-| M1 CPU reference + CLI | in progress | see entries below |
+| M1 CPU reference + CLI | exit criteria observed with GCC in the sandbox (cloud session, 00:20); MSVC run on the PC pending | 100,033 cells, 69 invariant checks ok, checksum identical on 4 reruns incl. 1 thread and a 5-part resume; 28/28 tests |
 | M2 Snapshot viewer (Vulkan 1.4) | exit criteria observed (local session, 00:25) | timed scrub of a 100k-cell run, headless captures, validation layer clean; mouse interaction not tried by hand |
 | M3 CUDA backend | in progress (local session) | |
 | M4 Live viewer | not started | blocked (needs M2 + M3) |
@@ -288,3 +288,89 @@ to know MSVC and GCC even agree on the checksum.
    snapshot, later the live hand-off) trivially safe.
 10. **Captures are supersampled offscreen renders, not window grabs,** so they do not depend on
     the window, the UI or the screen being unlocked.
+
+## 2026-11-21 00:20 · Cloud session: M1 tuned, exit run observed (GCC), preview renderer
+
+Commit `37aa95c`. **Local session: two things changed that affect you**, both before your CUDA
+port, so nothing of yours should need redoing:
+
+1. **Default parameters changed** (`src/core/params.hpp`): `radiusOfInfluence` 1.0 -> 2.0 and
+   `foodMax` 0.004 -> 0.002. Your `runs\m2_default_100k` used the old defaults; the same
+   command now gives the folded form below. Checksums from before this commit no longer apply
+   (`rerun_gives_the_same_checksum` now prints `9b5a22f77cff4b6d` with GCC).
+2. **The cleavage-pair policy takes positions** (`choose_cleavage_pair(s, v, tieHash, pos)` in
+   `topology.cpp`). Degree cost first, exactly as in model.md section 6; ties are then broken
+   by the shortest cleavage links `|a - v| + |b - v|` using the positions computed in the same
+   step, and only exact ties fall back to the hash. Port that function as it is.
+
+**Decisions made unattended (cloud session)**
+
+11. **Geometric tie-break for the cleavage pair** (deviation from "ties by hash" in model.md
+    section 6; still by ring index, never a plane test). Why: with hashed ties the mesh became
+    anisotropic. At 40,046 cells (500 steps per doubling) 10.2% of links were longer than 1.3
+    rest lengths, 1.7% longer than 1.6, the longest 2.54, and the renders showed holes. A
+    cell's long links sat opposite each other, so the sheet needed new cells along that axis
+    and the hash did not put them there. Choosing, among the equally good pairs, the one with
+    the shortest cleavage links inserts the daughter along the stretched direction. Same run
+    after the change: 1.7% longer than 1.3, 0.02% longer than 1.6, longest 1.79, link-length
+    std 0.248 -> 0.160. Degrees are unchanged (4 to 8 in both). Two variants that also relax
+    the degree cost were tried (std 0.149 and 0.148) and not adopted: the gain is small and
+    one of them let degrees reach 9.
+12. **Tuned defaults.** spring 0.15, planar 0.10, bulge 0.10, repulsion 0.10 stay.
+    `radiusOfInfluence = 2.0`: with roi at 1.0 to 1.25 the growing sheet stays a compressed
+    ball (fold ratio 0.95 at 40k cells; mean link 0.83 at the faster food rate); from 1.5 up
+    repulsion also acts between second-ring cells and the sheet buckles into folds (fold ratio
+    0.83 at roi 1.5, 0.69 at 1.75, 0.40 to 0.53 at 2.0), with links back at rest length.
+    `foodMax = 0.002` is model.md's "mean about threshold / 1000"; because a cell keeps half
+    its food when it divides, that is about 500 steps per doubling, not 1,000.
+13. **Initial food is random** in [0, threshold) (hashed), so divisions do not arrive as one
+    synchronised wave. `cf_run --init-food zero` gives the other behaviour.
+14. **Fold ratio and close pairs are proxies.** `fold_ratio` = radius of gyration / radius of
+    the sphere with the same area. `close_pairs` counts cells nearer than 0.5 rest lengths
+    that are more than two links apart. There is no true self-intersection test in M1.
+
+**M1 exit criteria, as observed in the sandbox (GCC 11.4, `-O2`, 2 cores)**
+
+`cf_run --new icosphere:2 --seed 1 --until-cells 100000 --out runs/cloud/m1_a` (defaults):
+
+| | |
+| --- | --- |
+| Result | 100,033 cells at step 4,822, 38.2 s with 2 threads (69.0 s with 1) |
+| Invariant checker | 69 runs (every 100 steps, every snapshot, the end): 0 failures |
+| Checksum | `12cfc7e0294813a9` on 4 runs: 2 threads with output, 1 thread, 2 threads without output, and one run stopped by `--max-seconds 8` and resumed from `latest.cfs` four times |
+| Guards that fired | displacement cap 0, postponed divisions 0, normal fallbacks 0 |
+| Links at 100k | mean 1.033, std 0.133, min 0.20 (fresh daughters), max 2.10 rest lengths |
+| Degrees | 4 to 8 |
+| Shape | fold ratio 0.38; close pairs 0 |
+| Tests | `cf_tests`: 28 of 28 pass |
+
+So "100k cells under uniform food with zero invariant failures, and the same checksum on every
+rerun" holds here. It has **not** been observed with the MSVC build on the PC yet; the status
+table says so. Local session: the command above is the one to rerun (MSVC may give a different
+checksum from GCC; it only has to be the same on every MSVC rerun).
+
+What "working" looks like (model.md section 9), as far as I can judge from the renders: a
+lumpy ball at 500 cells, dimples at 2,000, wrinkles at 8,000, folds at 32,000 and a brain-like
+form at 100,000 whose folds run deep into the interior (cut-away, bottom right).
+
+![growth](img/m1_growth_seed1.png)
+
+![100k, coloured by age](img/m1_100k_age.png)
+
+![run statistics](img/m1_run_stats.png)
+
+The pictures are from `apps/cf_render`, a CPU renderer (ray-sphere impostors with a depth
+buffer, screen-space ambient occlusion, colour by age / food / generation, `--slice` cut-away).
+It reads the same files as the Vulkan viewer and is only a stand-in for a machine with no GPU.
+Plots: `python apps/cf_run/plot_run.py <run dir> <out.png>`.
+
+**Not verified / open**
+
+- MSVC run of the exit command (above). Step time on the PC.
+- No test of forms beyond 100k cells; nothing here says the folds stay free of
+  self-intersection at 1M and more.
+- Only seed 1 was looked at for the default parameters.
+- At 500 cells the form is already lumpier than "a ball": the same repulsion that folds the
+  large sheet also roughens the small one. Slower food (`foodMax` 0.001) is smoother and costs
+  twice the steps.
+- `tests/oracle_compare.py` is run by hand, not by CTest.

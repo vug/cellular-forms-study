@@ -19,6 +19,7 @@ Newest entries at the bottom. Times are local (America/New_York).
 | M4 Live viewer | exit criteria observed (local session, 00:40) | scripted run: parameters changed mid-run, pause, single steps, reset; no frame over 15 ms, 0 validation errors, CUDA and CPU backends. Not tried by hand |
 | M9 Ports | both ports done and verified (local session, 01:20) | Vulkan compute: step-by-step agreement with the CPU over 106 steps, reruns identical. WebGPU: one-step agreement with CPU checkpoints from 162 to 4.4M cells, reruns identical. At 10M cells: CUDA 41, Vulkan 65, WebGPU 75 ms per step |
 | M5 Food sources | exit criterion observed (local session, 01:30) | uniform versus light contrast at 600k cells; CUDA equals CPU with every source on; reaction-diffusion and inherited coordinates not built |
+| Viewer rendering, second round | built (local session, 09:05): sun and sky light with shadows, cell walls, outlines and toon shading, ray-traced occlusion, a path tracer, three more colour modes, the membrane in live mode; a control for every option | every mode rendered headless with the validation layer clean; live captures on CUDA and CPU; the live render data tested against the host. No control was moved by hand |
 | M7 Rendering modes | done (local session, 01:38 and 03:50) | PLY export tested; imported and rendered in Blender 5.2; viewer x-ray, membrane and membrane-with-scattering modes render with validation clean. The scattering is a screen-space approximation |
 | M6 Exploration tools | built and run once (local session, 01:55) | descriptors tested against known shapes; a 320-run MAP-Elites search filled 27 of 48 bins; one form promoted to 1M cells. Picker is a static HTML page |
 | Small forms: batches of steps | growth to 30k cells 1.5 times faster, the stepping of a search 1.28 times, results unchanged (local session, 08:05) | 6 new tests against the CPU reference; the same 60 search runs identical with the old and new build; large forms unchanged. The 2 to 3 times estimated at 03:30 was not reached |
@@ -1486,3 +1487,89 @@ first kernel of the next step would save one launch of nine.
 lines (`gpu_round_trips` and so on); `cf_bench --max-batch <n>` and `--no-lean`;
 `CudaOptions::maxBatch`, `batchMilliseconds`, `leanPipeline`; `CF_BIN_DIR` for
 `scripts/explore.py`, to run a search with the tools of another build.
+
+## 2026-11-21 09:05 · Local session: viewer rendering, second round; three new sections in design.md
+
+Uğur asked for the viewer features I had suggested, for every rendering option to be
+adjustable in ImGui, for design.md to get "not implemented", "later work" and "by others"
+sections, and for the rendering rows of design.md that were not built.
+
+**What was built**
+
+1. **Key light, sky and shadows.** The key light either follows the camera (as before) or is a
+   sun fixed in the world (azimuth, elevation), with a colour and an intensity. It casts a
+   shadow through a shadow map (the cells or the membrane drawn from the light into a depth
+   image, a few rotated taps for a soft edge). The light from the surroundings has a sky and a
+   ground colour. Specular strength and shininess are settings now.
+2. **Cell walls.** The geometry pass writes the cell under every pixel into an integer image;
+   the composite pass draws a line where a neighbouring pixel belongs to another cell. On the
+   membrane a pixel belongs to the nearest of the three cells of its triangle (largest
+   barycentric coordinate, `VK_KHR_fragment_shader_barycentric`), so the walls are the dual of
+   the mesh: tiles of five to seven sides. This is not a true Voronoi diagram.
+3. **Stylized shading.** Outlines where the depth steps, light in a chosen number of steps,
+   a background gradient that can be switched off, five palettes, three tone maps.
+4. **Ray-traced ambient occlusion** (cells mode). One box per cell is written by a compute
+   pass and built into an acceleration structure; fragment shaders trace against it with ray
+   queries and do the exact sphere test themselves. Unlike the screen-space estimate it sees
+   what is hidden or off screen. The structure is rebuilt when the cells or the radius change.
+5. **Path tracer** (a fifth draw mode, the same acceleration structure). Diffuse spheres, the
+   sun with an adjustable angular size (soft shadows), light from the sky, any number of
+   bounces, a lens with an aperture and a focus distance. A few samples per pixel per frame are
+   blended into a running mean that restarts when anything visible changes; headless captures
+   render until the chosen number of samples is reached.
+6. **Three more colour modes**: generation, curvature (the mean curvature of the descriptors,
+   now also as `cell_curvature` in `core/kernels.hpp`) and the morphogen activator, with a
+   blue-white-red palette for signed values.
+7. **Live mode has all of it.** `CudaSim::copy_render_data` now also writes one extra per-cell
+   scalar, the normals and the triangles of the membrane (a count per cell, a running sum, then
+   the indices) straight into Vulkan buffers, so the membrane modes and the new colour modes
+   work on a running simulation. The CPU backend does the same on the host.
+8. **A control for every option**: panels Draw, Colour, Light, Shadows, Ambient occlusion, Cell
+   walls and outlines, Path tracer, Output. The same settings have names on the command line:
+   `cf_view --set name=value` (59 names, `--list-settings`).
+9. **design.md**: the rendering table has a "Built" column; new sections "Not implemented",
+   "Later work by Lomas" and "Work by others", from the web search of this morning.
+
+**Verified**
+
+- Headless renders of a 100k-cell checkpoint with `--validate`, 0 validation errors in each:
+  default look, sun with shadows, ray-traced occlusion, membrane with walls and curvature,
+  outlines with toon shading, path traced (64 samples), x-ray, membrane with scattering and
+  shadows. I looked at every image; the key-light debug view shows the shadow where it should
+  be.
+- Live, CUDA, with `--validate`, 0 errors: membrane with walls coloured by curvature, and
+  cells coloured by the activator with shadows and ray-traced occlusion, both up to 2M cells
+  (frames stayed at the 20 ms pacing). Live on the CPU backend: membrane with curvature.
+- `cf_view --live-selftest --backend cuda --validate`: pass, no frame over 33 ms.
+- `cf_cuda_tests` 33 of 33, one new (`tests/cuda/test_render_data.cpp`): at 63,529 cells the
+  triangles (127,054, each once, same orientation), normals, generation, curvature and
+  activator from the device equal what the host computes. `cf_tests` 55 of 55.
+
+**Not verified, and limits**
+
+- No control was moved by hand. The panels were drawn in every captured window, and every
+  setting was exercised by name from the command line, but not through its slider.
+- In each of the two 468-frame live captures one frame took 61 and 64 ms. The same kind of
+  single slow frame showed up in one self-test run earlier today; I still do not know its
+  cause.
+- Speed of the ray-traced modes was not measured beyond "2M cells live with ray-traced
+  occlusion kept the 20 ms pacing". How long the path tracer needs to look clean was not timed.
+- Ray tracing is against the cells as spheres only: the membrane modes keep screen-space
+  occlusion and are not path traced. Both need a GPU with ray queries; cell walls on the
+  membrane need fragment-shader barycentrics. Without them the options are greyed out or fall
+  back; that path was not run (this GPU has both).
+- With the default share of ambient light (0.55) a shadow is subtle; the pictures below use
+  0.3 to 0.35.
+- Outlines in cells mode also mark the gaps between spheres where a deeper layer shows.
+- The membrane in live mode takes 36 more bytes of GPU memory per cell of capacity and slot
+  (three slots), allocated the first time a membrane mode is chosen.
+- The entries of the two new research sections of design.md come from one web search; the
+  tables say which were read and which were only listed.
+
+![viewer panels](img/r2_viewer_panels.png)
+![sun and shadows](img/r2_sun_shadows.png)
+![ray-traced occlusion](img/r2_traced_occlusion.png)
+![membrane, cell walls, curvature](img/r2_membrane_walls_curvature.png)
+![stylized](img/r2_stylized.png)
+![path traced](img/r2_path_traced.png)
+![activator](img/r2_activator.png)

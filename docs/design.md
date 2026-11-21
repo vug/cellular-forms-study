@@ -247,19 +247,27 @@ folds.
 Baseline: instanced sphere impostors plus screen-space AO. This handles millions of cells at
 interactive rates and reads the folds clearly. The other techniques are modes added on top.
 
-| Technique | Look | Cost at ~5M cells | Notes |
-| --- | --- | --- | --- |
-| Sphere impostors | Solid cells, like the paper | Low | One quad per cell; ray–sphere test in the fragment shader, with correct depth |
-| Screen-space AO (SSAO/GTAO) | Reads the folds; close to the paper's solid renders | Low–medium | The cheapest big win for form readability |
-| Environment light + directional shadow | Studio or outdoor look | Medium | The shadow map can be shared with the light-food source |
-| Order-independent transparency | X-ray density, like Lomas's accumulated renders | Medium | Weighted blended OIT is enough for additive density |
-| Triangle mesh from the rings | A continuous membrane | Low | Faces come free from the rotation system: consecutive ring entries form triangles, de-duplicated by smallest id |
-| Mesh + subsurface scattering | Organic, waxy tissue | Medium to high | Needs smooth normals; the ring normals already exist |
-| Path tracer with sphere primitives | Offline beauty renders | High | Later, and only as a viewer mode tuned to this data |
-| Stylized | Diagram-like, illustrative | Low | Outlines, colour by age, generation, food or curvature |
+| Technique | Look | Cost at ~5M cells | Built | Notes |
+| --- | --- | --- | --- | --- |
+| Sphere impostors | Solid cells, like the paper | Low | Yes (M2) | One quad per cell; ray–sphere test in the fragment shader, with correct depth |
+| Screen-space AO (SSAO/GTAO) | Reads the folds; close to the paper's solid renders | Low–medium | Yes (M2) | At two radii. The cheapest big win for form readability |
+| Ray-traced AO | Occlusion that also knows what is off screen or hidden | Medium | Yes (Nov 21) | Ray queries against one box per cell, with the exact sphere test in the shader. Cells mode only; needs hardware ray tracing |
+| Environment light + directional shadow | Studio or outdoor look | Medium | Yes (Nov 21) | A key light that follows the camera or a sun fixed in the world, with a shadow map; sky and ground colours for the light from the surroundings. Not built: an environment map, and sharing the shadow map with the light-food source |
+| Order-independent transparency | X-ray density, like Lomas's accumulated renders | Medium | Yes (M7) | As additive density, which needs no ordering |
+| Triangle mesh from the rings | A continuous membrane | Low | Yes (M7; live runs since Nov 21) | Faces come free from the rotation system: consecutive ring entries form triangles, de-duplicated by smallest id |
+| Mesh + subsurface scattering | Organic, waxy tissue | Medium to high | Yes (M7) | A screen-space approximation. Needs smooth normals; the ring normals already exist |
+| Cell walls | Cells as tiles with dark seams, like tissue under a microscope | Low | Yes (Nov 21) | Drawn where the cell under a pixel changes. On the membrane a pixel belongs to the nearest of its triangle's three cells: the dual of the mesh, not a true Voronoi diagram |
+| Path tracer with sphere primitives | Offline beauty renders | High | Yes (Nov 21) | A draw mode of the viewer that refines while the view stands still: diffuse spheres, a sun of adjustable size, sky light, a lens with an aperture. The membrane is not path traced |
+| Stylized | Diagram-like, illustrative | Low | Yes (Nov 21) | Outlines from steps in depth, light in a few steps, flat backgrounds; colour by age, generation, food, curvature or morphogen activator |
 
-Colouring by simulation data (age, generation, food, local curvature) is cheap with any technique
-and is the best debugging view, for example to see where divisions are happening.
+Colouring by simulation data (age, birth step, generation, food, curvature, morphogen activator) is
+cheap with any technique and is the best debugging view, for example to see where divisions are
+happening. Curvature needs the rings (a checkpoint or a live run), the activator a state with
+morphogens.
+
+Every rendering option has a control in the viewer's panels and a name on the command line
+(`cf_view --set name=value`, `cf_view --list-settings`), so a look found by hand can be
+reproduced in a headless capture.
 
 **Blender export.** Cells go out as a point cloud (PLY) with a per-point radius and colour
 attributes (age, food, generation), instanced as spheres with Geometry Nodes. The triangle mesh
@@ -364,6 +372,75 @@ be reproduced exactly.
 8. **M8: Model extensions.** Oriented division, per-cell parameters and morphogens first.
 9. **M9: Ports.** Vulkan with async compute, then WebGPU, each benchmarked against CUDA.
 
+## Not implemented (as of Nov 21)
+
+What this document describes or mentions and the code does not have. `docs/progress/PROGRESS.md`
+has the detail and the dates.
+
+| Area | Not implemented | Notes |
+| --- | --- | --- |
+| Food | Inherited coordinates: a field that follows the tissue instead of world space | Reaction–diffusion is built as the morphogens of M8, which can also scale the food |
+| Rendering | An environment map; one shadow map shared by the viewer and the light-food source; path tracing and ray-traced occlusion of the membrane (both trace spheres only); true Voronoi cell walls; a denoiser for the path tracer; stereo or VR | The scattering mode is a screen-space approximation |
+| Model extensions | Growth without division, lineage and differentiation, plasticity, discrete bending energy, a 3D environment, per-cell controllers, topology changes | Seven of the ten rows of "Extending the model". Built: oriented division, per-cell parameters (through a field and through morphogens), morphogens |
+| Exploration | Convex-hull fill ratio (a stand-in exists), image-model embeddings, novelty search, crossover between chosen forms, an interactive picker | The search mutates only; the picker is a static page |
+| Ports | The speed-ups of the CUDA backend (renumbering, the lean pipeline, batches of steps) and the model extensions | The Vulkan compute and WebGPU ports run the base model and do not reach CUDA speed |
+| Speed | One kernel per batch of steps for small forms; a summation order that frees the neighbour search; a faster grid phase | The second changes every checksum |
+| From Lomas's own list (see below) | Other force formulations, external influences (flow, attracting surfaces, fields), cell death and holes, volumetric cells, forms larger than one GPU's memory, a tested path to 3D printing | Not in this document's plan either. The PLY mesh export could feed a printer; that has not been tried |
+
+## Later work by Lomas
+
+What Andy Lomas did after the paper, and what the paper itself lists as future work. Collected
+by a web search on Nov 21; each entry was read on the page linked unless it says otherwise.
+
+**Future work in the paper** (section 8): cell differentiation through per-cell parameters,
+blended by a gradient across the cells or by reaction–diffusion; other formulations of the
+forces between cells; forms beyond one GPU's memory (out of core, or several GPUs); external
+influences added like the repulsion term (fluid flow, attracting and repelling surfaces, fields
+emitted by cells); cell death with changes of topology, including holes; volumetric cells
+(tetrahedra); cell walls rendered as a Voronoi diagram on the GPU; 3D printing. The paper also
+notes that a reaction–diffusion nutrient existed in his framework and was not used for the
+published forms.
+
+| Work | Year | What changed from Cellular Forms | Source |
+| --- | --- | --- | --- |
+| Plantlike Forms | 2014 | Light from above only | https://andylomas.com/plantlikeForms.html |
+| Hybrid Forms | 2015 | More than one cell type; regions with different properties compete for space; over 100M cells | https://andylomas.com/hybridForms.html |
+| Species Explorer | 2016 | A tool for searching the parameter space: random sampling, mutation and cross-breeding, and predictions of his own ratings and categories learned from earlier runs; the engine grew from 12 to more than 30 parameters | https://andylomas.com/extra/andylomas_species_explorer_eva2016.pdf |
+| Morphogenetic Creations | 2016 | Solo exhibition (Watermans) | https://research.gold.ac.uk/id/eprint/25142 |
+| Vase Forms, Mutant Vase Forms | 2017–2019 | Starts from an open cylinder with its edge cells held to two planes; the rest length shrinks every step; vertical, radial and overhang influences on the growth rate; 5 to 20M cells; printed in 3D | https://research.gold.ac.uk/id/eprint/27624/ |
+| On Hybrid Creativity | 2018 | An essay on searching together with a machine; no change to the model | https://research.gold.ac.uk/id/eprint/24888/1/arts-07-00025-v2.pdf |
+| Real-time ray tracing of the forms | 2020 | Sphere primitives in OptiX: ambient occlusion interactive up to 67M cells, a stereo viewer | https://research.gold.ac.uk/id/eprint/28353/ |
+| Deep learning of his ratings (with Jon McCormack) | 2020 | Networks trained on 1,774 rated forms to predict rating and category (abstracts read) | https://github.com/SensiLab/Andy-Lomas-Generative-Art-Dataset |
+| Twitchy Cells | 2024 | Cells with a potential and a threshold: a contracting cell excites its neighbours, giving waves; real time, with sound (abstract read) | https://research.gold.ac.uk/id/eprint/37345/ |
+| Collaborations with Max Cooper | several, 2017 and 2019 among them | Visuals from Cellular, Plantlike and Hybrid Forms and from variants that react to vertical and horizontal influences | https://andylomas.com/collaborations.html |
+
+What this project already shares with that later work: light as a food source, per-cell
+parameters set by a pattern on the sheet, a search over the parameter space with mutation, and
+ray tracing against sphere primitives. What it does not: several cell types, cross-breeding,
+learned predictions of ratings, open starting shapes with constrained edges, excitable cells.
+
+## Work by others
+
+Collected by the same search. "Credits Lomas" means the page says so.
+
+| Who | What | Year | Relation | Source |
+| --- | --- | --- | --- | --- |
+| Michael Fogleman | CellularForms, C++ on the CPU | 2019 | Reimplementation, credits Lomas | https://www.michaelfogleman.com/projects/cellular-forms/ |
+| Sage Jenson | growth, C++ | 2019 | Reimplementation, credits Lomas | https://github.com/mxsage/growth |
+| nshelton | LomasGrowth, a Unity compute shader | 2019 | GPU reimplementation; the author reports that the graph structure was hard on the GPU and broke at size | https://nshelton.github.io/home/growth |
+| luojeffery | Cellular-Forms, Python with GLSL compute shaders | 2025–2026 | GPU reimplementation with at most 6 links per cell and a fixed capacity | https://github.com/luojeffery/Cellular-Forms |
+| JorisGoosen | CellularGrowth, Swift with Metal compute | 2026 | GPU reimplementation | https://github.com/JorisGoosen/CellularGrowth |
+| vug | cellular-forms, Unity | 2021 | Reimplementation, about 750 cells, every pair of cells tested | https://github.com/vug/cellular-forms |
+| Emilie Yu | Interactive differential growth simulation for design | year not confirmed | Cites the paper and compares against a Lomas form | https://em-yu.github.io/media/papers/interactive-diff-growth.pdf |
+| Nervous System | Floraform | 2015 | Similar differential growth of a sheet; the post does not mention Lomas | https://n-e-r-v-o-u-s.com/blog/?p=6721 |
+| Entagma | Differential mesh growth tutorial (Houdini) | 2016 | Similar technique; no mention in the post | https://entagma.com/differential-mesh-growth/ |
+| Anders Hoff | differential-mesh | not recorded | Similar technique; no mention in the README. An essay of his is said to name Cellular Forms; the page could not be opened | README read; link not recorded |
+| Citing papers | 26 works listed by OpenAlex, among them architecture (Klemmt 2019, 2022), a wearable (Bader et al. 2016), printed forms (McCormack and Gambardella 2021) and surveys of artificial-life art | 2016–2024 | Listing only: not read | https://api.openalex.org/works?filter=cites:W2009820789 |
+
+The search did not record how large a form each reimplementation reaches, apart from the two
+notes in the table, so this list says nothing about how they compare with this project in
+scale.
+
 ## Decisions log (Nov 20)
 
 | Decision | Status | Notes |
@@ -395,3 +472,7 @@ be reproduced exactly.
 - Andy Lomas, Cellular Forms (AISB50 paper): https://andylomas.com/extra/andylomas_paper_cellular_forms_aisb50.pdf
 - Kumar et al., Automating the Search for Artificial Life with Foundation Models: https://arxiv.org/abs/2412.17799
 - NVIDIA, CUDA C++ language support: https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/cpp-language-support.html
+- Andy Lomas, Species Explorer (EVA London 2016): https://andylomas.com/extra/andylomas_species_explorer_eva2016.pdf
+- Andy Lomas, Morphogenetic Vase Forms (ALIFE 2019): https://research.gold.ac.uk/id/eprint/27624/
+- Andy Lomas, real-time ray tracing of complex sculptural forms (EVA London 2020): https://research.gold.ac.uk/id/eprint/28353/
+- The other pages of "Later work by Lomas" and "Work by others" are linked in their tables.

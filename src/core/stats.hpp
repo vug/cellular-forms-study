@@ -44,6 +44,18 @@ struct ContactStats {
 };
 ContactStats contact_stats(const State& s, float distance = 0.5f);
 
+// True self-intersection count for the triangle mesh the rings describe: the number of
+// (link, triangle) pairs where the link passes through the triangle's interior and the two
+// share no cell. Two triangles of a mesh intersect exactly when a link of one pierces the
+// other, so 0 means the sheet does not pass through itself. A diagnostic, not an invariant:
+// the model only discourages self-intersection (repulsion), it cannot rule it out.
+struct IntersectionStats {
+    std::uint64_t piercings = 0;       // (link, triangle) pairs
+    std::uint64_t piercingLinks = 0;   // links that pierce at least one triangle
+    std::uint64_t links = 0, triangles = 0;
+};
+IntersectionStats self_intersections(const State& s, unsigned threads = 1);
+
 std::string hex64(std::uint64_t v);
 
 }  // namespace cf

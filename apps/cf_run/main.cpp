@@ -45,6 +45,7 @@ void usage() {
         "  --checkpoint-factor <f>   same for full checkpoints (default 4; 0 = none)\n"
         "  --check-every <k>         run the invariant checker every k steps (default 100; 0 = only at snapshots and the end)\n"
         "  --log-every <k>           CSV log row every k steps (default 50)\n"
+        "  --intersections           count true self-intersections (links piercing triangles) at every snapshot and at the end\n"
         "Other:\n"
         "  --threads <n>             worker threads (default: all cores; never changes the result)\n"
         "  --list-params             print the default parameters and exit\n"
@@ -63,6 +64,7 @@ struct Options {
     double snapshotFactor = 2.0, checkpointFactor = 4.0;
     std::uint64_t checkEvery = 100, logEvery = 50;
     unsigned threads = 0;
+    bool intersections = false;
 };
 
 [[noreturn]] void die(const std::string& message) {
@@ -121,6 +123,7 @@ Options parse(int argc, char** argv) {
         else if (a == "--check-every") o.checkEvery = to_u64(a, value());
         else if (a == "--log-every") o.logEvery = to_u64(a, value());
         else if (a == "--threads") o.threads = static_cast<unsigned>(to_u64(a, value()));
+        else if (a == "--intersections") o.intersections = true;
         else die("unknown option '" + a + "' (try --help)");
     }
     if (o.newSpec.empty() == o.loadPath.empty()) die("give exactly one of --new or --load (try --help)");
@@ -146,7 +149,7 @@ std::string file_name(const char* prefix, const cf::State& s) {
     return buf;
 }
 
-std::string json_stats(const cf::State& s, const cf::CheckResult& check, const std::string& file) {
+std::string json_stats(const cf::State& s, const cf::CheckResult& check, const std::string& file, bool intersections, unsigned threads) {
     const cf::LinkStats link = cf::link_stats(s);
     const cf::DegreeStats deg = cf::degree_stats(s);
     const cf::ShapeStats shape = cf::shape_stats(s);
@@ -163,7 +166,12 @@ std::string json_stats(const cf::State& s, const cf::CheckResult& check, const s
       << shape.boundsMax.x << "," << shape.boundsMax.y << "," << shape.boundsMax.z << "],\"radius_of_gyration\":" << shape.radiusOfGyration
       << ",\"fold_ratio\":" << cf::fold_ratio(s, link, shape);
     const cf::ContactStats contact = cf::contact_stats(s);
-    o << ",\"close_pairs\":" << contact.closePairs << ",\"close_min_distance\":" << contact.minDistance << "}";
+    o << ",\"close_pairs\":" << contact.closePairs << ",\"close_min_distance\":" << contact.minDistance;
+    if (intersections) {
+        const cf::IntersectionStats x = cf::self_intersections(s, threads);
+        o << ",\"piercings\":" << x.piercings << ",\"piercing_links\":" << x.piercingLinks << ",\"links\":" << x.links << ",\"triangles\":" << x.triangles;
+    }
+    o << "}";
     return o.str();
 }
 
@@ -258,7 +266,7 @@ int main(int argc, char** argv) {
             if (!force && fs::exists(out / name)) return;
             const cf::CheckResult c = cf::check_invariants(sim.state());
             ++checks;
-            stats << json_stats(sim.state(), c, name) << "\n";
+            stats << json_stats(sim.state(), c, name, opt.intersections, sim.threads()) << "\n";
             stats.flush();
             writer.submit(out / name, cf::encode_snapshot(sim.state()));
             ++snapshots;
@@ -376,6 +384,11 @@ int main(int argc, char** argv) {
             std::printf("link_std=%.5f\nradius_of_gyration=%.3f\nfold_ratio=%.4f\nclose_pairs=%llu\nclose_min_distance=%.4f\n", cf::link_stats(s, 1).stddev,
                         shape.radiusOfGyration, cf::fold_ratio(s, link, shape), static_cast<unsigned long long>(contact.closePairs),
                         static_cast<double>(contact.minDistance));
+        }
+        if (opt.intersections) {
+            const cf::IntersectionStats x = cf::self_intersections(s, sim.threads());
+            std::printf("piercings=%llu\npiercing_links=%llu\nlinks=%llu\ntriangles=%llu\n", static_cast<unsigned long long>(x.piercings),
+                        static_cast<unsigned long long>(x.piercingLinks), static_cast<unsigned long long>(x.links), static_cast<unsigned long long>(x.triangles));
         }
         std::printf("invariant_checks=%llu\ninvariants=%s\n", static_cast<unsigned long long>(checks), finalOk ? "ok" : "BROKEN");
         std::printf("snapshots_written=%llu\ncheckpoints_written=%llu\n", static_cast<unsigned long long>(snapshots), static_cast<unsigned long long>(checkpoints));

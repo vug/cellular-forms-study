@@ -245,7 +245,7 @@ int main(int argc, char** argv) {
         }
 
         // ---- splat: exact ray-sphere hit per pixel, nearest wins
-        const std::size_t pixels = static_cast<std::size_t>(W) * H;
+        const std::size_t pixels = static_cast<std::size_t>(W) * static_cast<std::size_t>(H);
         const float inf = std::numeric_limits<float>::infinity();
         std::vector<float> depth(pixels, inf);  // distance along the ray
         std::vector<Vec3> normal(pixels);
@@ -270,7 +270,7 @@ int main(int argc, char** argv) {
                         const float disc = b * b - cc;
                         if (disc < 0.0f) continue;
                         const float t = b - std::sqrt(disc);
-                        const std::size_t idx = static_cast<std::size_t>(py) * W + static_cast<std::size_t>(px);
+                        const std::size_t idx = static_cast<std::size_t>(py) * static_cast<std::size_t>(W) + static_cast<std::size_t>(px);
                         if (t < depth[idx]) {
                             depth[idx] = t;
                             normal[idx] = (d * t - c) * (1.0f / radius);
@@ -323,7 +323,7 @@ int main(int argc, char** argv) {
         cf::parallel_for(static_cast<std::uint32_t>(H), threads, [&](std::uint32_t y0, std::uint32_t y1, unsigned) {
             for (std::uint32_t py = y0; py < y1; ++py) {
                 for (int px = 0; px < W; ++px) {
-                    const std::size_t idx = static_cast<std::size_t>(py) * W + static_cast<std::size_t>(px);
+                    const std::size_t idx = static_cast<std::size_t>(py) * static_cast<std::size_t>(W) + static_cast<std::size_t>(px);
                     Rgb out = lerp(bgTop, bgBottom, static_cast<float>(py) / static_cast<float>(H - 1));
                     if (ident[idx] != cf::kInvalid) {
                         const Vec3 d = cf::unit_or_zero(Vec3{(static_cast<float>(px) + 0.5f - cxp) / fpx, -(static_cast<float>(py) + 0.5f - cyp) / fpx, 1.0f});
@@ -344,7 +344,7 @@ int main(int argc, char** argv) {
                                 if (S.z <= 1e-3f) continue;
                                 const int qx = static_cast<int>(cxp + S.x / S.z * fpx), qy = static_cast<int>(cyp - S.y / S.z * fpx);
                                 if (qx < 0 || qy < 0 || qx >= W || qy >= H) continue;
-                                const std::size_t q = static_cast<std::size_t>(qy) * W + static_cast<std::size_t>(qx);
+                                const std::size_t q = static_cast<std::size_t>(qy) * static_cast<std::size_t>(W) + static_cast<std::size_t>(qx);
                                 const float sampleDist = cf::length(S);
                                 const float gap = sampleDist - depth[q];  // > 0: something is in front of the sample
                                 if (gap > 0.02f * aoRadius) occluded += gap < 2.0f * aoRadius ? 1.0f : aoRadius / gap;  // fade for far occluders
@@ -369,19 +369,19 @@ int main(int argc, char** argv) {
         });
 
         // ---- downsample and encode
-        std::vector<unsigned char> rgb(static_cast<std::size_t>(opt.width) * opt.height * 3);
+        std::vector<unsigned char> rgb(static_cast<std::size_t>(opt.width) * static_cast<std::size_t>(opt.height) * 3);
         const float invArea = 1.0f / static_cast<float>(opt.ssaa * opt.ssaa);
         for (int y = 0; y < opt.height; ++y) {
             for (int x = 0; x < opt.width; ++x) {
                 float acc[3] = {0.0f, 0.0f, 0.0f};
                 for (int j = 0; j < opt.ssaa; ++j)
                     for (int i = 0; i < opt.ssaa; ++i) {
-                        const std::size_t idx = (static_cast<std::size_t>(y * opt.ssaa + j) * W + static_cast<std::size_t>(x * opt.ssaa + i)) * 3;
+                        const std::size_t idx = (static_cast<std::size_t>(y * opt.ssaa + j) * static_cast<std::size_t>(W) + static_cast<std::size_t>(x * opt.ssaa + i)) * 3;
                         acc[0] += lin[idx];
                         acc[1] += lin[idx + 1];
                         acc[2] += lin[idx + 2];
                     }
-                const std::size_t o = (static_cast<std::size_t>(y) * opt.width + static_cast<std::size_t>(x)) * 3;
+                const std::size_t o = (static_cast<std::size_t>(y) * static_cast<std::size_t>(opt.width) + static_cast<std::size_t>(x)) * 3;
                 rgb[o] = to_srgb8(acc[0] * invArea);
                 rgb[o + 1] = to_srgb8(acc[1] * invArea);
                 rgb[o + 2] = to_srgb8(acc[2] * invArea);

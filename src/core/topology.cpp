@@ -19,7 +19,7 @@ State state_from_faces(const std::vector<Vec3>& positions,
     // For every cell v, each incident face (v, a, b) says: in ring(v), a is followed by b.
     std::vector<std::vector<std::pair<std::uint32_t, std::uint32_t>>> next(n);
     for (const auto& f : faces) {
-        for (int c = 0; c < 3; ++c) {
+        for (std::size_t c = 0; c < 3; ++c) {
             const std::uint32_t v = f[c], a = f[(c + 1) % 3], b = f[(c + 2) % 3];
             if (v >= n || a >= n || b >= n) throw std::runtime_error("state_from_faces: face index out of range");
             if (v == a || a == b || v == b) throw std::runtime_error("state_from_faces: degenerate face");
@@ -138,7 +138,7 @@ State make_icosphere(int level, const Params& params) {
     double sum = 0.0;
     std::size_t count = 0;
     for (const auto& tri : f) {
-        for (int c = 0; c < 3; ++c) {
+        for (std::size_t c = 0; c < 3; ++c) {
             const D3 a = v[tri[c]], b = v[tri[(c + 1) % 3]];
             sum += std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z));
             ++count;

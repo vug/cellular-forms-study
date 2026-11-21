@@ -6,6 +6,7 @@
 
 #include "core/kernels.hpp"
 #include "core/sim_cpu.hpp"
+#include "core/stats.hpp"
 #include "core/topology.hpp"
 #include "test.hpp"
 #include "test_util.hpp"
@@ -415,4 +416,54 @@ CF_TEST(growth_keeps_link_lengths_near_rest_length) {
     CF_CHECK(sd < 0.2);
     CF_CHECK(longFraction < 0.005);
     CF_CHECK(maxDeg <= 10u);
+}
+
+// Golden run: a small fixed run whose checksum is stored here. It changes only when the model
+// changes (then update the constant on purpose and say so in PROGRESS.md) or when a compiler
+// produces different floating-point results. GCC 11/13, Clang 18 and MSVC 19.5x agree on x64
+// because the step uses only +, -, *, /, sqrt and floor, with contraction (FMA) switched off.
+CF_TEST(golden_run_checksum_is_unchanged) {
+    Params p;  // defaults
+    CpuSim sim(start(2, p, 20261120u), 2);
+    for (int k = 0; k < 1500; ++k) {
+        const StepReport r = sim.step();
+        CF_CHECK_MSG(r.ok(), r.message);
+    }
+    require_ok(sim.state(), "golden run");
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(checksum(sim.state())));
+    cftest::note(std::string("checksum ") + buf + ", " + std::to_string(sim.cell_count()) + " cells at step 1500");
+    CF_CHECK_EQ(sim.cell_count(), 984u);
+    CF_CHECK_MSG(checksum(sim.state()) == 0x38d1abeb51663ef6ull, "golden checksum changed: got " << buf);
+}
+
+// The self-intersection counter: 0 on clean meshes, > 0 when a cell is pushed through the far
+// side of the sheet, and the same for any thread count.
+CF_TEST(self_intersection_counter_finds_piercings) {
+    Params p;
+    State s = make_icosphere(4, p);  // 2,562 cells
+    const IntersectionStats clean = self_intersections(s, 1);
+    CF_CHECK_EQ(clean.piercings, 0u);
+    CF_CHECK_EQ(clean.links, static_cast<std::uint64_t>(3u * s.n - 6u));      // E = 3V - 6
+    CF_CHECK_EQ(clean.triangles, static_cast<std::uint64_t>(2u * s.n - 4u));  // F = 2V - 4
+
+    // Push cell 0 straight through the sphere to just outside the opposite side: its links now
+    // cross the far wall.
+    State bad = s;
+    bad.pos[0] = bad.pos[0] * -1.05f;
+    const IntersectionStats hit = self_intersections(bad, 1);
+    CF_CHECK(hit.piercings >= static_cast<std::uint64_t>(bad.deg[0]));
+    CF_CHECK(hit.piercingLinks >= 1u && hit.piercingLinks <= hit.piercings);
+    CF_CHECK(check_invariants(bad).ok());  // topology is untouched: the checker cannot see this
+    const IntersectionStats hit3 = self_intersections(bad, 3);
+    CF_CHECK_EQ(hit3.piercings, hit.piercings);
+    CF_CHECK_EQ(hit3.piercingLinks, hit.piercingLinks);
+    cftest::note(std::to_string(hit.piercings) + " piercings by " + std::to_string(hit.piercingLinks) + " links after pushing one cell through");
+
+    // A grown form with the default parameters does not pass through itself.
+    CpuSim sim(start(2, p, 1), 2);
+    while (sim.cell_count() < 6000u) CF_CHECK(sim.step().ok());
+    const IntersectionStats grown = self_intersections(sim.state(), 2);
+    cftest::note("default growth to " + std::to_string(sim.cell_count()) + " cells: " + std::to_string(grown.piercings) + " piercings");
+    CF_CHECK_EQ(grown.piercings, 0u);
 }

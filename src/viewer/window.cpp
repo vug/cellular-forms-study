@@ -115,7 +115,7 @@ private:
     char envFileInput_[512] = {};  // the text box of the environment image file
     std::vector<std::string> envFiles_;  // the images in assets/hdri
     bool envFilesListed_ = false;
-    int materialIndex_ = 0;            // the material picked in the library
+    int materialIndex_ = -1;           // the material picked in the library (-1: not looked up yet)
     bool materialWithColor_ = true;    // applying it also sets the colour that goes with it
     std::uint64_t frameCounter_ = 0;
     bool saveRequested_ = false;
@@ -599,7 +599,7 @@ void Window::buildUi() {
         ImGui::SliderFloat("cell radius", &settings_.sphereRadius, 0.1f, 1.5f);
         ImGui::SliderFloat("smallest cell", &settings_.minPixelRadius, 0.2f, 3.0f, "%.1f px");
         if (meshMode) {
-            ImGui::SliderInt("membrane smoothing", &settings_.meshSmooth, 1, 6, settings_.meshSmooth == 1 ? "off (flat triangles)" : "%d segments per edge");
+            ImGui::SliderInt("smoothing", &settings_.meshSmooth, 1, 6, settings_.meshSmooth == 1 ? "off (flat triangles)" : "%d segments per edge");
             if (sc.buffers.index && renderer_->membraneSegments() < std::clamp(settings_.meshSmooth, 1, 8))
                 ImGui::TextDisabled("this form is large: %d used", renderer_->membraneSegments());
         }
@@ -632,6 +632,7 @@ void Window::buildUi() {
     if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
         // The library: pick one, apply it, then change any part of it below.
         const std::vector<Material>& library = materials();
+        if (materialIndex_ < 0) materialIndex_ = matchMaterial(settings_);  // the one the command line chose, if any
         materialIndex_ = std::clamp(materialIndex_, 0, static_cast<int>(library.size()) - 1);
         if (ImGui::BeginCombo("library", library[static_cast<size_t>(materialIndex_)].name)) {
             for (int i = 0; i < static_cast<int>(library.size()); ++i) {
@@ -658,15 +659,15 @@ void Window::buildUi() {
         ImGui::SeparatorText("light under the surface");
         ImGui::SliderFloat("subsurface", &settings_.subsurface, 0.0f, 1.0f);
         ImGui::SliderFloat("scatter radius", &settings_.sssRadius, 0.0f, 8.0f, "%.2f");
-        ImGui::ColorEdit3("reach of red, green, blue", settings_.sssColor);
-        ImGui::SliderFloat("light through the sheet", &settings_.translucency, 0.0f, 0.95f);
-        ImGui::SliderFloat("depth it gets through", &settings_.transDepth, 0.2f, 20.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+        ImGui::ColorEdit3("reach per colour", settings_.sssColor);
+        ImGui::SliderFloat("light through", &settings_.translucency, 0.0f, 0.95f);
+        ImGui::SliderFloat("its depth", &settings_.transDepth, 0.2f, 20.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
 
         ImGui::SeparatorText("glow");
         ImGui::SliderFloat("emission", &settings_.emission, 0.0f, 12.0f, "%.2f");
         ImGui::ColorEdit3("glow colour", settings_.emissionColor);
-        ImGui::SliderFloat("own colour .. glow colour", &settings_.emissionTint, 0.0f, 1.0f);
-        ImGui::Checkbox("glowing cells light their neighbours", &settings_.emissionLights);
+        ImGui::SliderFloat("glow colour share", &settings_.emissionTint, 0.0f, 1.0f);
+        ImGui::Checkbox("glow lights the neighbours", &settings_.emissionLights);
         if (settings_.emissionLights && settings_.emission > 0.0f && !canTrace && !pathMode) ImGui::TextDisabled("needs ray tracing, which this GPU does not have");
 
         // Any of four parts of the material can follow a property of the cells.
@@ -685,7 +686,7 @@ void Window::buildUi() {
                 }
                 ImGui::SetNextItemWidth(150 * ImGui::GetStyle().FontScaleDpi);
                 float window[2] = {settings_.modFrom[c], settings_.modTo[c]};
-                if (ImGui::SliderFloat2("over this part of its range", window, 0.0f, 1.0f, "%.2f")) {
+                if (ImGui::SliderFloat2("part of its range", window, 0.0f, 1.0f, "%.2f")) {
                     settings_.modFrom[c] = window[0];
                     settings_.modTo[c] = window[1];
                 }

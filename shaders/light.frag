@@ -61,6 +61,14 @@ vec2 simLight(vec3 p) {
     return vec2(mix(1.0, behind > 0.0 ? 0.0 : 1.0, F.lightColor.a), max(behind, 0.0));
 }
 
+// Light bounces between the walls of a crease, so a crease in a bright material is less dark
+// than the occlusion alone says, and takes on the colour of the material (the fit of Jimenez
+// et al., "Practical real-time strategies for accurate indirect occlusion", 2016).
+vec3 bounced(float open, vec3 albedo) {
+    vec3 a = 2.0404 * albedo - 0.3324, b = -4.7951 * albedo + 0.6417, c = 2.7552 * albedo + 0.6903;
+    return max(vec3(open), ((open * a + b) * open + c) * open);
+}
+
 void main() {
     vec4 nd = textureLod(texNormalDepth, vUV, 0.0);
     int drawMode = int(F.misc.z + 0.5);
@@ -77,6 +85,10 @@ void main() {
     vec4 material = textureLod(texMaterial, vUV, 0.0);
     vec4 gather = textureLod(texGather, vUV, 0.0);
     float open = gather.a;
+    // In a scattering material a crease is not simply dark: light gets into it under the
+    // surface, the colours that travel furthest most. So the occlusion is weaker for those,
+    // and a crease in skin turns warm instead of grey.
+    vec3 openMatt = pow(bounced(open, albedo), vec3(1.0) - 0.8 * material.b * F.matSssColor.rgb);
     float ndv = max(dot(n, v), 1e-3);
 
     // --- the key light
@@ -93,7 +105,7 @@ void main() {
     float bands = F.style.w;
     if (bands >= 1.0) ndl = floor(ndl * bands + 0.5) / bands;  // toon shading: the light in steps
     vec3 keyColor = (1.0 - F.light.w) * F.lightColor.rgb;
-    vec3 keyMatt = keyColor * (ndl * max(vec3(key.x), through) + max(-facing, 0.0) * through) * mix(1.0, open, 0.6);
+    vec3 keyMatt = keyColor * (ndl * max(vec3(key.x), through) + max(-facing, 0.0) * through) * mix(vec3(1.0), openMatt, 0.6);
 
     // --- light from the surroundings: the sky above and the ground below, or the environment
     // map (a blurry level of it stands in for the wide cone a matt surface gathers light from),
@@ -111,7 +123,7 @@ void main() {
     vec3 f0 = baseReflectance(albedo);
     vec3 mirrorShare = f0 + (max(vec3(1.0 - material.g), f0) - f0) * pow(1.0 - ndv, 5.0);
 
-    outLight = vec4(keyMatt + F.light.w * around * open + gather.rgb, 1.0);
+    outLight = vec4(keyMatt + F.light.w * around * openMatt + gather.rgb, 1.0);
     vec3 direct = keyColor * key.x * highlight(n, v, l, f0, alphaOf(material.g)) * mix(1.0, open, 0.6);
     direct += F.light.w * mirrored * mirrorShare * open;
     direct += cellEmission(albedo, material.r);

@@ -1094,14 +1094,16 @@ void Renderer::ensureFineBuffers(uint32_t triangles, int segments, bool withInde
     if (growPoints) {
         ctx_.destroy(fine_.pos);
         ctx_.destroy(fine_.normal);
-        fine_.points = points + points / 4 + 4096;
+        // Half as much again, so a growing form asks for new buffers rarely (each time is a
+        // pause of some milliseconds), but never more than the largest refined membrane needs.
+        fine_.points = std::min<uint64_t>(points + points / 2 + 4096, std::max<uint64_t>(points, kMostFineTriangles * 3 / 2 + 4096));
         fine_.pos = ctx_.createBuffer(fine_.points * 3 * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | traced, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         fine_.normal = ctx_.createBuffer(fine_.points * 3 * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         fine_.version = ~uint64_t{0};
     }
     if (growIndex) {
         ctx_.destroy(fine_.index);
-        fine_.triangles = small + small / 4 + 4096;
+        fine_.triangles = std::min<uint64_t>(small + small / 2 + 4096, std::max<uint64_t>(small, kMostFineTriangles + 4096));
         fine_.index = ctx_.createBuffer(fine_.triangles * 3 * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | traced, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         fine_.indexSegments = 0;
     }

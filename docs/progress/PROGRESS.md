@@ -19,6 +19,7 @@ Newest entries at the bottom. Times are local (America/New_York).
 | M4 Live viewer | exit criteria observed (local session, 00:40) | scripted run: parameters changed mid-run, pause, single steps, reset; no frame over 15 ms, 0 validation errors, CUDA and CPU backends. Not tried by hand |
 | M9 Ports | both ports done and verified (local session, 01:20) | Vulkan compute: step-by-step agreement with the CPU over 106 steps, reruns identical. WebGPU: one-step agreement with CPU checkpoints from 162 to 4.4M cells, reruns identical. At 10M cells: CUDA 41, Vulkan 65, WebGPU 75 ms per step |
 | M5 Food sources | exit criterion observed (local session, 01:30) | uniform versus light contrast at 600k cells; CUDA equals CPU with every source on; reaction-diffusion and inherited coordinates not built |
+| Viewer rendering, fourth round | built (local session, 11:20): a material shared by the raster modes and the path tracer, with a library of fourteen (skin among them); subsurface scattering, light through the sheet, emissive cells, depth of field, anti-aliasing, bloom; cell properties drive the material; the membrane as smooth patches; six environment maps, sampled by brightness in the path tracer | 40 modes rendered headless with validation and synchronization checks clean, tests 33 of 33 and 55 of 55, frame times measured up to 8.2M cells, the skin compared with a Blender render. Live self-test to 2M cells: passes without the validation layer; with it, two of five runs had one frame of about 50 ms (cause not found). Three defects found and fixed on the way. No control was moved by hand |
 | Viewer rendering, third round | built (local session, 09:45): ray tracing of the membrane, Voronoi walls, a denoiser, an environment map, stereo, the simulation's own light map | 15 modes rendered headless with the validation layer clean, live captures on both backends, the fallbacks without ray tracing run, frame times measured up to 10M cells. No control was moved by hand; no headset |
 | Viewer rendering, second round | built (local session, 09:05): sun and sky light with shadows, cell walls, outlines and toon shading, ray-traced occlusion, a path tracer, three more colour modes, the membrane in live mode; a control for every option | every mode rendered headless with the validation layer clean; live captures on CUDA and CPU; the live render data tested against the host. No control was moved by hand |
 | M7 Rendering modes | done (local session, 01:38 and 03:50) | PLY export tested; imported and rendered in Blender 5.2; viewer x-ray, membrane and membrane-with-scattering modes render with validation clean. The scattering is a screen-space approximation |
@@ -1677,3 +1678,183 @@ the simulation), 0.78 ms as path-traced membrane (worst 7.30 ms).
 ![stereo, side by side](img/r3_stereo_side_by_side.png)
 ![stereo, red and cyan](img/r3_stereo_red_cyan.png)
 ![the simulation's light map](img/r3_simulation_light_map.png)
+
+## 2026-11-21 11:20 · Local session: viewer rendering, fourth round (materials, skin, glow, lens, anti-aliasing, smooth membrane)
+
+Uğur asked for: environment maps from Poly Haven (night, indoor or abstract ones); a membrane
+that does not look low-poly; anti-aliasing; subsurface scattering that shows more, with a
+skin-like material; a library of materials; cell properties as inputs to shading parameters;
+emissive cells (food as one input); translucency; depth of field. All of it in the raster modes
+and in the path tracer. Headset support was set aside for later.
+
+**The two questions**
+
+- *Are the normals computed from the surface?* They are the area-weighted normal of each cell's
+  ring of neighbours, which follows the surface. But the viewer was drawing the normals the
+  simulation keeps, and those are from before the last move; a cell born in the last step
+  still has its parent's. Measured on five saved checkpoints (16k to 400k cells): 0.2 to 0.3 %
+  of the cells had a stored normal more than 6 degrees off, the worst between 32 and 154
+  degrees. That gave stray specks, not the faceted look. The faceted look came from drawing one
+  flat triangle between three cells: a silhouette made of straight pieces, and highlights
+  interpolated across large flat faces. Both are fixed (below).
+- *Was there anti-aliasing?* Captures were supersampled 2 x 2; the window had none; the path
+  tracer jittered its samples. Now all three have it (below).
+
+**What was built**
+
+1. **Environment maps.** Six 1k maps from Poly Haven (CC0) in `assets/hdri`: satara_night and
+   shanghai_bund (night), studio_small_08 and wooden_studio_10 (indoor), fireplace and
+   neon_photostudio (coloured lights). The Environment panel lists them; `--env satara_night`
+   finds a map by the start of its name. The path tracer now picks directions where the map is
+   bright (tables made on the CPU from a copy of the map about 256 texels across), for the
+   matt light and, sharing the credit with mirrored rays, for highlights. Without this a night
+   scene with a few lamps stayed speckled.
+2. **A smooth membrane.** A compute pass turns every triangle into a curved patch through its
+   three cells and their normals (a point-normal triangle), 1 to 6 segments per edge (default
+   3). Points on an edge are computed from its two cells in a fixed order, so neighbouring
+   patches meet exactly. The G-buffer, the shadow map and the ray tracing structure all use the
+   patches. Forms with more than 12 million small triangles get fewer segments; with one
+   segment the old flat path is used and no extra memory. The normals are now computed from
+   the current positions when the simulation publishes a frame (a CUDA kernel, and the same
+   function on the CPU path and for files).
+3. **One material for all modes.** Roughness, metal, highlight strength, sheen, subsurface
+   amount and radius with a reach per colour, light through the sheet and its depth, emission
+   with its colour. The raster modes got a material target in the G-buffer and a light pass
+   with microfacet highlights; the path tracer got the same model with highlights sampled from
+   the visible microfacets.
+4. **Subsurface scattering that shows.** Raster: the matt light is written apart from the
+   highlights, then blurred across and down over the scatter radius in world units, red
+   furthest, with differences in depth counted as distance. A scattering material is lit a
+   little past the edge of the light, and its creases stay warm: the occlusion is weaker for
+   the colours that travel furthest, and light bouncing between the walls of a crease is
+   accounted for (the fit of Jimenez et al. 2016). It works on the cells as spheres too. Path
+   tracer: the light leaves at a point picked around where it entered (a short ray drops it
+   back onto the surface), weighted so that the three colours spread by their own distances.
+5. **Light through the sheet.** Raster: from the shadow map, by how far behind the first lit
+   surface the point lies (the shadow map is drawn for this even with shadows off). Path
+   tracer: a share of the paths crosses the sheet, tinted.
+6. **Cell properties drive the material.** Any of age, food, birth step, generation,
+   curvature and activator can drive emission, roughness, subsurface or translucency: from a
+   value at the low end to a value at the high end, over a chosen part of the property's
+   range (so only the cells that hold the most food glow, say). The simulation now publishes
+   generation, curvature and activator together, so no mode has to ask for one of them.
+7. **Emissive cells.** Emission strength, colour, and how much of the glow is the cell's own
+   colour. Glowing cells light their neighbours: in the raster modes by a few rays per pixel
+   (with ray tracing; the same pass gives the occlusion), in the path tracer as light sources.
+   Bloom spreads what is brighter than the screen can show.
+8. **Depth of field.** One lens for both: its opening and the distance in focus (by hand, or a
+   position between the near and the far side of the form). Raster: a gather blur by depth.
+   Path tracer: rays through the lens.
+9. **Anti-aliasing.** A fast edge-smoothing pass on every frame. While the view stands still,
+   frames drawn a fraction of a pixel apart and with fresh noise are averaged (32 by default),
+   which also takes the noise out of soft shadows, occlusion, scattering and the lens blur;
+   after that the view is only shown, not drawn again. A render scale from 0.5 to 2 for
+   supersampling. Headless captures draw all the frames before they write the image. While a
+   live simulation runs the averaging waits, because it would restart with every published
+   step.
+10. **A material library.** Fourteen materials: clay, skin, tissue, wax, jade, porcelain,
+    pearl, rubber, gold, chrome, copper patina (rougher where the surface curves in),
+    bioluminescent (glow by food), ember (the youngest cells glow), growth light (glow by
+    activator). In the Material panel, or `--material skin`; `--set materialOnly=wax` keeps
+    the colours of the cells. Every part can be changed after applying one.
+11. **Output.** A soft tone curve is the new default: unchanged up to 0.8, eased above, so
+    highlights and glow no longer clip to flat colour. The old behaviour is `toneMap=0`.
+
+New panels: Material, Lens, Anti-aliasing; the Environment panel lists the maps; Output has
+bloom and two more views (material, matt light). 111 names for `--set` now.
+
+**Blender as reference.** I exported the membrane of a 100k-cell form, rendered it in Cycles
+with a skin shader (subsurface weight 1, radius 1 : 0.36 : 0.18, scale 2.2, the same base
+colour) and compared. Two things in the reference were missing in the first version of the
+viewer's skin: creases that stay bright and warm, and a base colour that is not washed out.
+The crease lighting of item 4 and a darker base colour came from that comparison. The
+viewer's raster skin is still a little paler in deep creases than the reference.
+
+**Defects found on the way, and fixed**
+
+- *Black squares in a path-traced image of gold spheres.* One pixel was not a number and the
+  denoiser spread it. The cause: the random number function turned a 32-bit integer into a
+  float, which rounds the top 128 values up to exactly 1.0. For a pure metal the path then
+  took the matt branch with a probability of zero and divided zero by zero, about once in
+  thirty million samples. The generator now uses 24 bits (never 1), and a pure metal never
+  takes the matt branch. It took a long search: markers written into the image were being
+  hidden by the dither of the tone mapping pass.
+- *A missing barrier.* The two builds of the ray tracing structure share one scratch buffer
+  and the barrier between them covered the read of the first structure but not the second
+  write to the scratch. Found with the synchronization checks of the validation layer, which
+  `cf_view --validate` now turns on when the environment variable `CF_VK_SYNC` is set. This
+  was in the tree since the second round.
+- *A ray query offered a hit farther than one it already had* (cells as spheres). Fixed by
+  comparing against the nearest hit accepted so far.
+- *Scattering taps off the screen* read the edge pixels and left vertical bands in close-ups.
+  They are skipped now.
+
+**Frame times** (RTX 4090, window of 1600 x 1000, no vsync, mean over 469 frames with every
+frame drawn anew; the membrane with 3 segments per edge)
+
+| | 100k cells | 400k cells | 1M cells | 8.2M cells |
+|---|---|---|---|---|
+| Cells, default | 0.83 ms | | 2.62 ms | 9.17 ms |
+| Cells, skin with shadows (scattering passes) | 1.23 ms | | 4.25 ms | 14.63 ms |
+| Cells, with the lens | 1.49 ms | | | |
+| Cells, glow gathered by rays | 1.78 ms | | | |
+| Cells, default, render scale 2 | 2.67 ms | | | |
+| Membrane, default | 0.88 ms | | | |
+| Membrane, smoothing off | 0.49 ms | | | |
+| Membrane, skin with shadows | 1.25 ms | 2.57 ms | | |
+| Cells, path traced (2 samples per frame) | 1.89 ms | | 2.17 ms | |
+| Membrane as skin, path traced | 2.74 ms | 2.16 ms | | |
+
+The default view costs 0.2 to 0.4 ms more than in the third round (0.62 and 2.18 ms then),
+for the passes that are now always there. A view that stands still is not drawn again once
+its frames are averaged. Empty cells of the table were not measured. Memory was not measured.
+
+**Verified**
+
+- 40 headless renders with `--validate` and the synchronization checks, 0 errors each, on the
+  final build: cells and membrane with every new feature on its own (materials, glow with and
+  without gathered light, lens, render scale 0.5 and 1.5, smoothing 1 and 6, anti-aliasing
+  off), x-ray, walls, stereo, both path-traced modes with several materials and maps, the two
+  new debug views, the fallbacks with `--no-ray-tracing`, and each of the six maps at least
+  once.
+- I looked at the images: skin, wax, jade, chrome, gold, glow by food, ember by age, lens
+  blur, flat against smooth membrane, anti-aliasing off against on, raster skin against the
+  Blender reference.
+- `cf_cuda_tests` 33 of 33 (the render-data test now compares the published normals with
+  normals computed on the host from the same positions: equal to 6 digits), `cf_tests` 55 of 55.
+- `cf_view --live-selftest`, growing to about 2 million cells, 0 validation errors where the
+  layer was on. Without the layer, five runs passed: as cells the worst frame was 7 to 9 ms,
+  as smooth membrane 17 to 19 ms (the frames in which the buffers of the patches are
+  enlarged), as membrane without smoothing 7 ms. With the layer on and the membrane as skin
+  with shadows, three of five runs passed (worst frame 19 to 20 ms) and two had one frame of
+  about 50 ms, which the self-test counts as a stall and a failure. See the limits below.
+- A window capture with the new panels (`img/r4_viewer_panels.png`).
+
+**Not verified, and limits**
+
+- No control was moved by hand, as before. The window was only run by script.
+- One frame of about 50 ms in two of five live self-test runs with the validation layer on
+  (membrane as skin, shadows). I did not find which step causes it. Runs without the layer
+  did not show it, and earlier rounds reported a single long frame of the same kind, so it may
+  not be new; but the patches do add pauses of up to about 19 ms while a live form grows,
+  because their buffers are enlarged in steps of one half.
+- Path-traced skin under a hard sun looks patchier than the raster skin: brown creases, pale
+  tops. Under a soft map (`r4_skin_path_traced.png`) it looks right. Part of it is the default
+  brightness of the path tracer's sun, part is that light through the sheet enters the hollow
+  inside of the form and comes back out tinted. I did not tune this further.
+- The scattering in the path tracer is a single spread per colour found with one probe ray,
+  not a random walk; in the raster modes it is a blur on screen. Neither is exact.
+- The curved patches meet along their edges, but not in curvature: at high zoom slight
+  creases show where triangles meet.
+- Glowing cells light their neighbours in the raster modes only with ray tracing.
+- The averaging of frames needs a still view, so a live run that is not paused has only the
+  fast edge smoothing.
+- Six maps were fetched; I rendered with all six, and looked closely at three.
+- The glow-by-food image depends on how food is spread in the state shown; in the 100k
+  checkpoint most cells hold much food, so most of the form glows.
+
+**Images** in `docs/progress/img/`: `r4_skin.png`, `r4_skin_path_traced.png`, `r4_wax.png`,
+`r4_jade_lens.png`, `r4_chrome.png`, `r4_gold_cells_path_traced.png`, `r4_glow_by_food.png`,
+`r4_glow_path_traced.png`, `r4_ember_by_age.png`, `r4_membrane_flat.png` and
+`r4_membrane_smooth.png` (the same view), `r4_skin_blender_reference.png` (Cycles),
+`r4_viewer_panels.png`.

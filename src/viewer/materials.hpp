@@ -31,6 +31,8 @@ struct Material {
 const std::vector<Material>& materials();
 // Index of the material with this name, or -1.
 int findMaterial(const std::string& name);
+// Index of the material whose surface, scattering and glow the settings have, or -1.
+int matchMaterial(const RenderSettings& settings);
 // Sets the material part of the settings. With `withColor`, also colours every cell in the
 // material's own colour (the "uniform" colour mode).
 void applyMaterial(RenderSettings& settings, const Material& material, bool withColor);

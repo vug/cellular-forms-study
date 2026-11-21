@@ -31,6 +31,15 @@ Newest entries at the bottom. Times are local (America/New_York).
 | Speed investigation | CUDA backend 2 to 4 times faster, results unchanged (local session, 03:30) | 100M cells in 177 s (545 s before); every checksum identical, including all 21 snapshots of the 100M run; renumbering tested on every step against the CPU. More room listed in the entry |
 | M8 Model extensions | the first round of design.md: oriented division, per-cell parameters, morphogens (local session, 01:58 and 03:50) | CUDA equals CPU bit for bit for each, also with renumbering on every step; default model unchanged. Lineage, differentiation and the later rows of the table not built |
 
+## Open for Uğur
+
+(Things that wait for Uğur, kept here at his request.)
+
+- **Rate forms on the atlas page** (asked on Nov 21 to keep it on his list). On the phone:
+  https://claude.ai/artifact/XQTS7vQHE4qMZv6HhtjKvG; on the PC: `python scripts/atlas serve`.
+  It is also the first real test of a rating made on the published page. Once there are
+  ratings: `import-labels`, then breeding from the rated forms and a model of the ratings.
+
 ## Decisions made unattended
 
 (Appended as they are made; each one says why.)

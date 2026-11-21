@@ -1,0 +1,52 @@
+[
+ {
+  "shape": "icosphere:2",
+  "file": "icosphere_2.cfs",
+  "cells": 162
+ },
+ {
+  "shape": "ellipsoid:2:1:1:0.5",
+  "file": "ellipsoid_2_1_1_0p5.cfs",
+  "cells": 162
+ },
+ {
+  "shape": "ellipsoid:2:2:1:1",
+  "file": "ellipsoid_2_2_1_1.cfs",
+  "cells": 162
+ },
+ {
+  "shape": "icosphere:1",
+  "file": "icosphere_1.cfs",
+  "cells": 42
+ },
+ {
+  "shape": "icosphere:3",
+  "file": "icosphere_3.cfs",
+  "cells": 642
+ },
+ {
+  "shape": "noisy:2:0.3:2",
+  "file": "noisy_2_0p3_2.cfs",
+  "cells": 162
+ },
+ {
+  "shape": "icosphere:0",
+  "file": "icosphere_0.cfs",
+  "cells": 12
+ },
+ {
+  "shape": "icosphere:4",
+  "file": "icosphere_4.cfs",
+  "cells": 2562
+ },
+ {
+  "shape": "ellipsoid:2:3:1:1",
+  "file": "ellipsoid_2_3_1_1.cfs",
+  "cells": 162
+ },
+ {
+  "shape": "noisy:3:0.3:2",
+  "file": "noisy_3_0p3_2.cfs",
+  "cells": 642
+ }
+]

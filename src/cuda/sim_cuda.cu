@@ -283,6 +283,7 @@ struct CudaSim::Impl {
 
     bool timing = false;
     CudaPhaseTimes times;
+    Vec3 boundsLo{}, boundsHi{};
 
     // --- asynchronous snapshots
     struct Pinned {
@@ -576,6 +577,15 @@ CudaSim::CudaSim(State initial, const CudaOptions& options) : impl_(std::make_un
     CF_CUDA(cudaMemcpy(m.deg, initial.deg.data(), n * sizeof(std::uint8_t), cudaMemcpyHostToDevice));
     CF_CUDA(cudaMemcpy(m.nbr, initial.nbr.data(), n * kMaxDeg * sizeof(std::uint32_t), cudaMemcpyHostToDevice));
 
+    if (initial.n > 0) {
+        m.boundsLo = m.boundsHi = initial.pos[0];
+        for (std::uint32_t v = 0; v < initial.n; ++v) {
+            const Vec3 q = initial.pos[v];
+            m.boundsLo = Vec3{std::min(m.boundsLo.x, q.x), std::min(m.boundsLo.y, q.y), std::min(m.boundsLo.z, q.z)};
+            m.boundsHi = Vec3{std::max(m.boundsHi.x, q.x), std::max(m.boundsHi.y, q.y), std::max(m.boundsHi.z, q.z)};
+        }
+    }
+
     m.worker = std::thread([&m] { m.worker_loop(); });
 }
 
@@ -610,6 +620,10 @@ std::uint64_t CudaSim::seed() const { return impl_->seed; }
 std::string CudaSim::device_name() const { return impl_->deviceName; }
 void CudaSim::download(State& out) const { impl_->download_into(out); }
 void CudaSim::enable_phase_timing(bool on) { impl_->timing = on; }
+void CudaSim::bounds(Vec3& lo, Vec3& hi) const {
+    lo = impl_->boundsLo;
+    hi = impl_->boundsHi;
+}
 CudaPhaseTimes CudaSim::phase_times() const { return impl_->times; }
 
 CudaMemory CudaSim::memory() const {
@@ -678,6 +692,8 @@ StepReport CudaSim::step() {
         rep.message = failure_message(p, seed, n, step, box.bad, rep.term, "position is not finite");
         return rep;
     }
+    m.boundsLo = box.lo;
+    m.boundsHi = box.hi;
     const Vec3 origin = box.lo;
     const float inv = 1.0f / p.radiusOfInfluence;
     constexpr double kMaxDim = 2097152.0;  // 2^21 cells per axis keeps the linear key below 2^63

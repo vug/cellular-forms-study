@@ -6,6 +6,7 @@
 #include <string>
 
 #include "app.hpp"
+#include "core/params.hpp"
 #include "cloud.hpp"
 
 namespace {
@@ -19,6 +20,15 @@ void usage() {
         "  --snapshot <file>      one state or snapshot file (repeatable)\n"
         "  --demo <level>         an icosphere of the given subdivision level\n"
         "  --demo-steps <n>       run n CPU simulation steps on the demo first\n"
+        "\n"
+        "Live simulation (the viewer drives the simulation; parameters can be changed while it runs):\n"
+        "  --live                 start a live simulation instead of showing files\n"
+        "  --backend <cuda|cpu>   default cuda (shares Vulkan buffers with CUDA); cpu = the reference\n"
+        "  --level <n> --seed <n> start state (icosphere level, random seed)\n"
+        "  --max-cells <n>        capacity of the live buffers (default 2000000)\n"
+        "  --param key=value      any simulation parameter, repeatable\n"
+        "  --paused               start paused;  --step-limit <steps/s>\n"
+        "  --live-selftest        scripted parameter changes, pause, single steps and reset (with --exit-after)\n"
         "\n"
         "Headless capture (no window; works with the screen locked):\n"
         "  --screenshot <out.png> render one frame offscreen and exit\n"
@@ -123,6 +133,29 @@ int main(int argc, char** argv) {
                 o.playFps = static_cast<float>(std::atof(next()));
             } else if (a == "--exit-after") {
                 o.exitAfterFrames = std::atoi(next());
+            } else if (a == "--live") {
+                o.live = true;
+            } else if (a == "--backend") {
+                const std::string v = next();
+                if (v == "cuda") o.liveCuda = true;
+                else if (v == "cpu") o.liveCuda = false;
+                else throw std::runtime_error("--backend expects cuda or cpu");
+            } else if (a == "--level") {
+                o.liveLevel = std::atoi(next());
+            } else if (a == "--seed") {
+                o.liveSeed = std::strtoull(next(), nullptr, 10);
+            } else if (a == "--max-cells") {
+                o.liveParams.maxCells = static_cast<std::uint32_t>(std::strtoull(next(), nullptr, 10));
+            } else if (a == "--param") {
+                const std::string err = cf::apply_text(o.liveParams, next());
+                if (!err.empty()) throw std::runtime_error("--param: " + err);
+            } else if (a == "--paused") {
+                o.livePaused = true;
+            } else if (a == "--step-limit") {
+                o.liveStepLimit = std::atof(next());
+            } else if (a == "--live-selftest") {
+                o.live = true;
+                o.liveSelfTest = true;
             } else if (a == "--window-capture") {
                 o.windowCapture = next();
             } else if (a == "--window-capture-frame") {
@@ -131,7 +164,8 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("unknown option " + a + " (try --help)");
             }
         }
-        if (o.files.empty() && o.demoLevel < 0) o.demoLevel = 4;
+        if (o.files.empty() && o.demoLevel < 0 && !o.live) o.demoLevel = 4;
+        if (o.liveSelfTest && o.exitAfterFrames <= 0) o.exitAfterFrames = 2400;
 
         if (!o.screenshot.empty()) return cfv::runHeadless(o);
         return cfv::runWindowed(o);

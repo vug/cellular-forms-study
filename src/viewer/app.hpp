@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "core/params.hpp"
 #include "math.hpp"
 #include "renderer.hpp"
 
@@ -41,6 +42,18 @@ struct ViewOptions {
     int exitAfterFrames = 0;  // > 0: close after this many frames and print frame-time statistics
     std::filesystem::path windowCapture;  // write the window contents (with the UI) to this PNG ...
     int windowCaptureFrame = 30;          // ... at this frame
+
+    // Live mode: the viewer drives a simulation instead of showing files.
+    bool live = false;
+    bool liveCuda = true;         // CUDA backend (falls back to the CPU reference when it is not available)
+    int liveLevel = 2;            // icosphere level of the start state
+    std::uint64_t liveSeed = 1;
+    cf::Params liveParams;        // maxCells is the capacity of the live buffers
+    bool livePaused = false;      // start paused
+    double liveStepLimit = 0.0;   // steps per second, 0 = unlimited
+    // Scripted run of the live controls (parameter changes, pause, single steps, restart) for
+    // unattended testing; needs exitAfterFrames. The exit code is non-zero if anything broke.
+    bool liveSelfTest = false;
 };
 
 // Renders the requested frame(s) offscreen and writes PNG files. Returns a process exit code.

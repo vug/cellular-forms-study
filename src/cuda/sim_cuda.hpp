@@ -76,6 +76,10 @@ public:
     // Blocks until every snapshot started so far has been delivered and its callback returned.
     void wait_snapshots();
 
+    // Bounding box of the cells: exact after construction, afterwards the box the last step's
+    // grid was built from (so one step behind). For framing a camera, not for analysis.
+    void bounds(Vec3& lo, Vec3& hi) const;
+
     void enable_phase_timing(bool on);
     CudaPhaseTimes phase_times() const;
 

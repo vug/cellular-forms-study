@@ -21,6 +21,7 @@ struct Buffer {
     VkBuffer buffer = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkDeviceSize size = 0;
+    VkDeviceSize allocationSize = 0;  // size of the memory object (>= size)
     void* mapped = nullptr;  // non-null for host-visible buffers created with map = true
 };
 
@@ -69,6 +70,9 @@ public:
     Buffer createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props, bool map = false,
                         bool exportable = false);
     void destroy(Buffer& b);
+    // NT handle of an exportable buffer's memory (created with exportable = true), for another
+    // API to import. The caller closes it with CloseHandle once the import is done.
+    void* exportMemoryHandle(const Buffer& b);
     Image createImage(VkExtent2D extent, VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect);
     void destroy(Image& img);
 

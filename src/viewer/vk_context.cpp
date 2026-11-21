@@ -233,9 +233,27 @@ Buffer Context::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemo
         vkDestroyBuffer(device, b.buffer, nullptr);
         vk_check(r, "vkAllocateMemory (buffer)");
     }
+    b.allocationSize = req.size;
     vk_check(vkBindBufferMemory(device, b.buffer, b.memory, 0), "vkBindBufferMemory");
     if (map) vk_check(vkMapMemory(device, b.memory, 0, VK_WHOLE_SIZE, 0, &b.mapped), "vkMapMemory");
     return b;
+}
+
+void* Context::exportMemoryHandle(const Buffer& b) {
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+    if (!hasExternalMemory) throw VulkanError("this device was created without the external memory extensions");
+    VkMemoryGetWin32HandleInfoKHR info{VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR};
+    info.memory = b.memory;
+    info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    auto get = reinterpret_cast<PFN_vkGetMemoryWin32HandleKHR>(vkGetDeviceProcAddr(device, "vkGetMemoryWin32HandleKHR"));
+    if (!get) throw VulkanError("vkGetMemoryWin32HandleKHR is not available");
+    HANDLE handle = nullptr;
+    vk_check(get(device, &info, &handle), "vkGetMemoryWin32HandleKHR");
+    return handle;
+#else
+    (void)b;
+    throw VulkanError("external memory export is only implemented for Windows");
+#endif
 }
 
 void Context::destroy(Buffer& b) {

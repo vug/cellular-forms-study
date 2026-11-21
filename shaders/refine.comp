@@ -9,7 +9,7 @@
 layout(local_size_x = 256) in;
 #include "patch.glsl"
 
-layout(set = 1, binding = 1, std430) readonly buffer CellPos { float cellPos[]; };        // 3 per cell
+layout(set = 1, binding = 11, std430) readonly buffer SurfacePos { float cellPos[]; };    // 3 per cell: where it lies on the surface drawn
 layout(set = 1, binding = 6, std430) readonly buffer CellNormal { float cellNormal[]; };  // 3 per cell
 layout(set = 1, binding = 7, std430) readonly buffer MeshIndex { uint meshIndex[]; };     // 3 per triangle
 layout(set = 1, binding = 8, std430) writeonly buffer FinePos { float finePos[]; };       // 3 per lattice point

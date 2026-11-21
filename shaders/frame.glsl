@@ -5,19 +5,20 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     mat4 proj;           // view -> clip (Vulkan: y down, depth 0..1)
     mat4 invView;        // view -> world
     mat4 lightViewProj;  // world -> clip space of the shadow map
+    mat4 prevViewProj;   // world -> clip space of the frame drawn before this one (without its sub-pixel shift)
     vec4 viewport;       // width, height, 1/width, 1/height of the images being rendered (pixels)
     vec4 sphere;         // radius (world), minimum radius (pixels), near, far
     vec4 colorParams;    // colour mode (a cell property, see palette.glsl), scalar min, scalar max, current step
     vec4 light;          // view-space direction towards the key light (xyz), ambient share (w)
     vec4 lightColor;     // key light colour times intensity (rgb), shadow strength (a; 0 = no shadows)
     vec4 sunWorld;       // world-space direction towards the key light (xyz), its angular radius in radians (w; path tracer)
-    vec4 sky;            // colour of the light from above (rgb), sky intensity in the path tracer (a)
-    vec4 ground;         // colour of the light from below (rgb), sun intensity in the path tracer (a)
+    vec4 sky;            // colour of the light from above (rgb), strength of the surroundings in the path tracer (a)
+    vec4 ground;         // colour of the light from below (rgb), strength of the sun in the path tracer (a)
     vec4 shadow;         // normal offset (world units), softness (texels), 1 / map size, depth bias (clip units)
     vec4 shadow2;        // depth of the box of the light in world units, 1 when the shadow map has been drawn, unused, unused
     vec4 ao;             // small radius (world), large radius (world), intensity, enabled
     vec4 rt;             // traced occlusion: rays per pixel (0 = screen space), ray length (world); path tracer: samples so far, samples this frame
-    vec4 pt;             // path tracer: bounces, the most a bounced ray may bring (0 = no cap), unused, unused
+    vec4 pt;             // path tracer: bounces, the most a bounced ray may bring (0 = no cap), random walk under the surface of the membrane (0 or 1), unused
     vec4 lens;           // lens radius (world units; 0 = everything sharp), focus distance, largest blur radius (pixels), unused
     vec4 baseColor;      // rgb for the "uniform" colour mode, a = exposure
     vec4 background;     // rgb top colour, a = vignette strength

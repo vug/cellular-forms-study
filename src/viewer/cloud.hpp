@@ -16,8 +16,10 @@ struct Cloud {
     std::vector<cf::Vec3> pos;
     std::vector<std::uint32_t> birth;
     std::vector<float> food;
-    // Only when the file has topology (a checkpoint): normals and the membrane's triangles.
+    // Only when the file has topology (a checkpoint): the membrane. Its triangles, and per
+    // cell the point on the smooth surface the membrane is drawn through and the normal there.
     std::vector<cf::Vec3> normal;
+    std::vector<cf::Vec3> smooth;
     std::vector<std::uint32_t> indices;
     // Per-cell values for the colour modes beyond age and food; empty when the file has none.
     // Generation is in every file, curvature needs topology, the activator needs morphogens.
@@ -69,13 +71,15 @@ public:
         PointBuffers b{pos_.buffer, birth_.buffer, food_.buffer, count_, normal_.buffer, index_.buffer, indexCount_};
         b.extra = extra_.buffer;
         b.extraMask = extraMask_;
+        b.capacity = count_;
+        b.smooth = smooth_.buffer;
         b.version = version_;
         return b;
     }
 
 private:
     Context& ctx_;
-    Buffer pos_, birth_, food_, normal_, index_, extra_;
+    Buffer pos_, birth_, food_, normal_, index_, extra_, smooth_;
     std::uint32_t capacity_ = 0;
     std::uint32_t count_ = 0;
     std::uint32_t indexCount_ = 0;

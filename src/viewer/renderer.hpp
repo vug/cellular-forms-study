@@ -28,6 +28,7 @@ struct FrameUniforms {
     float proj[16];
     float invView[16];
     float lightViewProj[16];
+    float prevViewProj[16];
     float viewport[4];
     float sphere[4];
     float colorParams[4];
@@ -116,6 +117,10 @@ struct RenderSettings {
     // as a curved patch through its three cells and their normals, in this many segments per
     // edge (1: the flat triangles). Very large forms get fewer segments than asked for.
     int meshSmooth = 3;
+    // The cells do not lie on a smooth surface exactly, and a membrane through every one of them
+    // is slightly bumpy. With this on it goes through the points the cells would move to under
+    // Loop subdivision of the mesh (a little inside the outermost cells).
+    bool meshRelax = true;
 
     // --- colour
     ColorMode colorMode = ColorMode::Age;
@@ -210,7 +215,11 @@ struct RenderSettings {
 
     // --- anti-aliasing
     bool fxaa = true;          // smooth edges in the finished image (one cheap pass)
-    bool aaAccumulate = true;  // while the view stands still: average frames drawn a fraction of a pixel apart
+    // Blend every frame, drawn a fraction of a pixel aside, into the image built so far, also
+    // while the camera or the cells move: each pixel finds where its point was, and what has
+    // changed is limited to the colours around it (raster modes).
+    bool taa = true;
+    bool aaAccumulate = true;  // while the view stands still: keep averaging such frames
     int aaFrames = 32;         // ... this many
     float renderScale = 1.0f;  // render at this multiple of the size along each axis and scale down (supersampling)
 
@@ -223,8 +232,13 @@ struct RenderSettings {
     int ptSamplesPerFrame = 2;
     int ptMaxSamples = 512;       // the image stops refining here
     float ptSunSize = 2.0f;       // angular radius of the sun in degrees (soft shadows)
-    float ptSunIntensity = 1.8f;
-    float ptSkyIntensity = 0.7f;
+    // The path tracer's sun is the key light and its sky the light from the surroundings, in
+    // the shares `ambient` gives them in the raster modes, times these two.
+    float ptSunIntensity = 1.0f;
+    float ptSkyIntensity = 1.0f;
+    // Subsurface scattering of the membrane as a random walk inside the form (slower, and what
+    // tissue does); otherwise, and always for cells drawn as spheres, one probe ray.
+    bool ptWalk = true;
     float ptClamp = 12.0f;        // the most a bounced ray may bring (0 = no limit): trades a little light for no bright specks
     bool ptDenoise = true;        // edge-aware blur of the light while few samples have been gathered
     float ptDenoiseStrength = 0.5f;
@@ -275,13 +289,19 @@ struct PointBuffers {
     VkBuffer food = VK_NULL_HANDLE;   // float per cell
     uint32_t count = 0;
     // Only for the membrane (states with topology):
-    VkBuffer normal = VK_NULL_HANDLE;  // float3 per cell
+    VkBuffer normal = VK_NULL_HANDLE;  // float3 per cell: the normal of the smoothed membrane at the cell
     VkBuffer index = VK_NULL_HANDLE;   // uint32, three per triangle
     uint32_t indexCount = 0;
     // Three more values per cell: generation, curvature, morphogen activator (float3 per cell;
     // zero where the data has none, see extraMask).
     VkBuffer extra = VK_NULL_HANDLE;
     int extraMask = 0;  // bit 0 generation, 1 curvature, 2 activator
+    // Where each cell lies on the smooth surface the membrane is drawn through (float3 per cell;
+    // null: the membrane goes through the cells themselves).
+    VkBuffer smooth = VK_NULL_HANDLE;
+    // The most cells these buffers will ever hold (a live run grows into them); 0: `count`.
+    // What the renderer derives from the cells is sized for it once, instead of in steps.
+    uint32_t capacity = 0;
     // Changes whenever the contents change (what is derived from the cells is then made again).
     uint64_t version = 0;
     // The food light of the simulation and its shadow map (int32 per texel), when there is one.
@@ -329,8 +349,18 @@ public:
     const std::string& environmentStatus() const { return envStatus_; }
     bool environmentFailed() const { return envFailed_; }  // the file asked for could not be loaded
     bool rayTracing() const { return ctx_.hasRayTracing; }
+    // How many times images or buffers had to be made anew (each is a pause of some
+    // milliseconds), and what the last one was: for finding the cause of a long frame.
+    uint32_t allocationCount() const { return allocations_; }
+    const std::string& lastAllocation() const { return lastAllocation_; }
 
 private:
+    void noteAllocation(const std::string& what) {
+        ++allocations_;
+        lastAllocation_ = what;
+    }
+    uint32_t allocations_ = 0;
+    std::string lastAllocation_;
     // An image that passes draw into and read from, with the layout it is in.
     struct Target {
         Image image;
@@ -354,12 +384,12 @@ private:
     void screenPass(VkCommandBuffer cmd, VkPipeline pipeline, Target& out, VkDescriptorSet set, const void* push = nullptr, uint32_t pushBytes = 0);
     void pushConstants(VkCommandBuffer cmd, const void* data, uint32_t bytes);
 
-    int segmentsFor(uint32_t triangles, int wanted) const;
-    void ensureFineBuffers(uint32_t triangles, int segments, bool withIndex);
-    void ensureCellTree(uint32_t primitives, bool mesh);
-    void bindCells(const PointBuffers& points);
-    void refineMembrane(VkCommandBuffer cmd, const PointBuffers& points, int segments, bool withIndex);
-    void buildCellTree(VkCommandBuffer cmd, const PointBuffers& points, float radius, bool mesh, int segments);
+    int segmentsFor(uint32_t triangles, int wanted, uint64_t mostSmall) const;
+    void ensureFineBuffers(uint32_t triangles, int segments, bool withIndex, uint32_t mostTriangles, int wanted, uint64_t mostSmall);
+    void ensureCellTree(uint32_t primitives, bool mesh, uint64_t mostPrimitives);
+    void bindCells(const PointBuffers& points, VkBuffer surface);
+    void refineMembrane(VkCommandBuffer cmd, const PointBuffers& points, VkBuffer surface, int segments, bool withIndex);
+    void buildCellTree(VkCommandBuffer cmd, const PointBuffers& points, VkBuffer surface, float radius, bool mesh, int segments);
     void destroyCellTree();
 
     Context& ctx_;
@@ -376,7 +406,8 @@ private:
     // the image behind the lens; 3 highlights, glow and background. Path tracer: 0 and 1 what the
     // denoiser needs to know about the first hit, 2 and 3 its work images, 4 the image it shows.
     Target hdr_[5];
-    Target accum_;     // the running mean of the frames (raster) or samples (path tracer)
+    Target accum_;     // the image built over the frames (raster) or samples (path tracer)
+    Target accumB_;    // raster: the next one is written here from the one before, then the two change places
     Target bloom_[2];  // a quarter of the size
     Target ldr_[2];    // the tone mapped image, before and after edge smoothing
     Target shadowMap_;
@@ -393,8 +424,16 @@ private:
     std::string envStatus_;
     bool envFailed_ = false;
 
-    uint32_t accumSamples_ = 0;
-    uint64_t accumKey_ = 0;  // what the accumulated frames or samples were gathered for
+    uint32_t accumSamples_ = 0;  // frames drawn since the picture last changed (raster), samples per pixel (path tracer)
+    uint64_t accumKey_ = 0;      // what the accumulated frames or samples were gathered for
+    bool historyValid_ = false;  // raster: accum_ holds an image of this scene
+    float historyCount_ = 0.0f;  // ... worth about this many frames
+    uint32_t jitterIndex_ = 0;   // which sub-pixel shift the next frame gets
+    uint64_t cellsVersion_ = 0;  // the cells of the last frame drawn (PointBuffers::version)
+    // Whether the cells keep changing (a simulation is running): how many changes in a row came
+    // less than a second apart, and how many frames ago the last one was.
+    uint32_t cellChanges_ = 0, framesSinceCells_ = 0;
+    float prevViewProj_[16] = {};
     Buffer uniformBuffer_, shadowUniformBuffer_;
     Buffer noLightMap_;  // bound when the simulation has no light map to show
     Buffer dummy_;       // stands in for per-cell buffers a frame does not have
@@ -415,7 +454,7 @@ private:
     VkPipeline impostorPipeline_ = VK_NULL_HANDLE, xrayPipeline_ = VK_NULL_HANDLE, meshPipeline_ = VK_NULL_HANDLE,
                shadowCellsPipeline_ = VK_NULL_HANDLE, shadowMeshPipeline_ = VK_NULL_HANDLE, ssaoPipeline_ = VK_NULL_HANDLE,
                gatherPipeline_ = VK_NULL_HANDLE, blurPipeline_ = VK_NULL_HANDLE, lightPipeline_ = VK_NULL_HANDLE, sssPipeline_ = VK_NULL_HANDLE,
-               combinePipeline_ = VK_NULL_HANDLE, dofPipeline_ = VK_NULL_HANDLE, accumulatePipeline_ = VK_NULL_HANDLE,
+               combinePipeline_ = VK_NULL_HANDLE, dofPipeline_ = VK_NULL_HANDLE, taaPipeline_ = VK_NULL_HANDLE,
                bloomPipeline_ = VK_NULL_HANDLE, tonemapPipeline_ = VK_NULL_HANDLE, smoothPipeline_ = VK_NULL_HANDLE,
                pathTracePipeline_ = VK_NULL_HANDLE, denoisePipeline_ = VK_NULL_HANDLE, boxPipeline_ = VK_NULL_HANDLE,
                refinePipeline_ = VK_NULL_HANDLE;

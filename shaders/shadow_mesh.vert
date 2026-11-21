@@ -4,7 +4,7 @@
 #include "frame.glsl"
 #include "patch.glsl"
 
-layout(set = 1, binding = 1, std430) readonly buffer CellPos { float cellPos[]; };
+layout(set = 1, binding = 11, std430) readonly buffer SurfacePos { float cellPos[]; };  // where each cell lies on the surface drawn
 layout(set = 1, binding = 7, std430) readonly buffer MeshIndex { uint meshIndex[]; };
 layout(set = 1, binding = 8, std430) readonly buffer FinePos { float finePos[]; };
 

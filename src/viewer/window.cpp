@@ -88,6 +88,7 @@ private:
     int wantedIndex_ = 0;
     bool playing_ = false;
     float playFps_ = 8.0f;
+    float spin_ = 0.0f;  // the camera turns around the form at this many degrees per second
     double playAccumulator_ = 0.0;
     int snapshotSwitches_ = 0;
 
@@ -123,9 +124,16 @@ private:
     std::chrono::steady_clock::time_point lastTime_ = std::chrono::steady_clock::now();
     float frameMs_ = 0.0f;
     std::vector<float> frameTimesMs_;  // every frame, for the statistics printed at exit
+    // What happened in the frame being drawn that can make it long, and the long frames seen
+    // (printed with the statistics, to find out what a stall was).
+    std::string frameEvents_;
+    std::vector<std::string> longFrames_;
+    uint32_t seenAllocations_ = 0;
+    std::uint64_t seenPublished_ = 0;
+    int seenStage_ = 0;
 };
 
-Window::Window(const ViewOptions& o) : o_(o), playing_(o.play), playFps_(o.playFps), settings_(o.settings) {
+Window::Window(const ViewOptions& o) : o_(o), playing_(o.play), playFps_(o.playFps), spin_(o.spin), settings_(o.settings) {
     if (!glfwInit()) throw std::runtime_error("glfwInit failed");
     if (!glfwVulkanSupported()) throw std::runtime_error("GLFW reports no Vulkan support");
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -394,9 +402,6 @@ RenderSettings Window::shadingFor(const Scene& sc) const {
         applyAutoRange(s, *cloud_);
         return s;
     }
-    // A running simulation changes the picture with every step it publishes. Averaging the
-    // frames in between would make the image sharpen and snap back in that rhythm.
-    if (liveStatus_.running) s.aaAccumulate = false;
     if (!s.autoRange) return s;
     const cf::Params& p = liveStatus_.params;
     // Age: about the time a newborn cell needs to divide again. Generation: every division adds
@@ -602,6 +607,7 @@ void Window::buildUi() {
             ImGui::SliderInt("smoothing", &settings_.meshSmooth, 1, 6, settings_.meshSmooth == 1 ? "off (flat triangles)" : "%d segments per edge");
             if (sc.buffers.index && renderer_->membraneSegments() < std::clamp(settings_.meshSmooth, 1, 8))
                 ImGui::TextDisabled("this form is large: %d used", renderer_->membraneSegments());
+            ImGui::Checkbox("relax onto a smooth surface", &settings_.meshRelax);
         }
         if (settings_.drawMode == kDrawXray) ImGui::SliderFloat("x-ray density", &settings_.xrayDensity, 0.002f, 0.5f, "%.3f", ImGuiSliderFlags_Logarithmic);
         float fov = camera_.fovy * 57.29578f;
@@ -709,11 +715,11 @@ void Window::buildUi() {
 
     if (ImGui::CollapsingHeader("Anti-aliasing")) {
         ImGui::Checkbox("smooth edges (fast)", &settings_.fxaa);
+        ImGui::Checkbox("blend frames while things move", &settings_.taa);
         ImGui::Checkbox("refine while the view stands still", &settings_.aaAccumulate);
         if (settings_.aaAccumulate) {
             ImGui::SliderInt("frames to average", &settings_.aaFrames, 2, 256, "%d", ImGuiSliderFlags_Logarithmic);
-            if (!pathMode) ImGui::Text("%u averaged", renderer_->accumulatedSamples());
-            if (live_ && liveStatus_.running) ImGui::TextDisabled("waits while the simulation runs");
+            if (!pathMode) ImGui::Text("%u since the picture changed", renderer_->accumulatedSamples());
         }
         ImGui::SliderFloat("render scale", &settings_.renderScale, 0.5f, 2.0f, "%.2f x");
         ImGui::TextDisabled("above 1: supersampling (2 x costs four times the pixels)");
@@ -822,8 +828,9 @@ void Window::buildUi() {
         ImGui::SliderInt("samples per frame", &settings_.ptSamplesPerFrame, 1, 16);
         ImGui::SliderInt("samples in total", &settings_.ptMaxSamples, 16, 4096, "%d", ImGuiSliderFlags_Logarithmic);
         ImGui::SliderFloat("sun size", &settings_.ptSunSize, 0.0f, 20.0f, "%.1f deg");
-        ImGui::SliderFloat("sun intensity", &settings_.ptSunIntensity, 0.0f, 8.0f);
-        ImGui::SliderFloat("sky intensity", &settings_.ptSkyIntensity, 0.0f, 4.0f);
+        ImGui::SliderFloat("sun, times the key light", &settings_.ptSunIntensity, 0.0f, 8.0f);
+        ImGui::SliderFloat("sky, times its share", &settings_.ptSkyIntensity, 0.0f, 8.0f);
+        ImGui::Checkbox("random walk under the membrane", &settings_.ptWalk);
         ImGui::SliderFloat("cap on bounced light", &settings_.ptClamp, 0.0f, 100.0f, settings_.ptClamp <= 0.0f ? "none" : "%.1f");
         ImGui::Checkbox("denoise", &settings_.ptDenoise);
         ImGui::SliderFloat("denoise strength", &settings_.ptDenoiseStrength, 0.0f, 2.0f);
@@ -858,6 +865,8 @@ void Window::buildUi() {
         }
     }
 
+    ImGui::SetNextItemWidth(150 * ImGui::GetStyle().FontScaleDpi);
+    ImGui::SliderFloat("turn the camera", &spin_, -60.0f, 60.0f, spin_ == 0.0f ? "off" : "%.0f deg/s");
     if (ImGui::Button("Frame all")) {
         camera_.frame(sc.centre, sc.radius + settings_.sphereRadius);
         autoFrame_ = live_ != nullptr;
@@ -926,6 +935,7 @@ void Window::drawFrame() {
     // buffers or the intermediate images, so they can be replaced safely below.
     vk_check(vkWaitForFences(ctx_->device, 1, &frameFence_, VK_TRUE, UINT64_MAX), "vkWaitForFences");
 
+    const bool swapchainWasDirty = swapchainDirty_;
     if (swapchainDirty_) {
         vkDeviceWaitIdle(ctx_->device);
         createSwapchain();
@@ -937,9 +947,21 @@ void Window::drawFrame() {
     const double dt = std::chrono::duration<double>(now - lastTime_).count();
     lastTime_ = now;
     frameMs_ = frameMs_ * 0.9f + static_cast<float>(dt * 1000.0) * 0.1f;
-    // (The frame after a window capture includes the PNG encoding; leave it out of the statistics.)
-    const bool afterCapture = !o_.windowCapture.empty() && frameCounter_ == static_cast<std::uint64_t>(o_.windowCaptureFrame) + 1;
+    // (A window capture encodes its PNG on this thread, about 50 ms. With vsync the delay shows
+    // up as one long frame up to six frames later, once the queue of images to present has run
+    // dry; leave the frames after a capture out of the statistics.)
+    const std::uint64_t captureAt = static_cast<std::uint64_t>(o_.windowCaptureFrame);
+    const bool afterCapture = !o_.windowCapture.empty() && frameCounter_ > captureAt && frameCounter_ <= captureAt + 8;
     if (frameCounter_ > 0 && !afterCapture) frameTimesMs_.push_back(static_cast<float>(dt * 1000.0));
+    // `dt` is the time the frame before this one took: note it when it was long, with what
+    // that frame had to do.
+    if (frameCounter_ > 30 && !afterCapture && dt * 1000.0 > 25.0 && longFrames_.size() < 20) {
+        char line[160];
+        std::snprintf(line, sizeof line, "  frame %llu: %.1f ms", static_cast<unsigned long long>(frameCounter_ - 1), dt * 1000.0);
+        longFrames_.push_back(std::string(line) + (frameEvents_.empty() ? "; nothing unusual was noted" : frameEvents_));
+    }
+    frameEvents_.clear();
+    if (swapchainWasDirty) frameEvents_ += "; new swapchain";
 
     if (live_) {
         if (status_ == "rebuild") {  // new capacity or backend: needs new shared buffers
@@ -956,6 +978,14 @@ void Window::drawFrame() {
         liveFrame_ = live_->acquire();
         liveStatus_ = live_->status();
         if (o_.liveSelfTest) selfTestTick();
+        if (liveStatus_.publishedFrames != seenPublished_) {
+            seenPublished_ = liveStatus_.publishedFrames;
+            frameEvents_ += "; new frame of the simulation (" + std::to_string(liveFrame_.buffers.count) + " cells, step " + std::to_string(liveFrame_.step) + ")";
+        }
+        if (selfTestStage_ != seenStage_) {
+            seenStage_ = selfTestStage_;
+            frameEvents_ += "; self-test stage " + std::to_string(selfTestStage_);
+        }
         if (liveFrame_.valid && (autoFrame_ || !framedOnce_)) {
             const float wantDistance = (liveFrame_.radius + settings_.sphereRadius) / std::sin(camera_.fovy * 0.5f) * 1.05f * o_.zoom;
             if (!framedOnce_) {
@@ -979,6 +1009,7 @@ void Window::drawFrame() {
         showFrame(wantedIndex_);
     }
 
+    if (spin_ != 0.0f) camera_.orbit(spin_ * static_cast<float>(dt) * 0.0174532925f, 0.0f);
     const Scene sc = scene();
     const RenderSettings shading = shadingFor(sc);
 
@@ -1083,6 +1114,11 @@ void Window::drawFrame() {
         std::printf("%s %s\n", ok ? "wrote" : "could not write", o_.windowCapture.string().c_str());
         ctx_->destroy(captureBuffer);
     }
+    for (const Renderer* r : {renderer_.get(), rendererRight_.get()})
+        if (r != nullptr && r->allocationCount() != seenAllocations_) {
+            seenAllocations_ = r->allocationCount();
+            frameEvents_ += "; new " + r->lastAllocation();
+        }
     ++frameCounter_;
 }
 
@@ -1116,6 +1152,10 @@ int Window::run() {
         }
         std::printf("frames %zu  mean %.2f ms  median %.2f ms  p99 %.2f ms  max %.2f ms  frames over 33 ms: %zu\n", t.size(),
                     sum / static_cast<double>(t.size()), t[t.size() / 2], t[t.size() * 99 / 100], t.back(), slow);
+        if (!longFrames_.empty()) {
+            std::printf("frames over 25 ms, and what they had to do:%s", "\n");
+            for (const std::string& line : longFrames_) std::printf("%s%s", line.c_str(), "\n");
+        }
         if (live_) {
             const LiveStatus st = live_->status();
             std::printf("live: %s, step %llu, %u cells, %.0f steps/s, %.3f ms/step, %llu frames published, %s\n", st.backendName.c_str(),

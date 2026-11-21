@@ -41,6 +41,7 @@ struct ViewOptions {
     // Automated runs of the window (tests and measurements).
     bool play = false;        // start with playback on
     float playFps = 8.0f;     // snapshots per second during playback
+    float spin = 0.0f;        // turn the camera around the form, degrees per second (0: off)
     int exitAfterFrames = 0;  // > 0: close after this many frames and print frame-time statistics
     std::filesystem::path windowCapture;  // write the window contents (with the UI) to this PNG ...
     int windowCaptureFrame = 30;          // ... at this frame

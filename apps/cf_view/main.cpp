@@ -68,6 +68,7 @@ void usage() {
         "                         modes then fall back); --no-barycentric likewise for cell walls on the membrane\n"
         "  --no-vsync\n"
         "  --play [--play-fps <n>]  start with snapshot playback running\n"
+        "  --spin <deg/s>         turn the camera slowly around the form\n"
         "  --exit-after <frames>  close the window after this many frames and print frame times\n"
         "  --window-capture <png> [--window-capture-frame <n>]  save the window, UI included, at frame n\n");
 }
@@ -180,6 +181,8 @@ int main(int argc, char** argv) {
                 o.play = true;
             } else if (a == "--play-fps") {
                 o.playFps = static_cast<float>(std::atof(next()));
+            } else if (a == "--spin") {
+                o.spin = static_cast<float>(std::atof(next()));
             } else if (a == "--exit-after") {
                 o.exitAfterFrames = std::atoi(next());
             } else if (a == "--live") {

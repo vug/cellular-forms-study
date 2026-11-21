@@ -59,6 +59,13 @@ vec3 cosineDirection(vec3 n) {
     return normalize(t * (r * cos(a)) + b * (r * sin(a)) + n * sqrt(max(1.0 - u, 0.0)));
 }
 
+// A direction picked evenly from all directions.
+vec3 sphereDirection() {
+    float z = 1.0 - 2.0 * rnd(), a = 6.2831853 * rnd();
+    float r = sqrt(max(1.0 - z * z, 0.0));
+    return vec3(r * cos(a), r * sin(a), z);
+}
+
 // A direction within `angle` radians of n, uniform over that cone.
 vec3 coneDirection(vec3 n, float angle) {
     float cosMax = cos(angle);

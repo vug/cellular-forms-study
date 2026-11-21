@@ -89,7 +89,8 @@ struct RenderTargets {
     void* birth = nullptr;   // uint32 per cell
     void* food = nullptr;    // float per cell
     void* extra = nullptr;   // float3 per cell: generation, curvature, morphogen activator (0 without morphogens)
-    void* normal = nullptr;  // float3 per cell: from the positions as they are now (see copy_render_data)
+    void* normal = nullptr;  // float3 per cell: the normal of the smoothed membrane (see copy_render_data)
+    void* smooth = nullptr;  // float3 per cell: where the cell lies on the smoothed membrane
     void* index = nullptr;   // uint32, three per triangle of the membrane
     std::uint32_t maxIndices = 0;
     void* lightMap = nullptr;  // int32 per texel: the shadow map of the food light, as the last step used it
@@ -147,14 +148,18 @@ public:
     // Copies what the viewer draws into device memory owned by someone else: positions, birth
     // steps and food, and on request three more values per cell (generation, curvature, the
     // morphogen activator), the normals, and the triangles of the membrane. Returns the counts.
-    // The normals are computed here from the positions as they are: the ones the simulation
-    // keeps are those the last step started from, and a cell born in it still has its parent's.
+    // The membrane is drawn through a smooth surface, the limit of Loop subdivision of the mesh
+    // (core/kernels.hpp loop_limit): `smooth` is where each cell lies on it and `normal` its
+    // normal there, both computed here from the positions as they are. (The normals the
+    // simulation keeps are those the last step started from, and a cell born in it still has
+    // its parent's.) The curvature is measured against the normal of the cell's own ring.
     RenderCounts copy_render_data(const RenderTargets& targets, std::uint32_t maxCells);
     // The same data fetched to the host (for tests): the three values, the normals and the
     // triangle indices, in the order copy_render_data writes them.
     struct RenderDataHost {
         std::vector<Vec3> extra;  // generation, curvature, activator
         std::vector<Vec3> normal;
+        std::vector<Vec3> smooth;
         std::vector<std::uint32_t> index;
     };
     RenderDataHost render_data_host();

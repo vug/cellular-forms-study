@@ -19,7 +19,8 @@ Newest entries at the bottom. Times are local (America/New_York).
 | M4 Live viewer | exit criteria observed (local session, 00:40) | scripted run: parameters changed mid-run, pause, single steps, reset; no frame over 15 ms, 0 validation errors, CUDA and CPU backends. Not tried by hand |
 | M9 Ports | both ports done and verified (local session, 01:20) | Vulkan compute: step-by-step agreement with the CPU over 106 steps, reruns identical. WebGPU: one-step agreement with CPU checkpoints from 162 to 4.4M cells, reruns identical. At 10M cells: CUDA 41, Vulkan 65, WebGPU 75 ms per step |
 | M5 Food sources | exit criterion observed (local session, 01:30) | uniform versus light contrast at 600k cells; CUDA equals CPU with every source on; reaction-diffusion and inherited coordinates not built |
-| Viewer rendering, fourth round | built (local session, 11:20): a material shared by the raster modes and the path tracer, with a library of fourteen (skin among them); subsurface scattering, light through the sheet, emissive cells, depth of field, anti-aliasing, bloom; cell properties drive the material; the membrane as smooth patches; six environment maps, sampled by brightness in the path tracer | 40 modes rendered headless with validation and synchronization checks clean, tests 33 of 33 and 55 of 55, frame times measured up to 8.2M cells, the skin compared with a Blender render. Live self-test to 2M cells: passes without the validation layer; with it, two of five runs had one frame of about 50 ms (cause not found). Three defects found and fixed on the way. No control was moved by hand |
+| Viewer rendering, fifth round | built (local session, 11:55): the limits of the fourth round. The 50 ms frame found (patch buffers growing) and removed; the membrane through the limit points of Loop subdivision; anti-aliasing that blends frames while the camera moves; glowing cells light their neighbours without ray tracing; path-traced skin by a random walk, as bright as the raster skin | 46 modes rendered headless with validation and synchronization checks clean, tests 33 of 33 and 55 of 55, five live self-test runs with the validation layer pass, frame times measured. A running simulation gets only a two-frame blend. No control was moved by hand |
+| Viewer rendering, fourth round | built (local session, 11:20): a material shared by the raster modes and the path tracer, with a library of fourteen (skin among them); subsurface scattering, light through the sheet, emissive cells, depth of field, anti-aliasing, bloom; cell properties drive the material; the membrane as smooth patches; six environment maps, sampled by brightness in the path tracer | 40 modes rendered headless with validation and synchronization checks clean, tests 33 of 33 and 55 of 55, frame times measured up to 8.2M cells, the skin compared with a Blender render. Live self-test to 2M cells: passes without the validation layer; with it, two of five runs had one frame of about 50 ms (found and removed in the fifth round). Three defects found and fixed on the way. No control was moved by hand |
 | Viewer rendering, third round | built (local session, 09:45): ray tracing of the membrane, Voronoi walls, a denoiser, an environment map, stereo, the simulation's own light map | 15 modes rendered headless with the validation layer clean, live captures on both backends, the fallbacks without ray tracing run, frame times measured up to 10M cells. No control was moved by hand; no headset |
 | Viewer rendering, second round | built (local session, 09:05): sun and sky light with shadows, cell walls, outlines and toon shading, ray-traced occlusion, a path tracer, three more colour modes, the membrane in live mode; a control for every option | every mode rendered headless with the validation layer clean; live captures on CUDA and CPU; the live render data tested against the host. No control was moved by hand |
 | M7 Rendering modes | done (local session, 01:38 and 03:50) | PLY export tested; imported and rendered in Blender 5.2; viewer x-ray, membrane and membrane-with-scattering modes render with validation clean. The scattering is a screen-space approximation |
@@ -1858,3 +1859,114 @@ its frames are averaged. Empty cells of the table were not measured. Memory was 
 `r4_glow_path_traced.png`, `r4_ember_by_age.png`, `r4_membrane_flat.png` and
 `r4_membrane_smooth.png` (the same view), `r4_skin_blender_reference.png` (Cycles),
 `r4_viewer_panels.png`.
+
+## 2026-11-21 11:55 · Local session: viewer rendering, fifth round (the limits of the fourth)
+
+Uğur asked for the items the fourth round's report listed as limits or as not found.
+
+**What was built**
+
+1. **The 50 ms frame, found and removed.** The window now notes, for every frame over 25 ms,
+   what that frame had to do (a new frame of the simulation, new buffers and for what, a
+   self-test stage), and prints the list with the frame statistics. The frame in question was
+   the membrane patches' buffers being enlarged as the live form grew (46 ms for 9 million
+   points). What the renderer derives from the cells (patch buffers, the ray tracing
+   structure) is now sized once from the capacity of the live run, which the frame carries.
+2. **No long frames for a ray-traced membrane that grows.** The structure the rays are traced
+   against is rebuilt for every frame of the simulation, about 2.5 ms per million triangles,
+   which gave 26 to 34 ms frames with 12 million refined triangles. A membrane that is ray
+   traced while it grows is now refined into at most 4 million.
+3. **A smoother membrane.** The patches went exactly through every cell, and the cells do not
+   lie on a smooth surface exactly, which showed as bumps and pinches up close. The membrane
+   now goes through the points the cells would move to under Loop subdivision of the mesh,
+   with the normals of that limit surface (`loop_limit` in `core/kernels.hpp`, from the cell
+   and its ring; computed by the CUDA publisher, on the CPU path and for files). A setting,
+   `meshRelax`, turns it off.
+4. **Anti-aliasing while things move.** Every frame is drawn a fraction of a pixel aside and
+   blended into the image built so far (`taa.frag`). When the camera moved, each pixel looks
+   up where its point was (from its depth and the previous camera), reads the image so far
+   there with a cubic filter, and limits it to the colours around the pixel in the new frame.
+   My first version blended eight frames whatever had moved, and a growing live form came out
+   smeared: the lookup knows the camera, not the cells. Now the image so far counts for eight
+   frames when only the camera moved and for two when the cells changed. While nothing
+   changes it remains the exact running mean, and between two frames of a running simulation
+   the mean is kept short so the picture does not sharpen and fall back in that rhythm.
+   `--spin <deg/s>` (and a slider) turns the camera slowly, which is how this was tested.
+5. **Glowing cells light their neighbours without ray tracing.** The samples of the
+   screen-space occlusion pass also gather the light of the glowing surfaces they land on.
+   Only what is on screen can be gathered this way.
+6. **Path-traced skin.** Three changes. The path tracer's sun and sky are now the key light
+   and the surroundings in the shares the raster modes give them (before, its sun was four
+   times as bright as the raster key light, which bleached the tops). Light that crosses the
+   sheet now loses strength with the distance it travels inside the form, so it gets through
+   a thin fold and not through the whole body (before, the hollow inside glowed brown). And
+   subsurface scattering of the membrane is a random walk inside the form: the light is
+   scattered until the walk meets the surface again. My first version of the walk gave a
+   cream colour: I had taken the scatter radius as the distance between two scatterings, which
+   makes folds nearly transparent. The radius is how far light spreads along the surface; the
+   step inside is shorter by sqrt(3 (1 - share kept)), as in Cycles. A walk cut off after 160
+   scatterings leaves where it entered, so the red that scatters longest is not lost.
+7. **The long frame after a window capture.** Separate from item 1: encoding the PNG takes
+   about 50 ms on the render thread, and with vsync it shows as one 60 ms frame six frames
+   later. Confirmed by running with and without a capture; the frames after a capture are
+   left out of the stall statistics.
+
+114 names for `--set` now (new: `meshRelax`, `taa`, `ptWalk`).
+
+**Frame times** (RTX 4090, 1600 x 1000, no vsync, mean over 469 frames, the camera turning so
+that every frame is drawn and blended)
+
+| | 100k cells | 400k cells | 1M cells | 8.2M cells |
+|---|---|---|---|---|
+| Cells, default | 0.81 ms (0.72 without the blending) | | 2.67 ms | 9.24 ms |
+| Cells, skin with shadows | 1.24 ms | | 4.27 ms | |
+| Cells, glow gathered by rays | 1.76 ms | | | |
+| Cells, glow gathered on screen (no ray tracing) | 1.40 ms | | | |
+| Membrane, default | 0.91 ms | | | |
+| Membrane, skin with shadows | 1.26 ms | 2.54 ms | | |
+| Membrane as skin, path traced, random walk | 9.34 ms | 7.70 ms | | |
+| Membrane as skin, path traced, one probe ray | 2.63 ms | | | |
+
+The random walk makes the path-traced skin three and a half times as slow per frame; it is a
+setting (`ptWalk`). Empty cells were not measured.
+
+**Verified**
+
+- 46 headless renders with `--validate` and the synchronization checks, 0 errors each, on the
+  final build (the 40 of the fourth round plus: blending off, the membrane through the cells,
+  flat and through the cells, path traced through the cells, skin with one probe ray, glow on
+  the membrane without ray tracing).
+- `cf_cuda_tests` 33 of 33, `cf_tests` 55 of 55. The render-data test now checks the smoothed
+  positions and their normals against the host (equal to 6 and 5 digits), that each smoothed
+  point lies between the cell and the centre of its ring, and that the limit normal faces the
+  way the ring does (6 of 63,529 cells were more than 60 degrees apart, in a state that grows
+  very fast). A bound I first wrote, that a smoothed point is less than one link from its
+  cell, was wrong and is gone: in that state one cell is 1.56 from its point.
+- `cf_view --live-selftest --validate`, five runs to about 2 million cells: all pass, 0
+  validation errors; worst frame 18 to 25 ms as membrane with skin and shadows (three runs),
+  27 ms as glowing cells, 22 ms as path-traced membrane (34 ms before item 2). Without the
+  layer, four more runs pass: worst frame 9 ms as cells and as membrane with skin and
+  shadows, 12 ms with ray-traced occlusion, 17 ms as glowing cells gathered by rays. One run
+  on the CPU backend as membrane (to 5,560 cells, with the layer): pass, worst frame 6 ms.
+- Looked at: the same close-up through the cells and relaxed; a turning camera with and
+  without blending (jagged against smooth); a growing live form with blending (crisp); skin
+  cells lit by glowing young cells with rays, on screen, and not at all; path-traced skin
+  before and after, against the raster skin and the Blender reference.
+
+**Not verified, and limits**
+
+- No control was moved by hand, as before.
+- The blending over time does not know how cells moved. A running simulation gets two frames
+  of it, which smooths edges a little; full quality needs the camera alone to move, or a
+  still view.
+- The random walk is for the membrane. Cells drawn as spheres keep the one probe ray.
+- Path-traced skin is a little less saturated in creases than the Blender reference.
+- One frame of 27 ms at 223 cells under the validation layer (glowing cells gathered by
+  rays): I only know it was a frame with a new simulation frame. The self-test counts frames
+  over 33 ms, so it passed.
+
+**Images** in `docs/progress/img/`: `r5_skin_path_traced.png`, `r5_skin.png`,
+`r5_membrane_through_cells.png` and `r5_membrane_relaxed.png` (the same view),
+`r5_glow_neighbours_off.png`, `r5_glow_neighbours_screen_space.png` and
+`r5_glow_neighbours_rays.png`, `r5_camera_turning_blend_off.png` and
+`r5_camera_turning_blend_on.png` (cuts from window captures).

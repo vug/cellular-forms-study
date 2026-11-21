@@ -98,9 +98,10 @@ private:
         // CUDA backend: Vulkan buffers shared with CUDA.
         Buffer pos, birth, food, extra;
         std::unique_ptr<cf::CudaExternalBuffer> cudaPos, cudaBirth, cudaFood, cudaExtra;
-        // The membrane, allocated the first time it is asked for (36 more bytes per cell and slot).
-        Buffer normal, index;
-        std::unique_ptr<cf::CudaExternalBuffer> cudaNormal, cudaIndex;
+        // The membrane, allocated the first time it is asked for (48 more bytes per cell and slot):
+        // normals, the cells' points on the smooth surface, triangles.
+        Buffer normal, smooth, index;
+        std::unique_ptr<cf::CudaExternalBuffer> cudaNormal, cudaSmooth, cudaIndex;
         // The shadow map of the food light, allocated the first time it is asked for.
         Buffer lightMap;
         std::unique_ptr<cf::CudaExternalBuffer> cudaLightMap;
@@ -111,7 +112,7 @@ private:
         std::vector<std::uint32_t> hostBirth;
         std::vector<float> hostFood;
         std::vector<float> hostGeneration, hostCurvature, hostActivator;
-        std::vector<cf::Vec3> hostNormal;
+        std::vector<cf::Vec3> hostNormal, hostSmooth;
         std::vector<std::uint32_t> hostIndex;
         std::uint32_t count = 0;
         int extraMask = 0;             // which extra values this frame has (bit 0 generation, 1 curvature, 2 activator)

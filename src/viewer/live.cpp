@@ -106,9 +106,10 @@ void LiveSim::releaseSlots() {
         slot.cudaFood.reset();
         slot.cudaExtra.reset();
         slot.cudaNormal.reset();
+        slot.cudaSmooth.reset();
         slot.cudaIndex.reset();
         slot.cudaLightMap.reset();
-        for (Buffer* b : {&slot.pos, &slot.birth, &slot.food, &slot.extra, &slot.normal, &slot.index, &slot.lightMap}) ctx_.destroy(*b);
+        for (Buffer* b : {&slot.pos, &slot.birth, &slot.food, &slot.extra, &slot.normal, &slot.smooth, &slot.index, &slot.lightMap}) ctx_.destroy(*b);
     }
     ctx_.destroy(frontLightMap_);
 }
@@ -167,14 +168,18 @@ void LiveSim::ensureMeshBuffers() {
         for (Slot& slot : slots_) {
             shareBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(cf::Vec3), cellBufferUsage(ctx_) | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, slot.normal,
                         slot.cudaNormal);
+            shareBuffer(static_cast<VkDeviceSize>(capacity_) * sizeof(cf::Vec3), cellBufferUsage(ctx_) | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, slot.smooth,
+                        slot.cudaSmooth);
             shareBuffer(static_cast<VkDeviceSize>(indexCapacity_) * sizeof(std::uint32_t), cellBufferUsage(ctx_, true), slot.index, slot.cudaIndex);
         }
         meshReady_ = true;
     } catch (const std::exception& e) {
         for (Slot& slot : slots_) {
             slot.cudaNormal.reset();
+            slot.cudaSmooth.reset();
             slot.cudaIndex.reset();
             ctx_.destroy(slot.normal);
+            ctx_.destroy(slot.smooth);
             ctx_.destroy(slot.index);
         }
         meshFailed_ = true;
@@ -307,6 +312,7 @@ void LiveSim::publish() {
         const bool withMesh = mesh && meshReady_;
         if (withMesh) {
             t.normal = slot.cudaNormal->device_ptr();
+            t.smooth = slot.cudaSmooth->device_ptr();
             t.index = slot.cudaIndex->device_ptr();
             t.maxIndices = indexCapacity_;
         }
@@ -337,19 +343,22 @@ void LiveSim::publish() {
         slot.hostPos.assign(s.pos.begin(), s.pos.begin() + s.n);
         slot.hostBirth.assign(s.birth.begin(), s.birth.begin() + s.n);
         slot.hostFood.assign(s.food.begin(), s.food.begin() + s.n);
-        // The normals from the positions as they are (the stored ones are from before the last
-        // move), and with them generation, curvature and activator.
+        // The smooth surface the membrane is drawn through (each cell's point on it and the
+        // normal there), from the positions as they are, and generation, curvature and activator.
         const bool morph = s.morphB.size() >= s.n;
         slot.extraMask = morph ? 7 : 3;
         slot.hostNormal.resize(s.n);
+        slot.hostSmooth.resize(s.n);
         slot.hostGeneration.resize(s.n);
         slot.hostCurvature.resize(s.n);
         slot.hostActivator.assign(morph ? s.n : 0u, 0.0f);
         const float eps2 = cf::normal_eps2(s.params.linkRestLength);
         for (std::uint32_t v = 0; v < s.n; ++v) {
-            cf::ring_normal(s.pos.data(), s.ring(v), s.deg[v], s.pos[v], s.normal[v], eps2, slot.hostNormal[v]);
+            cf::Vec3 ringNormal;
+            cf::ring_normal(s.pos.data(), s.ring(v), s.deg[v], s.pos[v], s.normal[v], eps2, ringNormal);
+            cf::loop_limit(s.pos.data(), s.ring(v), s.deg[v], s.pos[v], ringNormal, eps2, slot.hostSmooth[v], slot.hostNormal[v]);
             slot.hostGeneration[v] = static_cast<float>(s.gen[v]);
-            slot.hostCurvature[v] = cf::cell_curvature(s.pos.data(), s.ring(v), s.deg[v], s.pos[v], slot.hostNormal[v], s.params.linkRestLength);
+            slot.hostCurvature[v] = cf::cell_curvature(s.pos.data(), s.ring(v), s.deg[v], s.pos[v], ringNormal, s.params.linkRestLength);
             if (morph) slot.hostActivator[v] = cf::morph_signal(s.morphB[v]);
         }
         slot.hostIndex.clear();
@@ -400,6 +409,7 @@ LiveFrame LiveSim::acquire() {
                 c.birth.swap(slot.hostBirth);
                 c.food.swap(slot.hostFood);
                 c.normal.swap(slot.hostNormal);
+                c.smooth.swap(slot.hostSmooth);
                 c.indices.swap(slot.hostIndex);
                 c.generation.swap(slot.hostGeneration);
                 c.curvature.swap(slot.hostCurvature);
@@ -428,10 +438,12 @@ LiveFrame LiveSim::acquire() {
     f.radius = std::max(0.5f * cf::length(slot.hi - slot.lo), 1.0f);
     if (config_.backend == LiveBackend::Cuda) {
         f.buffers = PointBuffers{slot.pos.buffer, slot.birth.buffer, slot.food.buffer, slot.count};
+        f.buffers.capacity = capacity_;
         f.buffers.extra = slot.extra.buffer;
         f.buffers.extraMask = slot.extraMask;
         if (slot.hasMesh) {
             f.buffers.normal = slot.normal.buffer;
+            f.buffers.smooth = slot.smooth.buffer;
             f.buffers.index = slot.index.buffer;
             f.buffers.indexCount = slot.indexCount;
         }
@@ -439,6 +451,7 @@ LiveFrame LiveSim::acquire() {
         if (slot.light.valid) f.buffers.lightMap = slot.lightMap.buffer;
     } else {
         f.buffers = frontGpu_->buffers();
+        f.buffers.capacity = capacity_;
         if (slot.light.valid && !slot.hostLightMap.empty()) f.buffers.lightMap = frontLightMap_.buffer;
     }
     if (f.buffers.lightMap) f.buffers.light = slot.light;

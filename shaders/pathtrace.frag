@@ -79,6 +79,48 @@ void scatter(inout vec3 p, inout vec3 n, inout vec3 through) {
     n = dot(s.n, n) < 0.0 ? -s.n : s.n;
 }
 
+// Subsurface scattering as a random walk, for the membrane, which encloses a volume: the light
+// enters at p, is scattered many times inside and leaves where the walk meets the surface
+// again. So light gets through thin folds and into creases the way it does in tissue. What
+// share of the light each scattering keeps follows per colour from the colour of the surface
+// (the fit Cycles uses, after Christensen and Burley 2015). The scatter radius is how far the
+// light spreads along the surface; the distance between two scatterings inside is shorter, the
+// more so the more of the light a scattering keeps (diffusion: spread = step / sqrt(3 (1 - keep))).
+// Returns false when the light does not come out again.
+bool walk(inout vec3 p, inout vec3 n, inout vec3 through, vec3 albedo) {
+    vec3 A = clamp(albedo, vec3(0.02), vec3(0.98));
+    vec3 keep = 1.0 - exp(A * (-5.09406 + A * (2.61188 - A * 4.31805)));
+    vec3 density = 1.0 / max(F.matSss.y * F.matSssColor.rgb * sqrt(3.0 * (1.0 - keep)), vec3(1e-6));
+    vec3 o = p - n * (0.01 * F.sphere.x);
+    vec3 d = cosineDirection(-n);
+    vec3 weight = vec3(1.0);
+    for (int i = 0; i < 160; ++i) {
+        // A distance to the next scattering, from the density of one of the three colours.
+        float picked = density[min(int(rnd() * 3.0), 2)];
+        float t = -log(max(1.0 - rnd(), 1e-9)) / picked;
+        Surface hit;
+        if (nearestSurface(o, d, t, hit)) {
+            // The walk meets the surface before that: the light leaves here.
+            vec3 pass = exp(-density * hit.t);
+            weight *= pass / max((pass.r + pass.g + pass.b) / 3.0, 1e-20);
+            p = o + d * hit.t;
+            n = dot(hit.n, d) > 0.0 ? hit.n : -hit.n;  // the side it leaves on
+            through *= weight;
+            return true;
+        }
+        vec3 pass = exp(-density * t);
+        vec3 chance = density * pass;
+        weight *= keep * chance / max((chance.r + chance.g + chance.b) / 3.0, 1e-20);
+        if (max(weight.r, max(weight.g, weight.b)) < 1e-3) return false;  // as good as gone
+        o += d * t;
+        d = sphereDirection();
+    }
+    // The walk was cut short: what is left of the light leaves where it entered. (Only the
+    // colours that scatter with little loss get this far; dropping them would grey the material.)
+    through *= weight;
+    return true;
+}
+
 // What a bounced ray brings is capped (F.pt.y), so that a rare very bright path does not leave
 // a bright speck that takes thousands of samples to average out.
 vec3 capped(vec3 c, int bounce) { return bounce == 0 || F.pt.y <= 0.0 ? c : min(c, vec3(F.pt.y)); }
@@ -108,6 +150,10 @@ vec3 radiance(vec3 o, vec3 d, vec2 uv, inout vec4 guide, inout vec4 first) {
             break;
         }
         vec3 n = dot(s.n, d) > 0.0 ? -s.n : s.n;  // the side the ray arrives on
+        // A ray that arrives at the back of the membrane has come through the inside of the
+        // form, and the material there takes light away, the more the further the ray went. So
+        // light gets through a thin fold and not through the whole body.
+        if (k > 0 && F.misc.z > 4.5 && dot(s.n, d) > 0.0) through *= exp(-s.t / max(F.matSss.w * F.matSssColor.rgb, vec3(1e-4)));
         if (k == 0) {
             guide += vec4(n, s.t);
             first += vec4(s.albedo, 1.0);
@@ -162,17 +208,26 @@ vec3 radiance(vec3 o, vec3 d, vec2 uv, inout vec4 guide, inout vec4 first) {
             mirrored = true;
             lod = 0.6 * sqrt(s.material.y) * max(F.envSample.x - 1.0, 0.0);
         } else {
-            through *= matt / (1.0 - pMirror);
             vec3 q = p, m = n;
             bool moved = false;
             if (s.material.w > 0.0 && rnd() < s.material.w) {
                 // Through the sheet: the light goes on from the other side, tinted by the material.
+                through *= matt / (1.0 - pMirror);
                 m = -n;
                 through *= exp(-0.25 / max(F.matSssColor.rgb, vec3(1e-3)));
                 moved = true;
             } else if (s.material.z > 0.0 && F.matSss.y > 0.0 && rnd() < s.material.z) {
-                scatter(q, m, through);
+                if (F.misc.z > 4.5 && F.pt.z > 0.5) {
+                    // (The walk gives the light the colour of the material itself.)
+                    through *= (1.0 - F.matBase.y) / (1.0 - pMirror);
+                    if (!walk(q, m, through, s.albedo)) break;
+                } else {
+                    through *= matt / (1.0 - pMirror);
+                    scatter(q, m, through);
+                }
                 moved = true;
+            } else {
+                through *= matt / (1.0 - pMirror);
             }
             vec3 from = q + m * offset;
             if (moved) seen = sunSeen(from, m, toSun);

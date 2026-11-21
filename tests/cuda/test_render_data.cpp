@@ -47,19 +47,31 @@ CF_TEST(cuda_render_data_matches_the_host) {
     std::sort(got.begin(), got.end());
     CF_CHECK(got == want);
 
-    // Normals: those of the positions as they are now, not the ones the simulation keeps (which
-    // are from before the last move, and for a new cell its parent's). Then the three values;
-    // the curvature is measured against the same normal.
+    // The smoothed membrane: each cell's point on the limit surface of Loop subdivision and the
+    // normal there, from the positions as they are now (the normals the simulation keeps are
+    // from before the last move, and for a new cell its parent's). Then the three values; the
+    // curvature is measured against the normal of the cell's own ring.
     CF_CHECK_EQ(curv.normal.size(), static_cast<std::size_t>(n));
+    CF_CHECK_EQ(curv.smooth.size(), static_cast<std::size_t>(n));
     CF_CHECK_EQ(curv.extra.size(), static_cast<std::size_t>(n));
-    float worstNormal = 0.0f, worstCurvature = 0.0f, staleBy = 0.0f;
+    float worstNormal = 0.0f, worstSmooth = 0.0f, worstCurvature = 0.0f, staleBy = 0.0f, farthest = 0.0f;
+    std::uint32_t turned = 0;  // limit normals more than 60 degrees from the ring normal
+    std::uint32_t overshoot = 0;  // smoothed positions further from the cell than the centre of its ring is
     std::uint32_t staleSome = 0, staleMuch = 0;  // stored normals more than about 6 and 60 degrees off
     const float eps2 = normal_eps2(p.linkRestLength);
     bool generations = true, activator = now.morphB.size() == n;
     for (std::uint32_t v = 0; v < n; ++v) {
-        Vec3 fresh;
+        Vec3 fresh, limit, limitNormal;
         ring_normal(now.pos.data(), now.ring(v), now.deg[v], now.pos[v], now.normal[v], eps2, fresh);
-        worstNormal = std::max(worstNormal, length(fresh - curv.normal[v]));
+        loop_limit(now.pos.data(), now.ring(v), now.deg[v], now.pos[v], fresh, eps2, limit, limitNormal);
+        worstNormal = std::max(worstNormal, length(limitNormal - curv.normal[v]));
+        worstSmooth = std::max(worstSmooth, length(limit - curv.smooth[v]));
+        farthest = std::max(farthest, length(limit - now.pos[v]));
+        Vec3 centre{0.0f, 0.0f, 0.0f};
+        for (std::uint32_t k = 0; k < now.deg[v]; ++k) centre += now.pos[now.ring(v)[k]];
+        centre = centre * (1.0f / static_cast<float>(now.deg[v]));
+        overshoot += length(limit - now.pos[v]) > length(centre - now.pos[v]) + 1.0e-4f ? 1u : 0u;
+        turned += dot(limitNormal, fresh) < 0.5f ? 1u : 0u;
         const float off = length(fresh - now.normal[v]);
         staleBy = std::max(staleBy, off);
         staleSome += off > 0.1f ? 1u : 0u;
@@ -69,12 +81,18 @@ CF_TEST(cuda_render_data_matches_the_host) {
         generations = generations && curv.extra[v].x == static_cast<float>(now.gen[v]);
         activator = activator && curv.extra[v].z == morph_signal(now.morphB[v]);
     }
-    CF_CHECK_MSG(worstNormal <= 1.0e-5f, "normals differ by " << worstNormal);
+    CF_CHECK_MSG(worstNormal <= 1.0e-4f, "normals differ by " << worstNormal);
+    CF_CHECK_MSG(worstSmooth <= 1.0e-3f * p.linkRestLength, "smoothed positions differ by " << worstSmooth);
+    // The smoothed point lies between the cell and the centre of its ring, and the surface
+    // faces the way the rings do.
+    CF_CHECK_MSG(overshoot == 0u, overshoot << " smoothed positions lie beyond the centre of the ring");
+    CF_CHECK_MSG(turned <= n / 200u, turned << " limit normals point away from the ring normal");
     CF_CHECK_MSG(worstCurvature <= 1.0e-5f, "curvature differs by " << worstCurvature);
     CF_CHECK(generations);
     CF_CHECK(activator);
-    cftest::note(std::to_string(n) + " cells: " + std::to_string(want.size()) + " triangles; normals from the current positions (worst difference to the host " +
-                 std::to_string(worstNormal) + "; of the stored normals " + std::to_string(staleSome) + " are more than 0.1 off and " + std::to_string(staleMuch) +
+    cftest::note(std::to_string(n) + " cells: " + std::to_string(want.size()) + " triangles; smoothed positions (worst difference to the host " +
+                 std::to_string(worstSmooth) + ", at most " + std::to_string(farthest) + " from the cell) and their normals (worst difference " +
+                 std::to_string(worstNormal) + ", " + std::to_string(turned) + " more than 60 degrees from the ring normal; of the stored normals " + std::to_string(staleSome) + " are more than 0.1 off and " + std::to_string(staleMuch) +
                  " more than 1, the worst " + std::to_string(staleBy) + "), generation, curvature (worst " +
                  std::to_string(worstCurvature) + ") and activator equal to the host");
 }

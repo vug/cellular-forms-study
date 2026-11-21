@@ -6,7 +6,7 @@
 #include "palette.glsl"
 #include "patch.glsl"
 
-layout(set = 1, binding = 1, std430) readonly buffer CellPos { float cellPos[]; };      // 3 per cell
+layout(set = 1, binding = 11, std430) readonly buffer SurfacePos { float cellPos[]; };  // 3 per cell: where it lies on the surface drawn
 layout(set = 1, binding = 2, std430) readonly buffer CellBirth { uint cellBirth[]; };
 layout(set = 1, binding = 3, std430) readonly buffer CellFood { float cellFood[]; };
 layout(set = 1, binding = 4, std430) readonly buffer CellExtra { float cellExtra[]; };  // 3 per cell

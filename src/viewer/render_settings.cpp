@@ -120,6 +120,7 @@ std::vector<Entry> makeEntries() {
         number("radius", &RenderSettings::sphereRadius),
         number("minPixelRadius", &RenderSettings::minPixelRadius),
         whole("meshSmooth", &RenderSettings::meshSmooth),
+        flag("meshRelax", &RenderSettings::meshRelax),
         {"color",
          [](RenderSettings& s, const std::string& v) {
              if (v == "uniform") {
@@ -203,6 +204,7 @@ std::vector<Entry> makeEntries() {
         number("lensFocusShift", &RenderSettings::lensFocusShift),
         number("dofMaxBlur", &RenderSettings::dofMaxBlur),
         flag("fxaa", &RenderSettings::fxaa),
+        flag("taa", &RenderSettings::taa),
         flag("aaAccumulate", &RenderSettings::aaAccumulate),
         whole("aaFrames", &RenderSettings::aaFrames),
         number("renderScale", &RenderSettings::renderScale),
@@ -215,6 +217,7 @@ std::vector<Entry> makeEntries() {
         number("ptSunIntensity", &RenderSettings::ptSunIntensity),
         number("ptSkyIntensity", &RenderSettings::ptSkyIntensity),
         number("ptClamp", &RenderSettings::ptClamp),
+        flag("ptWalk", &RenderSettings::ptWalk),
         flag("ptDenoise", &RenderSettings::ptDenoise),
         number("ptDenoiseStrength", &RenderSettings::ptDenoiseStrength),
         flag("envLight", &RenderSettings::envLight),

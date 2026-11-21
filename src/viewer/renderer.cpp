@@ -65,8 +65,8 @@ const uint32_t kCombineFrag[] = {
 const uint32_t kDofFrag[] = {
 #include "dof.frag.inc"
 };
-const uint32_t kCopyFrag[] = {
-#include "copy.frag.inc"
+const uint32_t kTaaFrag[] = {
+#include "taa.frag.inc"
 };
 const uint32_t kBloomFrag[] = {
 #include "bloom.frag.inc"
@@ -103,6 +103,9 @@ constexpr VkFormat kEnvFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr VkShaderStageFlags kPushStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
 constexpr uint32_t kPushBytes = 32;
 constexpr uint64_t kMostFineTriangles = 12'000'000;  // the membrane is refined into no more small triangles than this
+// ... and into fewer when it is ray traced while it grows: the structure the rays are traced
+// against is built anew for every frame of the simulation, about 2.5 ms per million triangles.
+constexpr uint64_t kMostTracedLiveTriangles = 4'000'000;
 
 enum class VertexInput { None, Cells, CellsPos };
 enum class Blend { Opaque, Additive, Accumulate };
@@ -461,12 +464,13 @@ Renderer::Renderer(Context& ctx, VkFormat targetFormat) : ctx_(ctx), targetForma
     // Set 1, the cells: 0 the acceleration structure (with ray tracing), 1 positions, 2 birth
     // steps, 3 food, 4 the extra values, 5 the boxes of the cells (written by a compute pass),
     // 6 normals, 7 the triangles of the membrane, 8 .. 10 the membrane refined into patches
-    // (positions, normals, triangles; written by a compute pass).
+    // (positions, normals, triangles; written by a compute pass), 11 where each cell lies on
+    // the surface the membrane is drawn through (the smoothed positions, or the cells' own).
     {
         const VkShaderStageFlags stages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
         std::vector<VkDescriptorSetLayoutBinding> bindings;
         if (ctx_.hasRayTracing) bindings.push_back({0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
-        for (uint32_t i = 1; i <= 10; ++i) bindings.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, stages, nullptr});
+        for (uint32_t i = 1; i <= 11; ++i) bindings.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, stages, nullptr});
         VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         li.bindingCount = static_cast<uint32_t>(bindings.size());
         li.pBindings = bindings.data();
@@ -481,7 +485,7 @@ Renderer::Renderer(Context& ctx, VkFormat targetFormat) : ctx_(ctx), targetForma
         pi.pPoolSizes = sizes;
         vk_check(vkCreateDescriptorPool(ctx_.device, &pi, nullptr, &screenPool_), "vkCreateDescriptorPool");
 
-        std::vector<VkDescriptorPoolSize> cellSizes = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10}};
+        std::vector<VkDescriptorPoolSize> cellSizes = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 11}};
         if (ctx_.hasRayTracing) cellSizes.push_back({VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1});
         VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         ci.maxSets = 1;
@@ -533,7 +537,7 @@ Renderer::~Renderer() {
     destroyCellTree();
     for (Buffer* b : {&fine_.pos, &fine_.normal, &fine_.index}) ctx_.destroy(*b);
     for (VkPipeline p : {impostorPipeline_, xrayPipeline_, meshPipeline_, shadowCellsPipeline_, shadowMeshPipeline_, ssaoPipeline_, gatherPipeline_,
-                         blurPipeline_, lightPipeline_, sssPipeline_, combinePipeline_, dofPipeline_, accumulatePipeline_, bloomPipeline_,
+                         blurPipeline_, lightPipeline_, sssPipeline_, combinePipeline_, dofPipeline_, taaPipeline_, bloomPipeline_,
                          tonemapPipeline_, smoothPipeline_, pathTracePipeline_, denoisePipeline_, boxPipeline_, refinePipeline_, finalPipeline_[0],
                          finalPipeline_[1], finalPipeline_[2]})
         if (p) vkDestroyPipeline(ctx_.device, p, nullptr);
@@ -592,7 +596,7 @@ void Renderer::createPipelines() {
     sssPipeline_ = screen(kSssFrag, std::size(kSssFrag), {kHdrFormat});
     combinePipeline_ = screen(kCombineFrag, std::size(kCombineFrag), {kHdrFormat});
     dofPipeline_ = screen(kDofFrag, std::size(kDofFrag), {kHdrFormat});
-    accumulatePipeline_ = screen(kCopyFrag, std::size(kCopyFrag), {kAccumFormat}, Blend::Accumulate);
+    taaPipeline_ = screen(kTaaFrag, std::size(kTaaFrag), {kAccumFormat});
     bloomPipeline_ = screen(kBloomFrag, std::size(kBloomFrag), {kHdrFormat});
     tonemapPipeline_ = screen(kTonemapFrag, std::size(kTonemapFrag), {kLdrFormat});
     smoothPipeline_ = screen(kFinalFrag, std::size(kFinalFrag), {kLdrFormat});
@@ -617,7 +621,7 @@ void Renderer::createPipelines() {
 }
 
 void Renderer::destroyImages() {
-    for (Target* t : {&albedo_, &normalDepth_, &id_, &material_, &hdr_[0], &hdr_[1], &hdr_[2], &hdr_[3], &hdr_[4], &accum_, &bloom_[0], &bloom_[1],
+    for (Target* t : {&albedo_, &normalDepth_, &id_, &material_, &hdr_[0], &hdr_[1], &hdr_[2], &hdr_[3], &hdr_[4], &accum_, &accumB_, &bloom_[0], &bloom_[1],
                       &ldr_[0], &ldr_[1]}) {
         ctx_.destroy(t->image);
         t->layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -636,6 +640,7 @@ void Renderer::resize(VkExtent2D extent, float scale) {
     vkDeviceWaitIdle(ctx_.device);
     destroyImages();
     forgetSets();
+    noteAllocation("images of " + std::to_string(render.width) + " x " + std::to_string(render.height));
     extent_ = render;
     outExtent_ = extent;
     scale_ = static_cast<float>(render.width) / static_cast<float>(std::max(extent.width, 1u));
@@ -648,6 +653,9 @@ void Renderer::resize(VkExtent2D extent, float scale) {
     depth_ = ctx_.createImage(render, kDepthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
     for (Target& t : hdr_) make(t, render, kHdrFormat);
     make(accum_, render, kAccumFormat);
+    make(accumB_, render, kAccumFormat);
+    historyValid_ = false;
+    historyCount_ = 0.0f;
     const VkExtent2D quarter{std::max(render.width / 4u, 1u), std::max(render.height / 4u, 1u)};
     for (Target& t : bloom_) make(t, quarter, kHdrFormat);
     for (Target& t : ldr_) make(t, render, kLdrFormat);
@@ -661,6 +669,7 @@ void Renderer::ensureShadowMap(uint32_t size) {
     vkDeviceWaitIdle(ctx_.device);
     ctx_.destroy(shadowMap_.image);
     forgetSets();
+    noteAllocation("shadow map of " + std::to_string(size));
     shadowMap_.image = ctx_.createImage(VkExtent2D{size, size}, kDepthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                                         VK_IMAGE_ASPECT_DEPTH_BIT);
     shadowMap_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -800,6 +809,7 @@ void Renderer::setEnvironment(const float* rgb, int width, int height) {
     ctx_.destroy(envTable_);
     ctx_.destroy(envRows_);
     forgetSets();
+    noteAllocation("environment map");
     uint32_t levels = 1;
     for (int m = std::max(width, height); m > 1; m >>= 1) ++levels;
     envLevels_ = levels;
@@ -986,8 +996,10 @@ FrameSetup Renderer::makeUniforms(const OrbitCamera& camera, const RenderSetting
     u.sunWorld[1] = lightWorld.y;
     u.sunWorld[2] = lightWorld.z;
     u.sunWorld[3] = std::clamp(s.ptSunSize, 0.0f, 45.0f) * 3.14159265f / 180.0f;
-    set3(u.sky, s.skyColor, s.ptSkyIntensity);
-    set3(u.ground, s.groundColor, s.ptSunIntensity);
+    // The path tracer's sun and sky: the key light and the surroundings in the shares the
+    // raster modes give them, so a path traced image is about as bright as the raster one.
+    set3(u.sky, s.skyColor, std::clamp(s.ambient, 0.0f, 1.0f) * std::max(s.ptSkyIntensity, 0.0f));
+    set3(u.ground, s.groundColor, (1.0f - std::clamp(s.ambient, 0.0f, 1.0f)) * std::max(s.ptSunIntensity, 0.0f));
 
     // The view of the key light for the shadow map: an orthographic box around the scene.
     {
@@ -1015,6 +1027,7 @@ FrameSetup Renderer::makeUniforms(const OrbitCamera& camera, const RenderSetting
     u.rt[1] = s.rtAoRadius;
     u.pt[0] = static_cast<float>(std::clamp(s.ptBounces, 1, 16));
     u.pt[1] = std::max(s.ptClamp, 0.0f);
+    u.pt[2] = s.ptWalk ? 1.0f : 0.0f;
     u.lens[0] = std::max(s.lensAperture, 0.0f);
     u.lens[1] = std::max(s.lensFocus > 0.0f ? s.lensFocus : camera.distance + s.lensFocusShift * sceneRadius, zNear);
     u.lens[2] = std::clamp(s.dofMaxBlur, 1.0f, 64.0f) * scale_;
@@ -1072,38 +1085,44 @@ FrameSetup Renderer::makeUniforms(const OrbitCamera& camera, const RenderSetting
 
 // ------------------------------------------------------------------ the cells: buffers, patches, ray tracing
 
-// Segments per edge for a membrane of this many triangles: what is asked for, fewer for very
-// large forms.
-int Renderer::segmentsFor(uint32_t triangles, int wanted) const {
+// Segments per edge for a membrane of this many triangles: what is asked for, fewer when that
+// would make more than `mostSmall` small triangles.
+int Renderer::segmentsFor(uint32_t triangles, int wanted, uint64_t mostSmall) const {
     int n = std::clamp(wanted, 1, 8);
-    while (n > 1 && static_cast<uint64_t>(triangles) * static_cast<uint64_t>(n * n) > kMostFineTriangles) --n;
+    while (n > 1 && static_cast<uint64_t>(triangles) * static_cast<uint64_t>(n * n) > mostSmall) --n;
     return n;
 }
 
 // Buffers for the membrane refined into `segments` per edge; the triangle indices only when it
-// is going to be ray traced.
-void Renderer::ensureFineBuffers(uint32_t triangles, int segments, bool withIndex) {
+// is going to be ray traced. They are sized for the most the form can need while it grows to
+// `mostTriangles` with up to `wanted` segments, so a live run does not pause to enlarge them.
+void Renderer::ensureFineBuffers(uint32_t triangles, int segments, bool withIndex, uint32_t mostTriangles, int wanted, uint64_t cap) {
     const uint64_t points = static_cast<uint64_t>(triangles) * static_cast<uint64_t>((segments + 1) * (segments + 2) / 2);
     const uint64_t small = static_cast<uint64_t>(triangles) * static_cast<uint64_t>(segments * segments);
+    uint64_t mostPoints = points, mostSmall = small;
+    for (int n = 2; n <= std::clamp(wanted, 2, 8); ++n) {
+        const uint64_t most = std::min<uint64_t>(std::max(mostTriangles, triangles), cap / static_cast<uint64_t>(n * n));
+        mostPoints = std::max(mostPoints, most * static_cast<uint64_t>((n + 1) * (n + 2) / 2));
+        mostSmall = std::max(mostSmall, most * static_cast<uint64_t>(n * n));
+    }
     const bool growPoints = points > fine_.points || !fine_.pos.buffer;
     const bool growIndex = withIndex && (small > fine_.triangles || !fine_.index.buffer);
     if (!growPoints && !growIndex) return;
     vkDeviceWaitIdle(ctx_.device);
+    noteAllocation("membrane patches for " + std::to_string(mostPoints) + " points");
     const VkBufferUsageFlags traced = ctx_.hasRayTracing ? VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
                                                          : VkBufferUsageFlags{0};
     if (growPoints) {
         ctx_.destroy(fine_.pos);
         ctx_.destroy(fine_.normal);
-        // Half as much again, so a growing form asks for new buffers rarely (each time is a
-        // pause of some milliseconds), but never more than the largest refined membrane needs.
-        fine_.points = std::min<uint64_t>(points + points / 2 + 4096, std::max<uint64_t>(points, kMostFineTriangles * 3 / 2 + 4096));
+        fine_.points = mostPoints + 4096;
         fine_.pos = ctx_.createBuffer(fine_.points * 3 * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | traced, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         fine_.normal = ctx_.createBuffer(fine_.points * 3 * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         fine_.version = ~uint64_t{0};
     }
     if (growIndex) {
         ctx_.destroy(fine_.index);
-        fine_.triangles = std::min<uint64_t>(small + small / 2 + 4096, std::max<uint64_t>(small, kMostFineTriangles + 4096));
+        fine_.triangles = mostSmall + 4096;
         fine_.index = ctx_.createBuffer(fine_.triangles * 3 * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | traced, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         fine_.indexSegments = 0;
     }
@@ -1150,18 +1169,19 @@ VkAccelerationStructureBuildGeometryInfoKHR treeBuild(VkAccelerationStructureTyp
 
 }  // namespace
 
-// The acceleration structure and its buffers, sized for this many primitives (cells as boxes,
-// or triangles of the membrane) with room to grow, so they are not made anew for every new cell.
-void Renderer::ensureCellTree(uint32_t primitives, bool mesh) {
+// The acceleration structure and its buffers, sized for the most primitives (cells as boxes,
+// or triangles of the membrane) the form can grow to, so they are not made anew as it grows.
+void Renderer::ensureCellTree(uint32_t primitives, bool mesh, uint64_t mostPrimitives) {
     if (tree_.blas && tree_.mesh == mesh && primitives <= tree_.capacity) return;
     const VkBufferUsageFlags address = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     const VkBufferUsageFlags input = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | address;
     const VkBufferUsageFlags store = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | address;
     const VkMemoryPropertyFlags local = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    const uint32_t capacity = primitives + primitives / 4u + 1024u;
+    const uint32_t capacity = static_cast<uint32_t>(std::min<uint64_t>(std::max<uint64_t>(primitives, mostPrimitives) + 1024u, 0xFFFFFFF0u));
 
     vkDeviceWaitIdle(ctx_.device);
     destroyCellTree();
+    noteAllocation("ray tracing structure for " + std::to_string(capacity) + (mesh ? " triangles" : " cells"));
     tree_.capacity = capacity;
     tree_.mesh = mesh;
     // The boxes of the cells (the membrane needs none).
@@ -1218,8 +1238,8 @@ void Renderer::ensureCellTree(uint32_t primitives, bool mesh) {
 // Points set 1 at the cells of this frame and at what was derived from them. A per-cell buffer
 // the frame does not have is replaced by one of the same size, so a shader that reads it reads
 // something.
-void Renderer::bindCells(const PointBuffers& points) {
-    const VkBuffer buffers[10] = {
+void Renderer::bindCells(const PointBuffers& points, VkBuffer surface) {
+    const VkBuffer buffers[11] = {
         points.pos,
         points.birth,
         points.food,
@@ -1230,11 +1250,12 @@ void Renderer::bindCells(const PointBuffers& points) {
         fine_.pos.buffer ? fine_.pos.buffer : dummy_.buffer,
         fine_.normal.buffer ? fine_.normal.buffer : dummy_.buffer,
         fine_.index.buffer ? fine_.index.buffer : dummy_.buffer,
+        surface,
     };
-    VkDescriptorBufferInfo infos[10];
-    VkWriteDescriptorSet writes[11]{};
+    VkDescriptorBufferInfo infos[11];
+    VkWriteDescriptorSet writes[12]{};
     uint32_t count = 0;
-    for (uint32_t i = 0; i < 10; ++i) {
+    for (uint32_t i = 0; i < 11; ++i) {
         infos[i] = VkDescriptorBufferInfo{buffers[i], 0, VK_WHOLE_SIZE};
         VkWriteDescriptorSet& w = writes[count++];
         w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -1261,9 +1282,9 @@ void Renderer::bindCells(const PointBuffers& points) {
 
 // Computes the patches of the membrane (refine.comp) when the cells have changed, and the
 // indices of their small triangles when those are needed and not yet written.
-void Renderer::refineMembrane(VkCommandBuffer cmd, const PointBuffers& points, int segments, bool withIndex) {
+void Renderer::refineMembrane(VkCommandBuffer cmd, const PointBuffers& points, VkBuffer surface, int segments, bool withIndex) {
     const uint32_t triangles = points.indexCount / 3u;
-    const bool stale = fine_.version != points.version || fine_.segments != segments || fine_.count != triangles || fine_.from[0] != points.pos ||
+    const bool stale = fine_.version != points.version || fine_.segments != segments || fine_.count != triangles || fine_.from[0] != surface ||
                        fine_.from[1] != points.normal || fine_.from[2] != points.index;
     const bool indexStale = withIndex && (fine_.indexSegments != segments || fine_.indexCount != triangles);
     if (!stale && !indexStale) return;
@@ -1297,7 +1318,7 @@ void Renderer::refineMembrane(VkCommandBuffer cmd, const PointBuffers& points, i
     fine_.version = points.version;
     fine_.segments = segments;
     fine_.count = triangles;
-    fine_.from[0] = points.pos;
+    fine_.from[0] = surface;
     fine_.from[1] = points.normal;
     fine_.from[2] = points.index;
     if (withIndex) {
@@ -1310,11 +1331,11 @@ void Renderer::refineMembrane(VkCommandBuffer cmd, const PointBuffers& points, i
 // writes the box of every cell and the bottom level is built over the boxes. Membrane: the bottom
 // level is built over its (refined) triangles. The top level has one instance of it. Recorded
 // into the frame, before any render pass. Skipped while nothing has changed.
-void Renderer::buildCellTree(VkCommandBuffer cmd, const PointBuffers& points, float radius, bool mesh, int segments) {
+void Renderer::buildCellTree(VkCommandBuffer cmd, const PointBuffers& points, VkBuffer surface, float radius, bool mesh, int segments) {
     const uint32_t triangles = points.indexCount / 3u;
     const bool refined = mesh && segments > 1;
     const uint32_t primitives = mesh ? triangles * static_cast<uint32_t>(segments * segments) : points.count;
-    const VkBuffer from[2] = {points.pos, mesh ? points.index : VkBuffer{VK_NULL_HANDLE}};
+    const VkBuffer from[2] = {mesh ? surface : points.pos, mesh ? points.index : VkBuffer{VK_NULL_HANDLE}};
     if (tree_.version == points.version && tree_.count == primitives && tree_.from[0] == from[0] && tree_.from[1] == from[1] &&
         (mesh ? tree_.segments == segments : tree_.radius == radius))
         return;
@@ -1327,7 +1348,7 @@ void Renderer::buildCellTree(VkCommandBuffer cmd, const PointBuffers& points, fl
     VkAccelerationStructureGeometryKHR shape = treeShape(mesh, 0);
     if (mesh) {
         const uint32_t vertices = refined ? triangles * static_cast<uint32_t>((segments + 1) * (segments + 2) / 2) : points.count;
-        shape.geometry.triangles.vertexData.deviceAddress = refined ? ctx_.address(fine_.pos) : addressOf(points.pos);
+        shape.geometry.triangles.vertexData.deviceAddress = refined ? ctx_.address(fine_.pos) : addressOf(surface);
         shape.geometry.triangles.indexData.deviceAddress = refined ? ctx_.address(fine_.index) : addressOf(points.index);
         shape.geometry.triangles.maxVertex = vertices > 0 ? vertices - 1u : 0u;
     } else {
@@ -1413,13 +1434,15 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
     const bool drawMesh = membrane || drawMode == kDrawMembranePathTraced;
     const bool traceMesh = drawMode == kDrawMembranePathTraced || (membrane && traced);
     const uint32_t triangles = points.indexCount / 3u;
-    const int segments = drawMesh ? segmentsFor(triangles, settings.meshSmooth) : 1;
+    const bool growing = points.capacity > points.count;  // a live run
+    const uint64_t fineCap = traceMesh && growing ? kMostTracedLiveTriangles : kMostFineTriangles;
+    const int segments = drawMesh ? segmentsFor(triangles, settings.meshSmooth, fineCap) : 1;
     if (drawMesh) segmentsUsed_ = segments;
     u.mesh[0] = static_cast<float>(segments);
     u.mesh[1] = static_cast<float>((segments + 1) * (segments + 2) / 2);
     u.mesh[2] = static_cast<float>(segments * segments);
     u.rt[0] = traced ? static_cast<float>(std::clamp(settings.rtAoRays, 1, 64)) : 0.0f;
-    u.matEmission2[1] = traced && glowGather ? 1.0f : 0.0f;
+    u.matEmission2[1] = solid && glowGather ? 1.0f : 0.0f;  // by rays when there is ray tracing, else among what is on screen
 
     // The key light of the simulation: its direction in every mode, and in the raster modes its
     // own shadow map in place of the one drawn here.
@@ -1453,35 +1476,83 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
     if (!solid) u.lightColor[3] = 0.0f;
     u.shadow2[1] = shadowMap ? 1.0f : 0.0f;
 
-    // --- the running mean: frames of the raster modes or samples of the path tracer are averaged
-    // for as long as nothing that shows in the image changes.
+    // --- the image built over frames. Path tracer: its samples are averaged for as long as
+    // nothing that shows in the image changes. Raster modes: every frame is blended into the
+    // image so far (taa.frag). When something changed, the image so far is looked up where
+    // things were and counts for about eight frames; while nothing changes it is a running mean,
+    // drawn until there are enough frames, after which the view is only shown.
+    bool changed = false;
     {
         uint64_t key = fnv(&u, sizeof u);
         key = fnv(&points.version, sizeof points.version, key);
         key = fnv(&points.count, sizeof points.count, key);
         key = fnv(&envVersion_, sizeof envVersion_, key);
+        key = fnv(&settings.meshRelax, sizeof settings.meshRelax, key);
         if (key != accumKey_) {
             accumKey_ = key;
-            accumSamples_ = 0;
+            changed = true;
         }
     }
+    Mat4 viewProj;  // of this frame, before its sub-pixel shift
+    {
+        Mat4 view, proj;
+        std::memcpy(view.m, u.view, sizeof view.m);
+        std::memcpy(proj.m, u.proj, sizeof proj.m);
+        viewProj = multiply(proj, view);
+    }
     uint32_t newSamples = 0;
+    float blend = 1.0f;      // raster: the weight of this frame in the image so far
+    bool reproject = false;  // raster: things moved, so the image so far is looked up where they were
+    // How much a frame counts while things move. When only the camera moved, the lookup of where
+    // a point was is exact and the image so far is worth about eight frames. When the cells
+    // themselves changed it is not (the lookup does not know how they moved), and more than two
+    // frames would smear them.
+    const bool cellsMoved = points.version != cellsVersion_;
+    if (cellsMoved) {
+        cellChanges_ = framesSinceCells_ < 60u ? cellChanges_ + 1u : 1u;
+        framesSinceCells_ = 0;
+    } else if (framesSinceCells_ < 1000000u) {
+        ++framesSinceCells_;
+    }
+    if (framesSinceCells_ >= 60u) cellChanges_ = 0;
+    const bool running = cellChanges_ >= 2u;  // a simulation is publishing frames
+    const float kMovingBlend = cellsMoved ? 0.5f : 0.125f;
     if (pathTraced) {
+        if (changed) accumSamples_ = 0;
+        historyValid_ = false;  // accum_ now holds the path tracer's mean
         const uint32_t limit = static_cast<uint32_t>(std::max(settings.ptMaxSamples, 1));
         if (accumSamples_ < limit) newSamples = std::min(static_cast<uint32_t>(std::clamp(settings.ptSamplesPerFrame, 1, 64)), limit - accumSamples_);
         u.rt[2] = static_cast<float>(accumSamples_);
         u.rt[3] = static_cast<float>(newSamples);
     } else {
-        // Raster modes: a view that stands still is drawn again a fraction of a pixel aside and
-        // with fresh noise, until there are enough frames; then it is only shown.
-        const uint32_t limit = settings.aaAccumulate ? static_cast<uint32_t>(std::clamp(settings.aaFrames, 1, 4096)) : 1u;
-        if (accumSamples_ < limit) {
+        if (changed || !historyValid_) {
+            accumSamples_ = 0;
             newSamples = 1;
-            if (accumSamples_ > 0) {
-                u.proj[8] += 2.0f * (halton(accumSamples_, 2) - 0.5f) / static_cast<float>(extent_.width);
-                u.proj[9] += 2.0f * (halton(accumSamples_, 3) - 0.5f) / static_cast<float>(extent_.height);
-                u.aa[0] = static_cast<float>(accumSamples_);
+            if (settings.taa && historyValid_) {
+                reproject = true;
+                blend = std::max(1.0f / (historyCount_ + 1.0f), kMovingBlend);
+            } else {
+                historyCount_ = 0.0f;
             }
+        } else if (accumSamples_ < (settings.aaAccumulate ? static_cast<uint32_t>(std::clamp(settings.aaFrames, 1, 4096)) : 1u)) {
+            newSamples = 1;
+            // What was gathered while things moved is a little soft: once the view is still it
+            // counts for three frames, and the frames drawn now soon outweigh it. Between two
+            // frames of a running simulation the mean is kept short, so the image does not
+            // sharpen and fall back in the rhythm of the simulation.
+            if (accumSamples_ == 1 || running) historyCount_ = std::min(historyCount_, 3.0f);
+            blend = 1.0f / (historyCount_ + 1.0f);
+        }
+        if (newSamples > 0) {
+            // The sub-pixel shift and fresh noise: on every frame with the blending over time,
+            // otherwise only while the view stands still (a single frame then stays as it is).
+            if (settings.taa || !changed) {
+                ++jitterIndex_;
+                u.proj[8] += 2.0f * (halton(jitterIndex_ % 1024u + 1u, 2) - 0.5f) / static_cast<float>(extent_.width);
+                u.proj[9] += 2.0f * (halton(jitterIndex_ % 1024u + 1u, 3) - 0.5f) / static_cast<float>(extent_.height);
+                u.aa[0] = static_cast<float>(jitterIndex_ % 4096u + 1u);
+            }
+            std::memcpy(u.prevViewProj, prevViewProj_, sizeof u.prevViewProj);
         }
     }
     std::memcpy(uniformBuffer_.mapped, &u, sizeof u);
@@ -1489,11 +1560,24 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
     // --- the cells: set 1, the patches of the membrane, what the rays are traced against
     const bool needTree = havePoints && (pathTraced || traced) && newSamples > 0;
     const bool refine = havePoints && drawMesh && segments > 1 && newSamples > 0;
-    if (refine) ensureFineBuffers(triangles, segments, traceMesh);
-    if (needTree) ensureCellTree(traceMesh ? triangles * static_cast<uint32_t>(segments * segments) : points.count, traceMesh);
-    if (havePoints && newSamples > 0 && (drawMesh || needTree)) bindCells(points);
-    if (refine) refineMembrane(cmd, points, segments, traceMesh);
-    if (needTree) buildCellTree(cmd, points, settings.sphereRadius, traceMesh, segments);
+    // (A closed sheet of n cells has 2 n - 4 triangles.)
+    const uint32_t mostCells = std::max(points.capacity, points.count);
+    const uint32_t mostTriangles = std::max(2u * mostCells, triangles);
+    if (refine) ensureFineBuffers(triangles, segments, traceMesh, mostTriangles, settings.meshSmooth, fineCap);
+    if (needTree) {
+        uint64_t most = mostCells;
+        if (traceMesh) {
+            most = mostTriangles;
+            for (int n = 2; n <= std::clamp(settings.meshSmooth, 1, 8); ++n)
+                most = std::max<uint64_t>(most, std::min<uint64_t>(mostTriangles, fineCap / static_cast<uint64_t>(n * n)) * static_cast<uint64_t>(n * n));
+        }
+        ensureCellTree(traceMesh ? triangles * static_cast<uint32_t>(segments * segments) : points.count, traceMesh, most);
+    }
+    // The surface the membrane is drawn through: the smoothed positions, or the cells' own.
+    const VkBuffer surface = settings.meshRelax && points.smooth ? points.smooth : points.pos;
+    if (havePoints && newSamples > 0 && (drawMesh || needTree)) bindCells(points, surface);
+    if (refine) refineMembrane(cmd, points, surface, segments, traceMesh);
+    if (needTree) buildCellTree(cmd, points, surface, settings.sphereRadius, traceMesh, segments);
 
     auto read = [&](Target& t) {
         toRead(cmd, t);
@@ -1622,7 +1706,7 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
             vkCmdDraw(cmd, 3, 1, 0, 0);
             vkCmdEndRendering(cmd);
         } else {
-            screenPass(cmd, ssaoPipeline_, hdr_[0], screenSet(false, {read(normalDepth_)}));
+            screenPass(cmd, ssaoPipeline_, hdr_[0], screenSet(false, {read(normalDepth_), read(albedo_), read(material_)}));
         }
         screenPass(cmd, blurPipeline_, hdr_[1], screenSet(false, {read(normalDepth_), read(hdr_[0])}));
 
@@ -1659,20 +1743,20 @@ void Renderer::record(VkCommandBuffer cmd, VkImageView targetView, const PointBu
             image = &hdr_[2];
         }
 
-        // --- into the running mean
+        // --- into the image built over the frames: read from accum_, written to its partner,
+        // and the two change places
         {
-            const bool keep = accumSamples_ > 0;
-            const VkDescriptorSet set = screenSet(false, {read(*image)});
-            toWrite(cmd, accum_, keep);
-            beginPass(cmd, extent_, {accum_.image.view}, keep ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR, VK_NULL_HANDLE);
-            const float weight = 1.0f / static_cast<float>(accumSamples_ + 1u);
-            const float constants[4] = {weight, weight, weight, weight};
-            vkCmdSetBlendConstants(cmd, constants);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, accumulatePipeline_);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set, 0, nullptr);
-            vkCmdDraw(cmd, 3, 1, 0, 0);
-            vkCmdEndRendering(cmd);
+            struct {
+                float weight;
+                int32_t moving;
+            } push{blend, reproject ? 1 : 0};
+            screenPass(cmd, taaPipeline_, accumB_, screenSet(false, {read(*image), readLinear(accum_), read(normalDepth_)}), &push, sizeof push);
+            std::swap(accum_, accumB_);
+            historyCount_ = reproject ? std::min(historyCount_ + 1.0f, 1.0f / kMovingBlend - 1.0f) : historyCount_ + 1.0f;
+            historyValid_ = true;
+            cellsVersion_ = points.version;
             accumSamples_ += 1;
+            std::memcpy(prevViewProj_, viewProj.m, sizeof prevViewProj_);
         }
     }
 

@@ -13,7 +13,7 @@ const std::vector<Material>& materials() {
         {"clay", "matt, nothing scatters: the plain look the viewer starts with", {0.80f, 0.74f, 0.66f}, 0.6f, 0.0f, 0.5f, 0.0f, 0.0f, 1.5f, {1.0f, 0.35f, 0.2f}, 0.0f, 3.0f,
          0.0f, {1.0f, 0.75f, 0.35f}, 0.0f, {0, 0, 0, 0}, {0.0f, 0.2f, 0.0f, 0.0f}, {1.0f, 0.9f, 1.0f, 1.0f}, false},
         {"skin", "soft highlights, red light under the surface, thin parts glow against the light", {0.80f, 0.52f, 0.42f}, 0.42f, 0.0f, 0.5f, 0.25f,
-         0.9f, 2.6f, {1.0f, 0.36f, 0.18f}, 0.25f, 4.0f, 0.0f, {1.0f, 0.75f, 0.35f}, 0.0f, {0, 0, 0, 0}, {0.0f, 0.2f, 0.0f, 0.0f},
+         0.9f, 2.6f, {1.0f, 0.36f, 0.18f}, 0.15f, 4.0f, 0.0f, {1.0f, 0.75f, 0.35f}, 0.0f, {0, 0, 0, 0}, {0.0f, 0.2f, 0.0f, 0.0f},
          {1.0f, 0.9f, 1.0f, 1.0f}, false},
         {"tissue", "a thin wet membrane: much of the light goes through", {0.90f, 0.72f, 0.68f}, 0.3f, 0.0f, 0.6f, 0.3f, 0.6f, 1.6f, {1.0f, 0.5f, 0.4f},
          0.6f, 7.0f, 0.0f, {1.0f, 0.75f, 0.35f}, 0.0f, {0, 0, 0, 0}, {0.0f, 0.2f, 0.0f, 0.0f}, {1.0f, 0.9f, 1.0f, 1.0f}, false},

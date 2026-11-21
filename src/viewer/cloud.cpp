@@ -57,11 +57,17 @@ Cloud cloudFromState(const cf::State& s, std::string label) {
 }
 
 void addTopology(Cloud& c, const cf::State& s) {
-    // Normals from the positions as they are: the ones the state keeps are those its last step
-    // started from, and a cell born in that step still has its parent's.
+    // The membrane is drawn through the limit surface of Loop subdivision: each cell's point on
+    // it and the normal there, from the positions as they are. (The normals the state keeps are
+    // those its last step started from, and a cell born in that step still has its parent's.)
     c.normal.resize(s.n);
+    c.smooth.resize(s.n);
+    std::vector<cf::Vec3> ringNormal(s.n);
     const float eps2 = cf::normal_eps2(s.params.linkRestLength);
-    for (std::uint32_t v = 0; v < s.n; ++v) cf::ring_normal(s.pos.data(), s.ring(v), s.deg[v], s.pos[v], s.normal[v], eps2, c.normal[v]);
+    for (std::uint32_t v = 0; v < s.n; ++v) {
+        cf::ring_normal(s.pos.data(), s.ring(v), s.deg[v], s.pos[v], s.normal[v], eps2, ringNormal[v]);
+        cf::loop_limit(s.pos.data(), s.ring(v), s.deg[v], s.pos[v], ringNormal[v], eps2, c.smooth[v], c.normal[v]);
+    }
     const auto faces = cf::mesh_faces(s);
     c.indices.clear();
     c.indices.reserve(faces.size() * 3);
@@ -70,7 +76,7 @@ void addTopology(Cloud& c, const cf::State& s) {
     c.curvature.resize(s.n);
     for (std::uint32_t v = 0; v < s.n; ++v) {
         c.generation[v] = static_cast<float>(s.gen[v]);
-        c.curvature[v] = cf::cell_curvature(s.pos.data(), s.ring(v), s.deg[v], s.pos[v], c.normal[v], s.params.linkRestLength);
+        c.curvature[v] = cf::cell_curvature(s.pos.data(), s.ring(v), s.deg[v], s.pos[v], ringNormal[v], s.params.linkRestLength);
     }
     c.activator.clear();
     if (s.morphB.size() >= s.n) {
@@ -136,6 +142,7 @@ CloudGpu::~CloudGpu() {
     ctx_.destroy(normal_);
     ctx_.destroy(index_);
     ctx_.destroy(extra_);
+    ctx_.destroy(smooth_);
 }
 
 void CloudGpu::upload(const Cloud& cloud) {
@@ -171,10 +178,15 @@ void CloudGpu::upload(const Cloud& cloud) {
     // Membrane data, when the cloud has it (replaced on every upload: sizes differ per file).
     ctx_.destroy(normal_);
     ctx_.destroy(index_);
+    ctx_.destroy(smooth_);
     indexCount_ = 0;
     if (!cloud.indices.empty() && cloud.normal.size() == cloud.pos.size()) {
         const VkMemoryPropertyFlags props = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
         normal_ = ctx_.createBuffer(static_cast<VkDeviceSize>(n) * sizeof(cf::Vec3), cellBufferUsage(ctx_) | VK_BUFFER_USAGE_TRANSFER_DST_BIT, props);
+        if (cloud.smooth.size() == cloud.pos.size()) {
+            smooth_ = ctx_.createBuffer(static_cast<VkDeviceSize>(n) * sizeof(cf::Vec3), cellBufferUsage(ctx_) | VK_BUFFER_USAGE_TRANSFER_DST_BIT, props);
+            ctx_.upload(smooth_, cloud.smooth.data(), static_cast<VkDeviceSize>(n) * sizeof(cf::Vec3));
+        }
         index_ = ctx_.createBuffer(cloud.indices.size() * sizeof(std::uint32_t),
                                    cellBufferUsage(ctx_, true) | VK_BUFFER_USAGE_TRANSFER_DST_BIT, props);
         ctx_.upload(normal_, cloud.normal.data(), static_cast<VkDeviceSize>(n) * sizeof(cf::Vec3));

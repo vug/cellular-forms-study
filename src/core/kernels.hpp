@@ -40,6 +40,37 @@ CF_FN bool ring_normal(const Vec3* pos, const std::uint32_t* ring, std::uint32_t
     return true;
 }
 
+// For drawing the membrane smoothly. The mesh has one corner per cell, and the cells do not lie
+// on a smooth surface exactly. Loop subdivision of the mesh converges to a smooth surface; this
+// gives the point of that surface a cell goes to, and the normal of the surface there, from the
+// cell and its ring alone (Loop 1987, with the limit masks of Hoppe et al. 1994). The ring
+// must be in cyclic order; with the counter-clockwise-from-outside order the normal points
+// outward. Returns false, with `prev` as the normal, when the ring is degenerate.
+CF_FN bool loop_limit(const Vec3* pos, const std::uint32_t* ring, std::uint32_t d, Vec3 P, Vec3 prev, float eps2, Vec3& limit, Vec3& normal) {
+    const float n = static_cast<float>(d);
+    const float step = 6.28318530718f / n;
+    const float c = 0.375f + 0.25f * std::cos(step);
+    const float beta = (0.625f - c * c) / n;        // weight of a neighbour in one subdivision step
+    const float chi = 1.0f / (n + 0.375f / beta);   // ... and in the limit
+    Vec3 sum{0.0f, 0.0f, 0.0f}, t1{0.0f, 0.0f, 0.0f}, t2{0.0f, 0.0f, 0.0f};
+    for (std::uint32_t k = 0; k < d; ++k) {
+        const Vec3 q = pos[ring[k]];
+        const float a = step * static_cast<float>(k);
+        sum += q;
+        t1 += q * std::cos(a);
+        t2 += q * std::sin(a);
+    }
+    limit = P * (1.0f - n * chi) + sum * chi;
+    const Vec3 across = cross(t1, t2);  // the two sums span the tangent plane of the limit surface
+    const float l2 = dot(across, across);
+    if (!(l2 > eps2)) {  // also true for NaN
+        normal = prev;
+        return false;
+    }
+    normal = across * (1.0f / std::sqrt(l2));
+    return true;
+}
+
 struct KernelParams {
     float l0;         // linkRestLength
     float spring;     // springFactor

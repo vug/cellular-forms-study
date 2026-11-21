@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "hash.hpp"
 #include "kernels.hpp"
 
 namespace cf {
@@ -151,6 +152,71 @@ State make_icosphere(int level, const Params& params) {
 
     State s = state_from_faces(pos, f);
     s.params = params;
+    return s;
+}
+
+namespace {
+
+// Rescales positions so the mean link length is the rest length, then recomputes the normals.
+void finish_shape(State& s, const char* what) {
+    double sum = 0.0;
+    std::uint64_t links = 0;
+    for (std::uint32_t v = 0; v < s.n; ++v) {
+        for (std::uint32_t k = 0; k < s.deg[v]; ++k) {
+            sum += length(s.pos[v] - s.pos[s.ring(v)[k]]);
+            ++links;
+        }
+    }
+    const float scale = static_cast<float>(static_cast<double>(s.params.linkRestLength) / (sum / static_cast<double>(links)));
+    for (Vec3& p : s.pos) p = p * scale;
+    for (std::uint32_t v = 0; v < s.n; ++v) {
+        Vec3 nrm;
+        if (!ring_normal(s.pos.data(), s.ring(v), s.deg[v], s.pos[v], Vec3{0.0f, 0.0f, 0.0f}, 0.0f, nrm))
+            throw std::runtime_error(std::string(what) + ": degenerate ring at cell " + std::to_string(v));
+        s.normal[v] = nrm;
+    }
+    const CheckResult c = check_invariants(s);
+    if (!c.ok()) throw std::runtime_error(std::string(what) + ": " + c.message);
+}
+
+// Smooth value noise in [-1, 1] from hashed lattice values (trilinear, smoothstep weights).
+float value_noise(Vec3 p, std::uint64_t seed) {
+    const float fx = std::floor(p.x), fy = std::floor(p.y), fz = std::floor(p.z);
+    const float tx = p.x - fx, ty = p.y - fy, tz = p.z - fz;
+    const float ux = tx * tx * (3.0f - 2.0f * tx), uy = ty * ty * (3.0f - 2.0f * ty), uz = tz * tz * (3.0f - 2.0f * tz);
+    const std::int64_t ix = static_cast<std::int64_t>(fx), iy = static_cast<std::int64_t>(fy), iz = static_cast<std::int64_t>(fz);
+    auto corner = [&](std::int64_t dx, std::int64_t dy, std::int64_t dz) {
+        std::uint64_t h = mix64(seed ^ 0xA24BAED4963EE407ull);
+        h = mix64(h ^ static_cast<std::uint64_t>(ix + dx));
+        h = mix64(h ^ static_cast<std::uint64_t>(iy + dy));
+        h = mix64(h ^ static_cast<std::uint64_t>(iz + dz));
+        return static_cast<float>(h >> 40) * (2.0f / 16777216.0f) - 1.0f;
+    };
+    auto mixf = [](float a, float b, float t) { return a + (b - a) * t; };
+    const float x00 = mixf(corner(0, 0, 0), corner(1, 0, 0), ux), x10 = mixf(corner(0, 1, 0), corner(1, 1, 0), ux);
+    const float x01 = mixf(corner(0, 0, 1), corner(1, 0, 1), ux), x11 = mixf(corner(0, 1, 1), corner(1, 1, 1), ux);
+    return mixf(mixf(x00, x10, uy), mixf(x01, x11, uy), uz);
+}
+
+}  // namespace
+
+State make_ellipsoid(int level, const Params& params, float ax, float ay, float az) {
+    if (!(ax > 0.0f && ay > 0.0f && az > 0.0f) || !is_finite(Vec3{ax, ay, az})) throw std::runtime_error("make_ellipsoid: axes must be finite and > 0");
+    State s = make_icosphere(level, params);
+    for (Vec3& p : s.pos) p = Vec3{p.x * ax, p.y * ay, p.z * az};
+    finish_shape(s, "make_ellipsoid");
+    return s;
+}
+
+State make_noisy_sphere(int level, const Params& params, float amplitude, float frequency, std::uint64_t seed) {
+    if (!(amplitude >= 0.0f && amplitude < 1.0f)) throw std::runtime_error("make_noisy_sphere: amplitude must be in [0, 1)");
+    if (!(frequency > 0.0f) || !is_finite(frequency)) throw std::runtime_error("make_noisy_sphere: frequency must be finite and > 0");
+    State s = make_icosphere(level, params);
+    for (Vec3& p : s.pos) {
+        const Vec3 dir = unit_or_zero(p);
+        p = p * (1.0f + amplitude * value_noise(dir * frequency, seed));
+    }
+    finish_shape(s, "make_noisy_sphere");
     return s;
 }
 

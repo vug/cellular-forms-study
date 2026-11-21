@@ -26,7 +26,11 @@ CF_FN Vec3 cross(Vec3 a, Vec3 b) {
 }
 CF_FN float length2(Vec3 a) { return dot(a, a); }
 CF_FN float length(Vec3 a) { return std::sqrt(dot(a, a)); }
-CF_FN bool is_finite(Vec3 a) { return std::isfinite(a.x) && std::isfinite(a.y) && std::isfinite(a.z); }
+// Finite test that also works in CUDA device code: std::isfinite under nvcc with the MSVC
+// headers returns false for everything (found by the CUDA port). |x| <= FLT_MAX is exact:
+// false for NaN and for +-infinity, true otherwise.
+CF_FN bool is_finite(float x) { return std::fabs(x) <= 3.402823466e+38f; }
+CF_FN bool is_finite(Vec3 a) { return is_finite(a.x) && is_finite(a.y) && is_finite(a.z); }
 
 // Smallest length unit() will normalise. Positions are in units of linkRestLength ~ 1, so this
 // is far below any meaningful separation and far above float denormals.

@@ -28,6 +28,8 @@ void usage() {
         "\n"
         "Start from:\n"
         "  --new icosphere:<level>   subdivided icosahedron, level 0..9 (12, 42, 162, 642, 2562, ... cells)\n"
+        "  --new ellipsoid:<level>:<ax>:<ay>:<az>    the same mesh stretched to an ellipsoid with these axis ratios\n"
+        "  --new noisy:<level>:<amplitude>:<frequency>   sphere with radius 1 + amplitude * smooth noise (amplitude < 1)\n"
         "  --load <file.cfs>         a checkpoint (for example <out>/latest.cfs to resume a run)\n"
         "Parameters (only with --new, or to change them when resuming):\n"
         "  --seed <n>                random seed (default 1; ignored with --load)\n"
@@ -184,8 +186,16 @@ int main(int argc, char** argv) {
         cf::State initial;
         const bool fresh = !opt.newSpec.empty();
         if (fresh) {
-            const std::string prefix = "icosphere:";
-            if (opt.newSpec.rfind(prefix, 0) != 0) die("--new expects icosphere:<level>");
+            std::vector<std::string> spec;
+            {
+                std::stringstream ss(opt.newSpec);
+                std::string part;
+                while (std::getline(ss, part, ':')) spec.push_back(part);
+            }
+            const bool isIco = spec.size() == 2 && spec[0] == "icosphere";
+            const bool isEllipsoid = spec.size() == 5 && spec[0] == "ellipsoid";
+            const bool isNoisy = spec.size() == 4 && spec[0] == "noisy";
+            if (!isIco && !isEllipsoid && !isNoisy) die("--new expects icosphere:<level>, ellipsoid:<level>:<ax>:<ay>:<az> or noisy:<level>:<amplitude>:<frequency>");
             cf::Params params;
             if (!opt.paramsFile.empty()) {
                 const std::vector<char> text = cf::read_file(opt.paramsFile);
@@ -196,7 +206,12 @@ int main(int argc, char** argv) {
                 const std::string err = cf::apply_text(params, kv);
                 if (!err.empty()) die("--param: " + err);
             }
-            initial = cf::make_icosphere(static_cast<int>(to_u64("--new", opt.newSpec.substr(prefix.size()))), params);
+            const int level = static_cast<int>(to_u64("--new", spec[1]));
+            if (isIco) initial = cf::make_icosphere(level, params);
+            else if (isEllipsoid)
+                initial = cf::make_ellipsoid(level, params, static_cast<float>(to_double("--new", spec[2])), static_cast<float>(to_double("--new", spec[3])),
+                                             static_cast<float>(to_double("--new", spec[4])));
+            else initial = cf::make_noisy_sphere(level, params, static_cast<float>(to_double("--new", spec[2])), static_cast<float>(to_double("--new", spec[3])), opt.seed);
             initial.seed = opt.seed;
             if (opt.initFood == "random") cf::randomise_initial_food(initial);
         } else {

@@ -24,6 +24,15 @@ State make_octahedron();
 // link length equals params.linkRestLength.
 State make_icosphere(int level, const Params& params);
 
+// Other genus-0 starts: the icosphere's mesh with different positions (docs/model.md section 4).
+// Both are rescaled so the mean link length is params.linkRestLength.
+// Ellipsoid with semi-axis ratios (ax, ay, az), all > 0.
+State make_ellipsoid(int level, const Params& params, float ax, float ay, float az);
+// Sphere whose radius is modulated by smooth hashed noise: r = 1 + amplitude * noise(direction),
+// noise in [-1, 1], 0 <= amplitude < 1. `frequency` is the number of noise cells per unit of
+// the unit sphere's coordinates (about 1 to 4 for a few lobes).
+State make_noisy_sphere(int level, const Params& params, float amplitude, float frequency, std::uint64_t seed);
+
 // ---------------------------------------------------------------- invariant checker
 
 enum class Invariant {

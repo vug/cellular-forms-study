@@ -403,3 +403,61 @@ CF_TEST(parallel_selection_winners_are_independent) {
     cftest::note(std::to_string(totalWinners) + " winners of " + std::to_string(totalCandidates) + " candidates over 12 rounds, final cells " +
                  std::to_string(s.n));
 }
+
+// Other genus-0 starts: same mesh, different positions; valid, outward normals, mean link at rest.
+CF_TEST(other_genus0_starts_are_valid) {
+    Params p;
+    auto mean_link = [](const State& s) {
+        double sum = 0.0;
+        std::uint64_t links = 0;
+        for (std::uint32_t v = 0; v < s.n; ++v)
+            for (std::uint32_t k = 0; k < s.deg[v]; ++k) {
+                sum += length(s.pos[v] - s.pos[s.ring(v)[k]]);
+                ++links;
+            }
+        return sum / static_cast<double>(links);
+    };
+    const State e = make_ellipsoid(3, p, 2.0f, 1.0f, 0.5f);
+    require_ok(e, "ellipsoid");
+    CF_CHECK(std::fabs(mean_link(e) - 1.0) < 1e-4);
+    float ex = 0.0f, ez = 0.0f;
+    for (std::uint32_t v = 0; v < e.n; ++v) {
+        CF_CHECK(dot(e.normal[v], e.pos[v]) > 0.0f);  // star-shaped: normals point away from the centre
+        ex = std::max(ex, std::fabs(e.pos[v].x));
+        ez = std::max(ez, std::fabs(e.pos[v].z));
+    }
+    CF_CHECK(std::fabs(ex / ez - 4.0f) < 0.05f);  // the 2 : 0.5 axis ratio survived the rescale
+
+    const State a = make_noisy_sphere(3, p, 0.4f, 2.0f, 7);
+    const State b = make_noisy_sphere(3, p, 0.4f, 2.0f, 7);
+    const State c = make_noisy_sphere(3, p, 0.4f, 2.0f, 8);
+    require_ok(a, "noisy sphere");
+    CF_CHECK(std::fabs(mean_link(a) - 1.0) < 1e-4);
+    CF_CHECK_EQ(checksum(a), checksum(b));  // reproducible from the seed
+    CF_CHECK(checksum(a) != checksum(c));
+    float rmin = 1e9f, rmax = 0.0f;
+    for (std::uint32_t v = 0; v < a.n; ++v) {
+        CF_CHECK(dot(a.normal[v], a.pos[v]) > 0.0f);
+        rmin = std::min(rmin, length(a.pos[v]));
+        rmax = std::max(rmax, length(a.pos[v]));
+    }
+    CF_CHECK(rmax / rmin > 1.2f);  // it really is lumpy
+    cftest::note("noisy sphere radius range " + std::to_string(rmin) + " .. " + std::to_string(rmax));
+
+    for (float bad : {-1.0f, 0.0f}) {
+        bool threw = false;
+        try {
+            make_ellipsoid(2, p, bad, 1.0f, 1.0f);
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        CF_CHECK(threw);
+    }
+    bool threw = false;
+    try {
+        make_noisy_sphere(2, p, 1.5f, 2.0f, 1);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    CF_CHECK(threw);
+}

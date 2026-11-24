@@ -104,9 +104,17 @@ async function loadShape(shape) {
   }
   const entry = shapes.files.get(shape);
   if (!entry) throw new Error(`there is no start shape '${shape}' on this server`);
-  const r = await fetch(new URL('starts/' + entry.file, import.meta.url));
-  if (!r.ok) throw new Error(`start shape '${shape}' could not be loaded (${r.status})`);
-  const mesh = parseCheckpoint(await r.arrayBuffer());
+  // The state file itself, or (where a host serves no binary files, as claude.ai artifacts) its
+  // bytes in base64 inside starts.json.
+  let bytes;
+  if (entry.b64) {
+    bytes = Uint8Array.from(atob(entry.b64), (c) => c.charCodeAt(0)).buffer;
+  } else {
+    const r = await fetch(new URL('starts/' + entry.file, import.meta.url));
+    if (!r.ok) throw new Error(`start shape '${shape}' could not be loaded (${r.status})`);
+    bytes = await r.arrayBuffer();
+  }
+  const mesh = parseCheckpoint(bytes);
   shapes.meshes.set(shape, mesh);
   return mesh;
 }

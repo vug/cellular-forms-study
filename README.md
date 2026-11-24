@@ -5,7 +5,9 @@
 **[Cellular Forms Live](https://claude.ai/artifact/Xt2Grz2v3ZSKWjsbk6zKeT)**: grow forms in your browser (needs WebGPU and a free Claude account).
 
 A reimplementation of Andy Lomas's "Cellular Forms": a closed sheet of cells that relaxes, grows
-and divides, simulated on the GPU and viewed live. `docs/design.md` is the design, `docs/model.md`
+and divides, simulated on the GPU and viewed live. The
+[slides](https://claude.ai/artifact/Jwuwcgqu99SH9iqRfS4Qaq#slide-92be4b748044) are the best
+introduction to the project. `docs/design.md` is the design, `docs/model.md`
 the model, `docs/progress/PROGRESS.md` the log of what was built and verified.
 
 ## How to run things

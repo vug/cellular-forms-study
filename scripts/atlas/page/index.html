@@ -1567,12 +1567,17 @@ function growCommand(r) {
   const target = r.target || r.cells, cap = Math.ceil(1.5 * target), out = "runs\\grown\\" + r.id;
   const names = D.params.filter((k) => k in r.params).concat(Object.keys(r.params).filter((k) => !D.params.includes(k)));
   const params = names.map((k) => "--param " + k + "=" + r.params[k]).join(" ");
-  const tail = "--capacity " + cap + " --until-cells " + target + " --out " + out + (params ? " " + params : "");
-  if (String(r.init).startsWith("icosphere:")) return {text: "build\\release\\bin\\cf_gpu.exe --new " + r.init + " --seed " + r.seed + " --init-food " + r.food + " " + tail, note: null};
+  // It stops where the run stopped: at the cell count, or at the run's last step if that came
+  // first (a run that ran out of steps, or one the early-stop rule ended).
+  const tail = "--capacity " + cap + " --until-cells " + target + (r.step ? " --until-step " + r.step : "") + " --out " + out + (params ? " " + params : "");
+  const short = r.cells != null && r.cells < 0.9 * target
+    ? "This run stopped at step " + fmt(r.step) + " with " + fmt(r.cells) + " cells (" + String(r.status).replace("-", " ") + "), so the command stops at that step too, where the picture was taken. Leave out --until-step " + r.step + " to grow it on to " + fmt(target) + " cells."
+    : null;
+  if (String(r.init).startsWith("icosphere:")) return {text: "build\\release\\bin\\cf_gpu.exe --new " + r.init + " --seed " + r.seed + " --init-food " + r.food + " " + tail, note: short};
   return {
     text: "build\\release\\bin\\cf_run.exe --new " + r.init + " --seed " + r.seed + " --init-food " + r.food + " --steps 0 --out " + out + "\\start" + (params ? " " + params : "") + "\n" +
       "build\\release\\bin\\cf_gpu.exe --load " + out + "\\start\\latest.cfs " + tail,
-    note: "cf_gpu makes only icospheres itself. For this start shape, cf_run --new " + r.init + " --steps 0 makes the start state first (first line), and cf_gpu loads it.",
+    note: "cf_gpu makes only icospheres itself. For this start shape, cf_run --new " + r.init + " --steps 0 makes the start state first (first line), and cf_gpu loads it." + (short ? " " + short : ""),
   };
 }
 function metricRow(r, k) {

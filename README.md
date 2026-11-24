@@ -2,6 +2,8 @@
 
 ![A grown form in the desktop viewer: a branching, coral-like membrane of about a hundred thousand cells, path traced with the tissue material and coloured by cell generation](docs/cellular_forms_viewer.webp)
 
+**[Cellular Forms Live](https://claude.ai/artifact/Xt2Grz2v3ZSKWjsbk6zKeT)**: grow forms in your browser (needs WebGPU and a free Claude account).
+
 A reimplementation of Andy Lomas's "Cellular Forms": a closed sheet of cells that relaxes, grows
 and divides, simulated on the GPU and viewed live. `docs/design.md` is the design, `docs/model.md`
 the model, `docs/progress/PROGRESS.md` the log of what was built and verified.

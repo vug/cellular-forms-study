@@ -1021,8 +1021,16 @@ async function boot() {
 }
 
 // ------------------------------------------------------------------------------------ start
+// What the page grows when it is opened without a link: this gallery form, which keeps growing
+// past the step of its picture (opened from the gallery or by #g= it pauses there).
+const DEFAULT_FORM = 5031;
+
 async function main() {
-  const fromLink = await applyLink(location.hash);
+  let fromLink = await applyLink(location.hash);
+  if (!fromLink && (await applyLink('#g=' + DEFAULT_FORM)) && state.setup.gallery === DEFAULT_FORM) {
+    state.pauseAt = 0;
+    fromLink = true;
+  }
   buildPanel();
   syncSetup();
   syncCamera();

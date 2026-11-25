@@ -20,6 +20,22 @@ target_include_directories(imgui PUBLIC imgui imgui/backends)
 target_link_libraries(imgui PUBLIC glfw Vulkan::Vulkan)
 target_compile_features(imgui PUBLIC cxx_std_17)
 
+# --- OpenXR loader (for cf_vr): the loader only, linked statically; no API layers, tests or
+# conformance suite. The SDK repository carries its generated sources, so no Python is needed.
+if(CF_BUILD_VR AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/openxr/CMakeLists.txt)
+  set(BUILD_API_LAYERS OFF CACHE BOOL "" FORCE)
+  set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(BUILD_CONFORMANCE_TESTS OFF CACHE BOOL "" FORCE)
+  set(BUILD_SDK_TESTS OFF CACHE BOOL "" FORCE)
+  set(BUILD_WITH_SYSTEM_JSONCPP OFF CACHE BOOL "" FORCE)
+  set(DYNAMIC_LOADER OFF CACHE BOOL "" FORCE)
+  add_subdirectory(openxr EXCLUDE_FROM_ALL)
+endif()
+
 # --- stb (header-only; stb_image_write for PNG captures)
 add_library(stb INTERFACE)
 target_include_directories(stb INTERFACE stb)
+
+# --- nlohmann/json (header-only; the viewer's gallery reads gallery.json with it)
+add_library(nlohmann_json INTERFACE)
+target_include_directories(nlohmann_json SYSTEM INTERFACE json/single_include)

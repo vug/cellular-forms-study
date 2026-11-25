@@ -19,6 +19,7 @@
 #include "cloud.hpp"
 #include "core/params.hpp"
 #include "core/sim.hpp"
+#include "core/start.hpp"
 #include "renderer.hpp"
 #include "vk_context.hpp"
 
@@ -30,12 +31,24 @@ namespace cfv {
 
 enum class LiveBackend { Cpu, Cuda };
 
+// A full start: what cf_run --new takes (core/start.hpp), and where to pause.
+struct LiveStart {
+    std::string shape = "icosphere:2";  // icosphere:<level>, ellipsoid:..., noisy:... (cf::make_start_state)
+    cf::StartFood food = cf::StartFood::Random;
+    std::uint64_t seed = 1;
+    cf::Params params;                  // maxCells is replaced by the capacity of the live run
+    std::uint64_t pauseAtStep = 0;      // > 0: the run pauses when its step counter reaches this (see pauseAtStep())
+};
+
 struct LiveConfig {
     LiveBackend backend = LiveBackend::Cuda;
-    int level = 2;                    // icosphere subdivision level of the start state
+    int level = 2;                    // icosphere subdivision level of the start state (when `shape` is empty)
     std::uint64_t seed = 1;
     cf::Params params;                // params.maxCells is the capacity of the shared buffers
     bool startRunning = true;
+    std::string shape;                // a start shape string instead of the icosphere of `level`
+    cf::StartFood food = cf::StartFood::Random;
+    std::uint64_t pauseAtStep = 0;    // as LiveStart::pauseAtStep
 };
 
 struct LiveStatus {
@@ -53,6 +66,10 @@ struct LiveStatus {
     std::uint64_t publishedFrames = 0;
     cf::Params params;                // the parameters the simulation is using now
     std::uint64_t seed = 0;
+    std::string shape;                // the start of the run now
+    cf::StartFood food = cf::StartFood::Random;
+    std::uint64_t pauseAt = 0;        // the step the run will pause at (0: none)
+    bool pausedAtStep = false;        // it paused there (until it runs again or starts over)
 };
 
 // What to draw this frame.
@@ -76,7 +93,12 @@ public:
     void setRunning(bool running);
     void stepOnce(int steps);                 // advance exactly this many steps, then pause
     void setParams(const cf::Params& params); // applied between steps; rejected values are reported in status().message
-    void restart(std::uint64_t seed, int level, const cf::Params& params);  // same backend and capacity
+    void restart(std::uint64_t seed, int level, const cf::Params& params);  // same backend and capacity; icosphere of `level`, random food
+    void restart(const LiveStart& start);     // same backend and capacity; a failure keeps the run there was and is reported in status().message
+    // The run pauses exactly when its step counter reaches `step` (0: no pause). Run, or more
+    // single steps, then go on past it: the pause happens once. A step at or before the current
+    // one is ignored.
+    void pauseAtStep(std::uint64_t step);
     void setStepsPerSecondLimit(double limit);  // 0 = as fast as possible
     LiveStatus status() const;
 
@@ -138,7 +160,7 @@ private:
     void ensureLightMapBuffers();
     void ensureMotionBuffers();
     void releaseSlots();
-    void buildSimulation(std::uint64_t seed, int level, const cf::Params& params);
+    void buildSimulation(const LiveStart& start);
     void publish();
 
     Context& ctx_;
@@ -178,9 +200,8 @@ private:
     bool haveNewParams_ = false;
     cf::Params newParams_;
     bool restartRequested_ = false;
-    std::uint64_t restartSeed_ = 0;
-    int restartLevel_ = 0;
-    cf::Params restartParams_;
+    LiveStart restartStart_;
+    std::uint64_t pauseAt_ = 0;           // 0: none
     double stepLimit_ = 0.0;
     bool forcePublish_ = true;
     LiveStatus status_;

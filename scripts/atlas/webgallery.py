@@ -103,7 +103,7 @@ def cmd_web_gallery(args):
         for k, (r, d, _run_dir) in enumerate(part):
             label = labels.get(r["id"], {})
             items.append({
-                "id": r["id"], "kind": r["cluster"], "seed": r["seed"], "init": r["init"]["shape"], "food": r["init"].get("food", "random"),
+                "id": r["id"], "origin": r["origin"], "status": r["status"], "kind": r["cluster"], "seed": r["seed"], "init": r["init"]["shape"], "food": r["init"].get("food", "random"),
                 "sources": sorted((r["genome"].get("sources") or {}).keys()), "params": {key: float(f"{v:.9g}") for key, v in r["params"].items()},
                 "target": r["target_cells"], "cells": r["cells"], "step": r["step"],
                 "metrics": {m: float(f"{features.raw(d, m):.4g}") for m in SHOWN if features.raw(d, m) is not None},

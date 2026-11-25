@@ -4,9 +4,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -24,6 +26,7 @@
 #include "cloud.hpp"
 #include "environment.hpp"
 #include "frame_source.hpp"
+#include "gallery.hpp"
 #include "live.hpp"
 #include "materials.hpp"
 
@@ -56,7 +59,10 @@ private:
     void handleCamera();
     void showFrame(int index);
     void drawFrame();
-    void startLive(bool cuda);
+    void startLive(bool cuda, const GalleryStart* start = nullptr);
+    bool ensureGallery();
+    void buildGalleryUi();
+    void growGalleryForm(const GalleryItem& item);
     void selfTestTick();
     Scene scene() const;
     RenderSettings shadingFor(const Scene& sc) const;
@@ -110,6 +116,15 @@ private:
     std::uint64_t selfTestStepAtPause_ = 0;
     bool selfTestFailed_ = false;
     std::string selfTestLog_;
+
+    // The gallery (live mode): forms grown before, to grow one again.
+    std::unique_ptr<GalleryPanel> gallery_;
+    bool galleryOpen_ = false;
+    std::string galleryError_;
+    std::optional<GalleryStart> galleryRun_;      // the gallery form the live run is growing
+    std::optional<GalleryStart> galleryRebuild_;  // ... to be started on new buffers at the top of the next frame
+    bool galleryReached_ = false;                 // the run paused at the form's step
+    std::uint32_t galleryReachedCells_ = 0;       // with this many cells
 
     OrbitCamera camera_;
     RenderSettings settings_;
@@ -183,7 +198,19 @@ Window::Window(const ViewOptions& o) : o_(o), playing_(o.play), playFps_(o.playF
         uiSeed_ = static_cast<int>(o.liveSeed);
         uiMaxCells_ = static_cast<int>(o.liveParams.maxCells);
         uiStepLimit_ = static_cast<float>(o.liveStepLimit);
-        startLive(o.liveCuda);
+        galleryOpen_ = o.showGallery;
+        if (o.galleryId > 0) {
+            // Start with a form of the gallery: its start, seed and parameters.
+            if (!ensureGallery()) throw std::runtime_error("--gallery: " + galleryError_);
+            const GalleryItem* item = gallery_->data().find(o.galleryId);
+            if (item == nullptr) throw std::runtime_error("--gallery: there is no form " + std::to_string(o.galleryId) + " in " + gallery_->data().file.string());
+            // As a click in the gallery does it: the live run starts over with the form.
+            startLive(o.liveCuda);
+            growGalleryForm(*item);
+            if (!galleryRun_) throw std::runtime_error("--gallery: " + galleryError_);
+        } else {
+            startLive(o.liveCuda);
+        }
         camera_.frame(cf::Vec3{}, 8.0f);
     } else {
         gpu_ = std::make_unique<CloudGpu>(*ctx_);
@@ -198,6 +225,7 @@ Window::~Window() {
     if (ctx_ && ctx_->device) {
         vkDeviceWaitIdle(ctx_->device);
         live_.reset();
+        gallery_.reset();  // (its textures are registered with the ImGui backend)
         ImGui_ImplVulkan_Shutdown();
         ImGui_ImplGlfw_Shutdown();
         ImGui::DestroyContext();
@@ -214,18 +242,31 @@ Window::~Window() {
     glfwTerminate();
 }
 
-// (Re)creates the live simulation. Called with no frame in flight.
-void Window::startLive(bool cuda) {
+// (Re)creates the live simulation. Called with no frame in flight. With `start`: a form of the
+// gallery (its start, seed and parameters, pausing at its step), on buffers large enough for it.
+void Window::startLive(bool cuda, const GalleryStart* start) {
     vkDeviceWaitIdle(ctx_->device);
     live_.reset();
     liveFrame_ = LiveFrame{};
     framedOnce_ = false;
     LiveConfig config;
+    if (start != nullptr) {
+        // Room for the form at its step and some growth past it.
+        const std::uint64_t need = start->cells + start->cells / 2u + 4096u;
+        if (need > static_cast<std::uint64_t>(uiMaxCells_)) uiMaxCells_ = static_cast<int>(std::min<std::uint64_t>(need, 600000000u));
+        uiParams_ = start->params;
+        uiSeed_ = static_cast<int>(start->seed);
+        if (start->shape.rfind("icosphere:", 0) == 0) uiLevel_ = std::atoi(start->shape.c_str() + 10);
+        config.shape = start->shape;
+        config.food = start->food;
+        config.pauseAtStep = start->pauseAtStep;
+        galleryReached_ = false;
+    }
     config.level = uiLevel_;
-    config.seed = static_cast<std::uint64_t>(std::max(uiSeed_, 0));
+    config.seed = start != nullptr ? start->seed : static_cast<std::uint64_t>(std::max(uiSeed_, 0));
     config.params = uiParams_;
     config.params.maxCells = static_cast<std::uint32_t>(std::max(uiMaxCells_, 1024));
-    config.startRunning = !o_.livePaused;
+    config.startRunning = start != nullptr || !o_.livePaused;
     liveError_.clear();
     if (cuda) {
         try {
@@ -243,6 +284,81 @@ void Window::startLive(bool cuda) {
     uiCuda_ = live_->backend() == LiveBackend::Cuda;
     live_->setStepsPerSecondLimit(uiStepLimit_);
     liveStatus_ = live_->status();
+}
+
+// The gallery panel, made the first time it is needed. False (galleryError_ says why) when the
+// gallery cannot be loaded.
+bool Window::ensureGallery() {
+    if (!gallery_) {
+        try {
+            GalleryOptions go;
+            go.file = o_.galleryFile;
+            go.thumbWidth = 128.0f * ImGui::GetStyle().FontScaleDpi;
+            gallery_ = std::make_unique<GalleryPanel>(GalleryVulkan{ctx_->gpu, ctx_->device, ctx_->queue, ctx_->queueFamily}, go);
+        } catch (const std::exception& e) {
+            galleryError_ = e.what();
+            return false;
+        }
+    }
+    if (!gallery_->loaded()) {
+        galleryError_ = gallery_->status();
+        return false;
+    }
+    galleryError_.clear();
+    return true;
+}
+
+// Grows a form of the gallery again: restarts the live run with its start, seed and
+// parameters, running until the step it was pictured at.
+void Window::growGalleryForm(const GalleryItem& item) {
+    std::string why;
+    const std::optional<GalleryStart> start = galleryStart(item, &why);
+    if (!start) {
+        galleryError_ = why;
+        return;
+    }
+    galleryError_.clear();
+    gallery_->setCurrent(item.id);
+    galleryRun_ = start;
+    galleryReached_ = false;
+    const std::uint64_t need = start->cells + start->cells / 2u + 4096u;
+    if (need > live_->capacity()) {
+        galleryRebuild_ = start;  // larger buffers: made at the top of the next frame, with no frame in flight
+        return;
+    }
+    uiParams_ = start->params;
+    uiParams_.maxCells = live_->capacity();
+    uiSeed_ = static_cast<int>(start->seed);
+    if (start->shape.rfind("icosphere:", 0) == 0) uiLevel_ = std::atoi(start->shape.c_str() + 10);
+    LiveStart ls;
+    ls.shape = start->shape;
+    ls.food = start->food;
+    ls.seed = start->seed;
+    ls.params = start->params;
+    ls.pauseAtStep = start->pauseAtStep;
+    live_->restart(ls);
+    live_->setRunning(true);
+    framedOnce_ = false;
+}
+
+void Window::buildGalleryUi() {
+    if (!galleryOpen_) return;
+    const float em = ImGui::GetFontSize();
+    ImGui::SetNextWindowPos(ImVec2(400.0f * ImGui::GetStyle().FontScaleDpi + 24.0f, 12.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(std::min(em * 60.0f, static_cast<float>(swapExtent_.width) * 0.62f), static_cast<float>(swapExtent_.height) * 0.8f),
+                             ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Gallery", &galleryOpen_)) {
+        if (!ensureGallery()) {
+            ImGui::TextWrapped("%s", galleryError_.c_str());
+        } else {
+            const GalleryData& d = gallery_->data();
+            ImGui::TextDisabled("%s, %zu forms grown before: click one to grow it again", d.source == "atlas" ? "The atlas" : "The web app's gallery",
+                                d.items.size());
+            ImGui::SetItemTooltip("%s", d.file.string().c_str());
+            if (const GalleryItem* chosen = gallery_->draw(ImVec2(0.0f, 0.0f))) growGalleryForm(*chosen);
+        }
+    }
+    ImGui::End();
 }
 
 void Window::createSwapchain() {
@@ -350,7 +466,7 @@ void Window::initImGui() {
     ii.Device = ctx_->device;
     ii.QueueFamily = ctx_->queueFamily;
     ii.Queue = ctx_->queue;
-    ii.DescriptorPoolSize = 16;
+    ii.DescriptorPoolSize = 24;  // ImGui's own textures and the gallery's two
     ii.MinImageCount = 2;
     ii.ImageCount = static_cast<uint32_t>(swapImages_.size());
     ii.UseDynamicRendering = true;
@@ -445,6 +561,36 @@ void Window::buildSimulationUi() {
     if (!st.message.empty()) ImGui::TextWrapped("%s", st.message.c_str());
     if (!liveError_.empty()) ImGui::TextWrapped("%s", liveError_.c_str());
 
+    if (galleryRun_) {
+        // The form of the gallery being grown again, with its picture.
+        const GalleryStart& g = *galleryRun_;
+        const float h = ImGui::GetFontSize() * 4.6f;
+        float aspect = 4.0f / 3.0f;
+        if (gallery_ && gallery_->loaded() && gallery_->data().tiles.tileH > 0)
+            aspect = static_cast<float>(gallery_->data().tiles.tileW) / static_cast<float>(gallery_->data().tiles.tileH);
+        if (gallery_) {
+            gallery_->drawTile(g.id, ImVec2(h * aspect, h));
+            ImGui::SameLine();
+        }
+        ImGui::BeginGroup();
+        ImGui::Text("Growing gallery form %d", g.id);
+        ImGui::TextDisabled("%s, %s food, seed %llu", g.shape.c_str(), cf::start_food_name(g.food), static_cast<unsigned long long>(g.seed));
+        if (galleryReached_) {
+            const bool same = galleryReachedCells_ == g.cells;
+            ImGui::TextColored(same ? ImVec4(0.5f, 0.9f, 0.5f, 1.0f) : ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "step %llu: %u cells, gallery %llu%s",
+                               static_cast<unsigned long long>(g.pauseAtStep), galleryReachedCells_, static_cast<unsigned long long>(g.cells),
+                               same ? " (the same)" : " (DIFFERENT)");
+        } else {
+            ImGui::Text("pauses at step %llu (gallery: %llu cells)", static_cast<unsigned long long>(g.pauseAtStep), static_cast<unsigned long long>(g.cells));
+        }
+        if (ImGui::SmallButton("Grow it again") && gallery_) {
+            if (const GalleryItem* item = gallery_->data().find(g.id)) growGalleryForm(*item);
+        }
+        ImGui::EndGroup();
+    }
+    if (ImGui::Button(galleryOpen_ ? "Close the gallery (G)" : "Gallery... (G)")) galleryOpen_ = !galleryOpen_;
+    if (!galleryError_.empty()) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "%s", galleryError_.c_str());
+
     if (ImGui::Button(st.running ? "Pause" : "Run")) live_->setRunning(!st.running);
     ImGui::SameLine();
     if (ImGui::Button("Step")) live_->stepOnce(1);
@@ -537,11 +683,15 @@ void Window::buildSimulationUi() {
     ImGui::InputInt("seed", &uiSeed_);
     ImGui::SetNextItemWidth(140 * ImGui::GetStyle().FontScaleDpi);
     ImGui::SliderInt("icosphere level", &uiLevel_, 0, 6);
-    if (ImGui::Button("Reset")) live_->restart(static_cast<std::uint64_t>(std::max(uiSeed_, 0)), uiLevel_, uiParams_);
+    if (ImGui::Button("Reset")) {
+        live_->restart(static_cast<std::uint64_t>(std::max(uiSeed_, 0)), uiLevel_, uiParams_);
+        galleryRun_.reset();
+    }
     ImGui::SameLine();
     if (ImGui::Button("Reset with next seed")) {
         ++uiSeed_;
         live_->restart(static_cast<std::uint64_t>(std::max(uiSeed_, 0)), uiLevel_, uiParams_);
+        galleryRun_.reset();
     }
     ImGui::SetNextItemWidth(160 * ImGui::GetStyle().FontScaleDpi);
     ImGui::InputInt("max cells", &uiMaxCells_, 100000, 1000000);
@@ -881,6 +1031,11 @@ void Window::buildUi() {
     if (ImGui::Button("Save PNG")) saveRequested_ = true;
     ImGui::TextDisabled("drag: orbit   right-drag: pan   wheel: zoom");
     ImGui::End();
+
+    if (live_) {
+        if (!ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_G, false)) galleryOpen_ = !galleryOpen_;
+        buildGalleryUi();
+    }
 }
 
 // Scripted use of the live controls, for unattended testing. Stages are spread over the run.
@@ -918,16 +1073,25 @@ void Window::selfTestTick() {
         log("25 single steps");
     } else if (at(5, 0.55)) {
         if (liveStatus_.step != selfTestStepAtPause_ + 25) selfTestFailed_ = true;  // exactly 25, then paused again
+        const std::uint64_t advanced = liveStatus_.step - selfTestStepAtPause_;
+        selfTestStepAtPause_ = liveStatus_.step + 30;
+        live_->pauseAtStep(selfTestStepAtPause_);
         live_->setRunning(true);
-        log(std::string("resume (single steps advanced ") + std::to_string(liveStatus_.step - selfTestStepAtPause_) + ")");
-    } else if (at(6, 0.65)) {
+        log(std::string("resume (single steps advanced ") + std::to_string(advanced) + "), to pause 30 steps on");
+    } else if (at(6, 0.60)) {
+        // Paused exactly at the step asked for; running again goes on past it.
+        if (liveStatus_.step != selfTestStepAtPause_ || liveStatus_.running || !liveStatus_.pausedAtStep) selfTestFailed_ = true;
+        live_->setRunning(true);
+        log("paused at step " + std::to_string(liveStatus_.step) + " (asked for " + std::to_string(selfTestStepAtPause_) + "); run");
+    } else if (at(7, 0.65)) {
+        if (liveStatus_.step <= selfTestStepAtPause_) selfTestFailed_ = true;  // it went on past the pause
         ++uiSeed_;
         uiParams_ = cf::Params{};
         uiParams_.maxCells = static_cast<std::uint32_t>(uiMaxCells_);
         uiParams_.foodMax = 0.01f;
         live_->restart(static_cast<std::uint64_t>(uiSeed_), uiLevel_, uiParams_);
         log("reset with the next seed, foodMax 0.01");
-    } else if (at(7, 0.80)) {
+    } else if (at(8, 0.80)) {
         if (liveStatus_.seed != static_cast<std::uint64_t>(uiSeed_)) selfTestFailed_ = true;
         uiParams_.planarFactor = 0.25f;
         uiParams_.foodMax = 0.03f;
@@ -978,12 +1142,30 @@ void Window::drawFrame() {
                 status_ = e.what();
             }
         }
+        if (galleryRebuild_) {  // a gallery form that needs larger buffers than the run has
+            const GalleryStart start = *galleryRebuild_;
+            galleryRebuild_.reset();
+            try {
+                startLive(live_->backend() == LiveBackend::Cuda, &start);
+            } catch (const std::exception& e) {
+                status_ = e.what();
+            }
+        }
         // What the simulation has to publish besides the cells: the membrane, its light map.
         live_->setRenderNeeds(settings_.drawMode == kDrawMembrane || settings_.drawMode == kDrawMembranePathTraced, settings_.simLight,
                               settings_.taa && settings_.cellMotion);
         // Switch to the newest frame the simulation has published; never waits for a step.
         liveFrame_ = live_->acquire();
         liveStatus_ = live_->status();
+        if (galleryRun_ && !galleryReached_ && liveStatus_.pausedAtStep && liveStatus_.step == galleryRun_->pauseAtStep &&
+            liveStatus_.seed == galleryRun_->seed && liveStatus_.shape == galleryRun_->shape) {
+            galleryReached_ = true;
+            galleryReachedCells_ = liveStatus_.cells;
+            std::printf("gallery form %d: paused at step %llu with %u cells; the gallery has %llu cells there%s\n", galleryRun_->id,
+                        static_cast<unsigned long long>(liveStatus_.step), liveStatus_.cells, static_cast<unsigned long long>(galleryRun_->cells),
+                        liveStatus_.cells == galleryRun_->cells ? " (the same)" : " (DIFFERENT)");
+            std::fflush(stdout);
+        }
         if (o_.liveSelfTest) selfTestTick();
         if (liveStatus_.publishedFrames != seenPublished_) {
             seenPublished_ = liveStatus_.publishedFrames;
@@ -1174,10 +1356,23 @@ int Window::run() {
                         static_cast<unsigned long long>(st.publishedFrames),
                         st.failed ? "FAILED" : (st.capacityReached ? "capacity reached" : "ok"));
             if (!st.message.empty()) std::printf("live message: %s\n", st.message.c_str());
+            if (galleryRun_) {
+                const GalleryStart& g = *galleryRun_;
+                if (galleryReached_) {
+                    const bool same = galleryReachedCells_ == g.cells;
+                    std::printf("gallery form %d (%s, seed %llu): at step %llu %u cells, the gallery %llu -> %s\n", g.id, g.shape.c_str(),
+                                static_cast<unsigned long long>(g.seed), static_cast<unsigned long long>(g.pauseAtStep), galleryReachedCells_,
+                                static_cast<unsigned long long>(g.cells), same ? "MATCH" : "MISMATCH");
+                    if (!same) code = 5;
+                } else {
+                    std::printf("gallery form %d: step %llu not reached (the run is at step %llu)\n", g.id, static_cast<unsigned long long>(g.pauseAtStep),
+                                static_cast<unsigned long long>(st.step));
+                }
+            }
             if (o_.liveSelfTest) {
-                const bool complete = selfTestStage_ == 8;
+                const bool complete = selfTestStage_ == 9;
                 const bool ok = complete && !selfTestFailed_ && selfTestRejected_ == 1 && !st.failed && slow == 0;
-                std::printf("selftest stages run: %d of 8\n%s", selfTestStage_, selfTestLog_.c_str());
+                std::printf("selftest stages run: %d of 9\n%s", selfTestStage_, selfTestLog_.c_str());
                 std::printf("selftest: invalid parameters rejected %d time(s) (expected 1), control checks %s, stalls %zu -> %s\n",
                             selfTestRejected_, selfTestFailed_ ? "FAILED" : "ok", slow, ok ? "PASS" : "FAIL");
                 if (!ok) code = 4;

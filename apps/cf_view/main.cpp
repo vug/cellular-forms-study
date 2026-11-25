@@ -33,6 +33,12 @@ void usage() {
         "  --param key=value      any simulation parameter, repeatable\n"
         "  --paused               start paused;  --step-limit <steps/s>\n"
         "  --live-selftest        scripted parameter changes, pause, single steps and reset (with --exit-after)\n"
+        "  --gallery <id>         grow form <id> of the gallery (its start shape, seed and parameters) and pause\n"
+        "                         at the step it was pictured at; implies --live. With --exit-after the cell\n"
+        "                         count there is compared with the gallery's (exit code 5 when they differ)\n"
+        "  --gallery-file <path>  the gallery to read (default: runs/atlas/gallery/gallery.json if it exists,\n"
+        "                         else web/app/gallery/gallery.json)\n"
+        "  --show-gallery         open the gallery window at the start (the G key and a button open it too)\n"
         "\n"
         "Headless capture (no window; works with the screen locked):\n"
         "  --screenshot <out.png> render one frame offscreen and exit\n"
@@ -222,6 +228,14 @@ int main(int argc, char** argv) {
             } else if (a == "--live-selftest") {
                 o.live = true;
                 o.liveSelfTest = true;
+            } else if (a == "--gallery") {
+                o.galleryId = std::atoi(next());
+                if (o.galleryId <= 0) throw std::runtime_error("--gallery expects the id of a form");
+                o.live = true;
+            } else if (a == "--gallery-file") {
+                o.galleryFile = next();
+            } else if (a == "--show-gallery") {
+                o.showGallery = true;
             } else if (a == "--window-capture") {
                 o.windowCapture = next();
             } else if (a == "--window-capture-frame") {

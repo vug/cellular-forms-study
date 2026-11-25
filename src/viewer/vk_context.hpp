@@ -41,6 +41,14 @@ struct ContextDesc {
     // Leave these off even when the GPU has them, to see what the viewer does on one that does not.
     bool allowRayTracing = true;
     bool allowBarycentric = true;
+
+    // For a host that must make the Vulkan objects itself (OpenXR through XR_KHR_vulkan_enable2:
+    // the runtime creates the instance and the device and names the GPU). Each one that is set
+    // is called in place of vkCreateInstance, the choice of GPU, and vkCreateDevice, with the
+    // create infos the context would have used. Left empty, nothing changes.
+    std::function<VkResult(const VkInstanceCreateInfo&, VkInstance&)> createInstance;
+    std::function<VkPhysicalDevice(VkInstance)> chooseGpu;
+    std::function<VkResult(VkPhysicalDevice, const VkDeviceCreateInfo&, VkDevice&)> createDevice;
 };
 
 class Context {
@@ -73,6 +81,12 @@ public:
     // Number of validation errors reported so far (0 when validation is off).
     uint32_t validationErrorCount() const;
     uint32_t validationWarningCount() const;
+    // Marks the calling thread as inside a call into another component that uses this device
+    // (an OpenXR runtime's xrEndFrame, say) until it is set back to nullptr. Validation messages
+    // raised meanwhile are labelled with the name and also counted here: they come from that
+    // component's own Vulkan calls. (They stay in validationErrorCount as well.)
+    static void setValidationScope(const char* name);
+    uint32_t validationErrorsInScopes() const;
 
     uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) const;
     Buffer createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props, bool map = false,

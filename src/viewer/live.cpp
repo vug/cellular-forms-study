@@ -33,12 +33,14 @@ namespace {
 
 using SteadyClock = std::chrono::steady_clock;
 
-cf::State makeStart(std::uint64_t seed, int level, const cf::Params& params) {
-    cf::State s = cf::make_icosphere(std::clamp(level, 0, 8), params);
-    s.params = params;
-    s.seed = seed;
-    cf::randomise_initial_food(s);
-    return s;
+// The start of the old restart(seed, level, params): an icosphere with random food.
+LiveStart icosphereStart(std::uint64_t seed, int level, const cf::Params& params) {
+    LiveStart start;
+    start.shape = "icosphere:" + std::to_string(std::clamp(level, 0, 8));
+    start.food = cf::StartFood::Random;
+    start.seed = seed;
+    start.params = params;
+    return start;
 }
 
 }  // namespace
@@ -80,7 +82,11 @@ LiveSim::LiveSim(Context& ctx, const LiveConfig& config) : ctx_(ctx), config_(co
         frontGpu_ = std::make_unique<CloudGpu>(ctx_);
     }
 
-    buildSimulation(config_.seed, config_.level, config_.params);
+    LiveStart first = icosphereStart(config_.seed, config_.level, config_.params);
+    if (!config_.shape.empty()) first.shape = config_.shape;
+    first.food = config_.food;
+    first.pauseAtStep = config_.pauseAtStep;
+    buildSimulation(first);
     running_ = config_.startRunning;
     status_.running = running_;
     thread_ = std::thread([this] { threadMain(); });
@@ -225,10 +231,11 @@ void LiveSim::setRenderNeeds(bool mesh, bool lightMap, bool motion) {
     }
 }
 
-void LiveSim::buildSimulation(std::uint64_t seed, int level, const cf::Params& params) {
-    cf::Params p = params;
+void LiveSim::buildSimulation(const LiveStart& from) {
+    cf::Params p = from.params;
     p.maxCells = capacity_;
-    cf::State start = makeStart(seed, level, p);
+    // (The same start as cf_run --new and cf_gpu --new for the same shape, seed, food and parameters.)
+    cf::State start = cf::make_start_state(from.shape, from.seed, p, from.food);
     std::unique_ptr<cf::Simulation> fresh;
     std::string name;
     if (config_.backend == LiveBackend::Cuda) {
@@ -254,7 +261,11 @@ void LiveSim::buildSimulation(std::uint64_t seed, int level, const cf::Params& p
     status_.step = sim_->step_count();
     status_.cells = sim_->cell_count();
     status_.params = p;
-    status_.seed = seed;
+    status_.seed = from.seed;
+    status_.shape = from.shape;
+    status_.food = from.food;
+    pauseAt_ = from.pauseAtStep > status_.step ? from.pauseAtStep : 0;
+    status_.pauseAt = pauseAt_;
     forcePublish_ = true;
 }
 
@@ -264,6 +275,7 @@ void LiveSim::setRunning(bool running) {
         running_ = running;
         if (running) stepsRequested_ = 0;
         status_.running = running;
+        if (running) status_.pausedAtStep = false;
     }
     wake_.notify_all();
 }
@@ -273,6 +285,7 @@ void LiveSim::stepOnce(int steps) {
         std::lock_guard<std::mutex> lock(mutex_);
         running_ = false;
         status_.running = false;
+        status_.pausedAtStep = false;
         stepsRequested_ += std::max(steps, 1);
     }
     wake_.notify_all();
@@ -288,17 +301,23 @@ void LiveSim::setParams(const cf::Params& params) {
     wake_.notify_all();
 }
 
-void LiveSim::restart(std::uint64_t seed, int level, const cf::Params& params) {
+void LiveSim::restart(std::uint64_t seed, int level, const cf::Params& params) { restart(icosphereStart(seed, level, params)); }
+
+void LiveSim::restart(const LiveStart& start) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         restartRequested_ = true;
-        restartSeed_ = seed;
-        restartLevel_ = level;
-        restartParams_ = params;
+        restartStart_ = start;
         haveNewParams_ = false;
         stepsRequested_ = 0;
     }
     wake_.notify_all();
+}
+
+void LiveSim::pauseAtStep(std::uint64_t step) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pauseAt_ = step > status_.step ? step : 0;
+    status_.pauseAt = pauseAt_;
 }
 
 void LiveSim::setStepsPerSecondLimit(double limit) {
@@ -515,9 +534,8 @@ void LiveSim::threadMain() {
     SteadyClock::time_point lastStep = SteadyClock::now();
     for (;;) {
         bool doStep = false, restart = false, haveParams = false;
-        std::uint64_t seed = 0;
-        int level = 0;
-        cf::Params restartParams, params;
+        LiveStart restartStart;
+        cf::Params params;
         double limit = 0.0;
         {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -528,9 +546,7 @@ void LiveSim::threadMain() {
             if (!busy()) wake_.wait_for(lock, std::chrono::milliseconds(20), busy);
             if (quit_) return;
             restart = restartRequested_;
-            seed = restartSeed_;
-            level = restartLevel_;
-            restartParams = restartParams_;
+            if (restart) restartStart = restartStart_;
             restartRequested_ = false;
             haveParams = haveNewParams_ && !restart;
             params = newParams_;
@@ -540,7 +556,7 @@ void LiveSim::threadMain() {
 
         if (restart) {
             try {
-                buildSimulation(seed, level, restartParams);
+                buildSimulation(restartStart);
                 emaMs = emaRate = 0.0;
             } catch (const std::exception& e) {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -561,11 +577,14 @@ void LiveSim::threadMain() {
             }
         }
 
-        std::uint64_t requested = 0;
+        std::uint64_t requested = 0, untilPause = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             doStep = (running_ || stepsRequested_ > 0) && !status_.failed && !status_.capacityReached;
             requested = static_cast<std::uint64_t>(stepsRequested_ > 0 ? stepsRequested_ : 0);
+            const std::uint64_t now = sim_->step_count();
+            if (pauseAt_ != 0 && pauseAt_ <= now) pauseAt_ = 0;  // (passed by a restart or a state that was further on)
+            untilPause = pauseAt_ != 0 ? pauseAt_ - now : 0;
         }
         if (doStep) {
             if (limit > 0.0) {
@@ -582,6 +601,7 @@ void LiveSim::threadMain() {
                 // rate limit and a count of requested steps are kept exactly.
                 cf::RunLimits lim;
                 lim.maxSteps = limit > 0.0 ? 1 : (requested > 0 ? requested : ~std::uint64_t{0});
+                if (untilPause > 0) lim.maxSteps = std::min(lim.maxSteps, untilPause);  // stops exactly there
                 lim.maxSeconds = 0.004;
                 applied = sim_->run(lim, [&](const cf::StepReport& each) {
                     r = each;
@@ -612,6 +632,15 @@ void LiveSim::threadMain() {
                 status_.clampedTotal += clamped;
                 const int taken = static_cast<int>(applied < requested ? applied : requested);
                 stepsRequested_ = stepsRequested_ > taken ? stepsRequested_ - taken : 0;
+            }
+            if (pauseAt_ != 0 && status_.step >= pauseAt_) {
+                // Paused at the step asked for; running again goes on past it.
+                running_ = false;
+                status_.running = false;
+                stepsRequested_ = 0;
+                pauseAt_ = 0;
+                status_.pauseAt = 0;
+                status_.pausedAtStep = true;
             }
             if (!r.ok()) {
                 status_.capacityReached = r.status == cf::StepStatus::CapacityReached;

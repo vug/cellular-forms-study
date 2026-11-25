@@ -356,7 +356,7 @@ def register(sub):
     p.add_argument("--assign", action="store_true", help="keep the kinds there are and place the forms that came since in the nearest one")
     p.set_defaults(run=cmd_kinds)
 
-    for name in ("search", "export", "serve", "webgallery"):
+    for name in ("search", "export", "serve", "webgallery", "nativegallery"):
         try:
             module = __import__("atlas." + name, fromlist=["register"])
         except ImportError:

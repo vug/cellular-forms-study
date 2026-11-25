@@ -339,6 +339,17 @@ public:
     FrameSetup makeUniforms(const OrbitCamera& camera, const RenderSettings& settings, Vec3 sceneCentre, float sceneRadius,
                             float currentStep, uint64_t frameIndex, float eyeOffset = 0.0f) const;
 
+    // One eye of a headset (OpenXR): `view` takes the world to the eye's space (a rigid motion;
+    // the eye looks down -Z with +Y up), and the frustum is given by the tangents of its four
+    // half-angles, as OpenXR's XrFovf gives them (left and down negative). The near and far
+    // planes are placed around the scene as for the orbit camera.
+    struct EyeView {
+        Mat4 view;
+        float tanLeft = -1.0f, tanRight = 1.0f, tanUp = 1.0f, tanDown = -1.0f;
+    };
+    FrameSetup makeUniforms(const EyeView& eye, const RenderSettings& settings, Vec3 sceneCentre, float sceneRadius, float currentStep,
+                            uint64_t frameIndex) const;
+
     // Where in the target the last pass draws, when it is not the whole of it (stereo).
     struct Region {
         VkRect2D rect{};
@@ -383,6 +394,10 @@ private:
         bool linear = false;
     };
 
+    // The uniform block for a view and projection (what both makeUniforms come down to).
+    // `focusDistance`: the distance the lens focus is set relative to.
+    FrameSetup uniformsFor(const Mat4& view, const Mat4& proj, float zNear, float zFar, float focusDistance, const RenderSettings& settings,
+                           Vec3 sceneCentre, float sceneRadius, float currentStep) const;
     void createPipelines();
     void destroyImages();
     void ensureShadowMap(uint32_t size);

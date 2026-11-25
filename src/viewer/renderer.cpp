@@ -941,8 +941,6 @@ void Renderer::syncEnvironment(const RenderSettings& settings) {
 
 FrameSetup Renderer::makeUniforms(const OrbitCamera& camera, const RenderSettings& s, Vec3 sceneCentre, float sceneRadius, float currentStep,
                                   uint64_t /*frameIndex*/, float eyeOffset) const {
-    FrameSetup frame{};
-    FrameUniforms& u = frame.uniforms;
     const float w = static_cast<float>(extent_.width), h = static_cast<float>(extent_.height);
     const float reach = sceneRadius * 2.5f + s.sphereRadius;
     const float zFar = camera.distance + reach;
@@ -957,6 +955,42 @@ FrameSetup Renderer::makeUniforms(const OrbitCamera& camera, const RenderSetting
         view.m[12] -= eyeOffset;
         proj.m[8] = -proj.m[0] * eyeOffset / std::max(camera.distance, 1.0e-6f);
     }
+    return uniformsFor(view, proj, zNear, zFar, camera.distance, s, sceneCentre, sceneRadius, currentStep);
+}
+
+FrameSetup Renderer::makeUniforms(const EyeView& eye, const RenderSettings& s, Vec3 sceneCentre, float sceneRadius, float currentStep,
+                                  uint64_t /*frameIndex*/) const {
+    // The near and far planes around the scene, as for the orbit camera, from the distance of
+    // the eye to the centre of the scene (the eye may be inside it).
+    const Mat4 invView = rigidInverse(eye.view);
+    const Vec3 eyePos{invView.m[12], invView.m[13], invView.m[14]};
+    const float distance = cf::length(sceneCentre - eyePos);
+    const float reach = sceneRadius * 2.5f + s.sphereRadius;
+    const float zFar = std::max(distance + reach, 1.0e-3f);
+    float zNear = distance - reach;
+    if (zNear < zFar * 2.0e-4f) zNear = zFar * 2.0e-4f;
+
+    // An off-centre frustum into Vulkan clip space (y down, depth 0 at the near plane and 1 at
+    // the far plane), the conventions of perspective().
+    const float l = eye.tanLeft, r = eye.tanRight, up = eye.tanUp, down = eye.tanDown;
+    const float width = std::max(r - l, 1.0e-6f), height = std::max(up - down, 1.0e-6f);
+    Mat4 proj;
+    for (float& x : proj.m) x = 0.0f;
+    proj.m[0] = 2.0f / width;
+    proj.m[8] = (r + l) / width;
+    proj.m[5] = -2.0f / height;
+    proj.m[9] = -(up + down) / height;
+    proj.m[10] = zFar / (zNear - zFar);
+    proj.m[11] = -1.0f;
+    proj.m[14] = zNear * zFar / (zNear - zFar);
+    return uniformsFor(eye.view, proj, zNear, zFar, distance, s, sceneCentre, sceneRadius, currentStep);
+}
+
+FrameSetup Renderer::uniformsFor(const Mat4& view, const Mat4& proj, float zNear, float zFar, float focusDistance, const RenderSettings& s,
+                                 Vec3 sceneCentre, float sceneRadius, float currentStep) const {
+    FrameSetup frame{};
+    FrameUniforms& u = frame.uniforms;
+    const float w = static_cast<float>(extent_.width), h = static_cast<float>(extent_.height);
     const Mat4 invView = rigidInverse(view);
     std::memcpy(u.view, view.m, sizeof u.view);
     std::memcpy(u.proj, proj.m, sizeof u.proj);
@@ -1030,7 +1064,7 @@ FrameSetup Renderer::makeUniforms(const OrbitCamera& camera, const RenderSetting
     u.pt[1] = std::max(s.ptClamp, 0.0f);
     u.pt[2] = s.ptWalk ? 1.0f : 0.0f;
     u.lens[0] = std::max(s.lensAperture, 0.0f);
-    u.lens[1] = std::max(s.lensFocus > 0.0f ? s.lensFocus : camera.distance + s.lensFocusShift * sceneRadius, zNear);
+    u.lens[1] = std::max(s.lensFocus > 0.0f ? s.lensFocus : focusDistance + s.lensFocusShift * sceneRadius, zNear);
     u.lens[2] = std::clamp(s.dofMaxBlur, 1.0f, 64.0f) * scale_;
     set3(u.baseColor, s.baseColor, s.exposure);
     set3(u.background, s.background, s.vignette);

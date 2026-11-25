@@ -22,6 +22,7 @@
 
 #include "core/io.hpp"
 #include "core/sim_cpu.hpp"
+#include "core/start.hpp"
 #include "core/stats.hpp"
 #include "core/topology.hpp"
 #include "sim_cuda.hpp"
@@ -36,7 +37,8 @@ void usage() {
         "cf_gpu: Cellular Forms batch runner (CUDA backend)\n"
         "\n"
         "Start from:\n"
-        "  --new icosphere:<level>   subdivided icosahedron, level 0..9\n"
+        "  --new <shape>             icosphere:<level> (level 0..9), ellipsoid:<level>:<ax>:<ay>:<az> or\n"
+        "                            noisy:<level>:<amplitude>:<frequency>, as cf_run --new\n"
         "  --load <file.cfs>         a checkpoint (for example <out>/latest.cfs)\n"
         "Parameters:\n"
         "  --seed <n>                random seed (default 1; ignored with --load)\n"
@@ -195,13 +197,15 @@ int main(int argc, char** argv) {
             }
         };
         if (fresh) {
-            const std::string prefix = "icosphere:";
-            if (opt.newSpec.rfind(prefix, 0) != 0) die("--new expects icosphere:<level>");
             cf::Params params;
             apply_overrides(params);
-            initial = cf::make_icosphere(static_cast<int>(to_u64("--new", opt.newSpec.substr(prefix.size()))), params);
-            initial.seed = opt.seed;
-            if (opt.initFood == "random") cf::randomise_initial_food(initial);
+            cf::StartFood food = cf::StartFood::Random;
+            cf::parse_start_food(opt.initFood, food);  // checked in parse()
+            try {
+                initial = cf::make_start_state(opt.newSpec, opt.seed, params, food);  // the same start as cf_run --new
+            } catch (const std::invalid_argument& e) {
+                die(std::string("--new: ") + e.what());
+            }
         } else {
             initial = cf::load_checkpoint(opt.loadPath);
             if (opt.seedGiven) die("--seed cannot be changed when resuming with --load");

@@ -10,3 +10,11 @@
 	path = external/stb
 	url = https://github.com/nothings/stb.git
 	shallow = true
+[submodule "external/openxr"]
+	path = external/openxr
+	url = https://github.com/KhronosGroup/OpenXR-SDK.git
+	shallow = true
+[submodule "external/json"]
+	path = external/json
+	url = https://github.com/nlohmann/json.git
+	shallow = true

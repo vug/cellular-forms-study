@@ -28,6 +28,7 @@ A few useful variations:
 | `cf_view.exe --live --mode mesh --material skin` | Live, drawn as a membrane with the skin material |
 | `cf_view.exe --live --mode pathmesh` | Live, path traced (needs a GPU with ray tracing) |
 | `cf_view.exe --live --level 3 --seed 5 --param foodMax=0.01` | Another start, seed and parameter |
+| `cf_view.exe --live --gallery 1530` | Form 1530 of the gallery grown again, pausing at the step it was pictured at; the G key opens the gallery to choose another |
 | `cf_view.exe --snapshot runs\m2_default_100k\latest.cfs --mode mesh` | A saved state |
 | `cf_view.exe --run runs\m2_default_100k --play` | A recorded run, played back |
 | `cf_view.exe --snapshot <file> --screenshot out.png` | A picture, without a window |
@@ -36,6 +37,15 @@ A few useful variations:
 In the window: drag with the left button to turn, with the right or middle button to move the
 view, wheel to zoom; the panel on the left has the simulation, drawing, material, light and
 output controls.
+
+### In a headset (OpenXR: Meta Quest through Link, SteamVR)
+
+    build\release\bin\cf_vr.exe
+
+grows gallery form 5031 in front of you (`--gallery <id>` for another, `--mirror` to see the
+left eye on the desktop, `--help` for the rest). Start Link (or SteamVR) first. Grip holds the
+form (both grips also scale it), A runs or pauses, B starts it again, Y or the menu button opens
+the menu, where the trigger clicks; its Gallery tab grows any form of the atlas.
 
 ### The viewer in a browser (WebGPU)
 
@@ -51,7 +61,9 @@ for developers and needs data that is not in that folder.)
     python scripts\atlas serve
 
 then open http://localhost:8765 . `python scripts\atlas --help` lists what else it does (survey,
-kinds, early stop, searches, the web gallery). On a phone the atlas is the private page
+kinds, early stop, searches, the web gallery). `python scripts\atlas native-gallery` writes
+`runs\atlas\gallery\gallery.json`, the gallery of every form that the viewer's Gallery window shows (without it, the
+viewer shows the web app's smaller gallery). On a phone the atlas is the private page
 https://claude.ai/artifact/XQTS7vQHE4qMZv6HhtjKvG .
 
 ### Growing forms without a window

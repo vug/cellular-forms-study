@@ -59,6 +59,12 @@ struct ViewOptions {
     // Scripted run of the live controls (parameter changes, pause, single steps, restart) for
     // unattended testing; needs exitAfterFrames. The exit code is non-zero if anything broke.
     bool liveSelfTest = false;
+    // The gallery of forms grown before (gallery.hpp), in live mode: start with form `galleryId`
+    // (its start, seed and parameters, pausing at the step it was pictured at), read from
+    // `galleryFile` (empty: the default), and show the gallery window from the start.
+    int galleryId = 0;
+    std::filesystem::path galleryFile;
+    bool showGallery = false;
 };
 
 // Renders the requested frame(s) offscreen and writes PNG files. Returns a process exit code.

@@ -11,16 +11,24 @@ namespace {
 
 std::atomic<uint32_t> g_validationErrors{0};
 std::atomic<uint32_t> g_validationWarnings{0};
+std::atomic<uint32_t> g_scopedErrors{0};
+thread_local const char* t_scope = nullptr;  // Context::setValidationScope
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                                              VkDebugUtilsMessageTypeFlagsEXT,
                                              const VkDebugUtilsMessengerCallbackDataEXT* data, void*) {
     if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
         ++g_validationErrors;
-        std::fprintf(stderr, "[vulkan error] %s\n", data->pMessage);
+        if (t_scope != nullptr) {
+            ++g_scopedErrors;
+            std::fprintf(stderr, "[vulkan error, inside %s] %s\n", t_scope, data->pMessage);
+        } else {
+            std::fprintf(stderr, "[vulkan error] %s\n", data->pMessage);
+        }
     } else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
         ++g_validationWarnings;
-        std::fprintf(stderr, "[vulkan warning] %s\n", data->pMessage);
+        if (t_scope != nullptr) std::fprintf(stderr, "[vulkan warning, inside %s] %s\n", t_scope, data->pMessage);
+        else std::fprintf(stderr, "[vulkan warning] %s\n", data->pMessage);
     }
     return VK_FALSE;
 }
@@ -78,7 +86,8 @@ Context::Context(const ContextDesc& desc) : desc_(desc) {
     features.pEnabledValidationFeatures = syncChecks;
     features.pNext = &dbg;
     if (desc.validation) ci.pNext = std::getenv("CF_VK_SYNC") != nullptr ? static_cast<const void*>(&features) : static_cast<const void*>(&dbg);
-    vk_check(vkCreateInstance(&ci, nullptr, &instance), "vkCreateInstance");
+    if (desc.createInstance) vk_check(desc.createInstance(ci, instance), "vkCreateInstance (by the host)");
+    else vk_check(vkCreateInstance(&ci, nullptr, &instance), "vkCreateInstance");
 
     if (desc.validation) {
         auto create = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
@@ -103,6 +112,8 @@ Context::~Context() {
 
 uint32_t Context::validationErrorCount() const { return g_validationErrors.load(); }
 uint32_t Context::validationWarningCount() const { return g_validationWarnings.load(); }
+uint32_t Context::validationErrorsInScopes() const { return g_scopedErrors.load(); }
+void Context::setValidationScope(const char* name) { t_scope = name; }
 
 void Context::createDevice(VkSurfaceKHR surface) {
     uint32_t count = 0;
@@ -110,6 +121,12 @@ void Context::createDevice(VkSurfaceKHR surface) {
     std::vector<VkPhysicalDevice> gpus(count);
     vk_check(vkEnumeratePhysicalDevices(instance, &count, gpus.data()), "vkEnumeratePhysicalDevices");
     if (gpus.empty()) throw VulkanError("no Vulkan device found");
+    if (desc_.chooseGpu) {
+        // The host names the GPU (an OpenXR runtime: the one the headset is driven by).
+        const VkPhysicalDevice named = desc_.chooseGpu(instance);
+        if (named == VK_NULL_HANDLE) throw VulkanError("the host did not name a GPU");
+        gpus.assign(1, named);
+    }
 
     // Prefer a discrete GPU that supports Vulkan 1.4 and has a graphics queue (that can present
     // to the surface, when there is one).
@@ -250,7 +267,8 @@ void Context::createDevice(VkSurfaceKHR surface) {
     ci.pQueueCreateInfos = queues.data();
     ci.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
     ci.ppEnabledExtensionNames = extensions.data();
-    vk_check(vkCreateDevice(gpu, &ci, nullptr, &device), "vkCreateDevice");
+    if (desc_.createDevice) vk_check(desc_.createDevice(gpu, ci, device), "vkCreateDevice (by the host)");
+    else vk_check(vkCreateDevice(gpu, &ci, nullptr, &device), "vkCreateDevice");
 
     vkGetDeviceQueue(device, queueFamily, 0, &queue);
     if (computeFamily != UINT32_MAX) vkGetDeviceQueue(device, computeFamily, 0, &computeQueue);

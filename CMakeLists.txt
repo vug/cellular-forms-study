@@ -11,6 +11,7 @@ project(cellular_forms VERSION 0.1.0 LANGUAGES CXX)
 #   cf_export  PLY export for Blender                                          (apps/cf_export)
 #   cf_cuda    CUDA backend                                                    (src/cuda)
 #   cf_view    Vulkan 1.4 viewer                                               (src/viewer, apps/cf_view)
+#   cf_vr      the live form in a headset, through OpenXR                      (src/vr, apps/cf_vr)
 # Host code is C++23. CUDA sources are C++20: nvcc 13.5 has no C++23 mode with MSVC
 # (docs/progress/PROGRESS.md, toolchain entry).
 # ---------------------------------------------------------------------------------------------
@@ -29,6 +30,7 @@ endif()
 option(CF_BUILD_TESTS "Build the tests" ON)
 option(CF_BUILD_CUDA "Build the CUDA backend (needs nvcc)" ON)
 option(CF_BUILD_VIEWER "Build the Vulkan viewer (needs the Vulkan SDK)" ON)
+option(CF_BUILD_VR "Build cf_vr, the live form in a headset through OpenXR (needs the viewer)" ON)
 # Experiments for the speed investigation (docs/progress/PROGRESS.md). Both change results, so
 # neither belongs in a normal build: tests that compare against recorded checksums or against
 # the CPU reference fail with them.
@@ -116,6 +118,9 @@ if(CF_BUILD_VIEWER AND EXISTS ${CMAKE_SOURCE_DIR}/src/viewer/CMakeLists.txt)
     add_subdirectory(src/viewer)
     if(EXISTS ${CMAKE_SOURCE_DIR}/src/vkcompute/CMakeLists.txt)
       add_subdirectory(src/vkcompute)  # Vulkan compute backend (M9)
+    endif()
+    if(CF_BUILD_VR AND TARGET openxr_loader AND EXISTS ${CMAKE_SOURCE_DIR}/src/vr/CMakeLists.txt)
+      add_subdirectory(src/vr)  # cf_vr: OpenXR headsets
     endif()
   else()
     message(STATUS "Vulkan SDK, glslc or the external/ submodules not found: the viewer is skipped")

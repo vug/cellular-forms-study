@@ -14,6 +14,7 @@
 
 #include "core/io.hpp"
 #include "core/sim_cpu.hpp"
+#include "core/start.hpp"
 #include "core/stats.hpp"
 #include "core/topology.hpp"
 
@@ -186,16 +187,6 @@ int main(int argc, char** argv) {
         cf::State initial;
         const bool fresh = !opt.newSpec.empty();
         if (fresh) {
-            std::vector<std::string> spec;
-            {
-                std::stringstream ss(opt.newSpec);
-                std::string part;
-                while (std::getline(ss, part, ':')) spec.push_back(part);
-            }
-            const bool isIco = spec.size() == 2 && spec[0] == "icosphere";
-            const bool isEllipsoid = spec.size() == 5 && spec[0] == "ellipsoid";
-            const bool isNoisy = spec.size() == 4 && spec[0] == "noisy";
-            if (!isIco && !isEllipsoid && !isNoisy) die("--new expects icosphere:<level>, ellipsoid:<level>:<ax>:<ay>:<az> or noisy:<level>:<amplitude>:<frequency>");
             cf::Params params;
             if (!opt.paramsFile.empty()) {
                 const std::vector<char> text = cf::read_file(opt.paramsFile);
@@ -206,14 +197,13 @@ int main(int argc, char** argv) {
                 const std::string err = cf::apply_text(params, kv);
                 if (!err.empty()) die("--param: " + err);
             }
-            const int level = static_cast<int>(to_u64("--new", spec[1]));
-            if (isIco) initial = cf::make_icosphere(level, params);
-            else if (isEllipsoid)
-                initial = cf::make_ellipsoid(level, params, static_cast<float>(to_double("--new", spec[2])), static_cast<float>(to_double("--new", spec[3])),
-                                             static_cast<float>(to_double("--new", spec[4])));
-            else initial = cf::make_noisy_sphere(level, params, static_cast<float>(to_double("--new", spec[2])), static_cast<float>(to_double("--new", spec[3])), opt.seed);
-            initial.seed = opt.seed;
-            if (opt.initFood == "random") cf::randomise_initial_food(initial);
+            cf::StartFood food = cf::StartFood::Random;
+            cf::parse_start_food(opt.initFood, food);  // checked in parse()
+            try {
+                initial = cf::make_start_state(opt.newSpec, opt.seed, params, food);
+            } catch (const std::invalid_argument& e) {
+                die(std::string("--new: ") + e.what());
+            }
         } else {
             initial = cf::load_checkpoint(opt.loadPath);
             if (opt.seedGiven) die("--seed cannot be changed when resuming with --load");

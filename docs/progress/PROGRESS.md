@@ -2394,3 +2394,80 @@ agent switch to the simulation's final interface.
 **Images** in `docs/progress/img/`: `w1_web_app_gallery_form_505_skin.jpg` (gallery form 505
 grown in the page, membrane, skin), `w2_web_app_gallery.jpg`,
 `w3_web_app_gallery_form_2822_jade.jpg`.
+
+## 2026-11-24 21:55 · Local session: cf_vr, the live form in a headset (OpenXR)
+
+**What was built**
+
+- `cf_vr.exe` (`src/vr`, `apps/cf_vr`): a live growing form in an OpenXR headset (Meta Quest
+  through Link here; any PC runtime such as SteamVR should do). The OpenXR SDK is a submodule,
+  `external/openxr` at `release-1.1.65` (latest tag on GitHub), built as the static loader only.
+- Vulkan through `XR_KHR_vulkan_enable2`: `ContextDesc` got three optional hooks (create the
+  instance, choose the GPU, create the device) that cf_vr points at the runtime; empty, nothing
+  changes. The device create info handed to the Meta runtime asks for the 1.2 features in their
+  own structures (the runtime appends a timeline-semaphore structure that may not stand next to
+  `VkPhysicalDeviceVulkan12Features`) and switches on `shaderStorageImageMultisample` (its
+  compositor's shaders declare it). CUDA interop works on the device the runtime chose.
+- `Renderer::makeUniforms(EyeView, ...)`: an eye with a view matrix and an off-centre frustum
+  (XrFovf tangents), the renderer's own depth and clip conventions; the old makeUniforms now
+  goes through the same code (headless captures byte-identical before and after).
+- One renderer per eye draws into a UNORM image, copied bit for bit into an sRGB swapchain
+  image (the compositor reads it as encoded colour, as the desktop screen does). The form sits
+  1 m in front of the head, 10 cm below the eyes, 40 cm across while it grows; the key light is
+  a sun fixed in the room. Grip moves and turns it, both grips scale it, A runs or pauses, B
+  restarts, Y or the menu button opens the menu. Pointer rays are drawn into each eye.
+- The menu: Dear ImGui (its own context, Vulkan backend only) in a 1024 x 1152 image shown as
+  an OpenXR quad layer; the aim ray is the mouse, the trigger the button, the thumbstick the
+  wheel. Tabs: Form (status, run/pause/restart/new seed, draw mode, material, colour, shadows,
+  occlusion, render scale, five parameters, the step budget) and Gallery (the atlas gallery
+  panel of `src/viewer/gallery.*`; a click grows that form with `LiveSim::restart(LiveStart)`,
+  pausing at the step it was pictured at).
+- The simulation's share of the GPU: a steps-per-second limit, tuned every half second
+  (down when frames are missed or the GPU time nears the display period, up when there is
+  room), or set by hand in the menu.
+- No headset or no runtime: a message and exit code 2; session states idle, ready, focused,
+  stopping, exiting and loss pending are handled; Ctrl+C ends the session in order.
+- Once, the runtime returned from `xrWaitFrame` at once for a whole run with nothing to show
+  (0.05 ms per frame; most likely the headset off the head). Such frames now wait out the
+  display period and are left out of the frame-time statistics (counted apart).
+
+**Verified, and how**
+
+- Quest 3 through Link (runtime "Oculus 1.210.0"), RTX 4090, 72 Hz (13.89 ms). Eye images
+  2064 x 2272. `cf_vr --exit-after` runs on forms 5031 and 5178 (the fastest-growing gallery
+  form, to reach a million cells), membrane with two segments per edge, occlusion on: frame
+  interval p50 13.89 ms and p99 14.0 to 14.2 ms in every cell range up to 1M; missed frames
+  only in the first seconds (1 to 3 per run, start-up). GPU time of both eyes: about 1 ms
+  below 50k cells, 2 to 2.5 ms at 100k-250k, 4 ms at 250k-1M (p99 8 to 10 ms while the
+  simulation runs beside it). Cells drawn as spheres: 2.4 ms at 500k-1M. With shadows on
+  (a shadow map per eye): 6.6 ms at 500k-1M. Someone was using the controllers during these
+  runs (the log shows menu, restart and pause presses), so the forms and settings were not
+  only the ones started.
+- `cf_vr --validate`: 0 errors in cf_vr's own calls, also with `CF_VK_SYNC=1`. The layer reports
+  "command buffer already in use" for the runtime's own `vkQueueSubmit` inside `xrBeginFrame` and
+  `xrEndFrame` (10 reports, then the layer's duplicate limit); `Context::setValidationScope`
+  labels and counts these apart. They are the runtime's command buffers, not ours.
+- `cf_view --live --validate --exit-after 300` and headless `--screenshot --validate` (cells and
+  membrane) before and after, also with `CF_VK_SYNC=1`: 0 errors; the screenshots are
+  byte-identical to the ones made before the change. `cf_tests` 66/66, `cf_cuda_tests` 34/34.
+- The menu image was saved once with a temporary capture (removed again): both tabs, the
+  gallery's pictures and the controller's cursor on it. The mirror window shows the left eye.
+- `XR_RUNTIME_JSON` pointed at a missing file (this process only): the message and exit code 2.
+
+**Not verified, and limits**
+
+- What the headset shows was not seen by me: only the mirror window (the left eye, no menu
+  layer) and the menu image. Grab, two-hand scale and the menu clicks were exercised by
+  whoever wore the headset, not checked against what they should do.
+- No other runtime (SteamVR) or controller tried; the bindings for Index, Vive, Windows Mixed
+  Reality and the simple controller are suggested but untested. 90 and 120 Hz not tried (the
+  headset ran at 72 Hz; cf_vr does not change it).
+- "No headset" with the runtime present (Link off) was not produced: the headset stayed
+  connected all session.
+- The sky and ground light turn with the form (they are in the form's space); the sun does not.
+  The menu is a quad layer over the scene, so it shows in front of the form even where the form
+  is nearer.
+
+**Images** in `docs/progress/img/`: `vr1_menu_gallery.jpg` (the menu's Gallery tab, as drawn
+into the quad layer), `vr2_menu_form.jpg` (the Form tab), `vr3_mirror_left_eye.jpg` (the mirror
+window: the form and both pointer rays).

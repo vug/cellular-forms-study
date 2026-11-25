@@ -2458,7 +2458,9 @@ grown in the page, membrane, skin), `w2_web_app_gallery.jpg`,
 
 - What the headset shows was not seen by me: only the mirror window (the left eye, no menu
   layer) and the menu image. Grab, two-hand scale and the menu clicks were exercised by
-  whoever wore the headset, not checked against what they should do.
+  whoever wore the headset, not checked against what they should do. Uğur, who wore it,
+  reported on Nov 24 that cf_vr ran fine in the headset over Link; no details on the size,
+  the controls or the menu yet.
 - No other runtime (SteamVR) or controller tried; the bindings for Index, Vive, Windows Mixed
   Reality and the simple controller are suggested but untested. 90 and 120 Hz not tried (the
   headset ran at 72 Hz; cf_vr does not change it).
